@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+out/
+CMakeUserPresets.json
+*.pdb
+*.ilk
+
+# Local benchmark/reference corpora are large and may carry upstream licenses.
+/data/
+/papers/

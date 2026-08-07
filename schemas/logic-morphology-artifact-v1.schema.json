@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prolog-tsetlin-machine.invalid/schemas/logic-morphology-artifact-v1.schema.json",
+  "title": "PTM Class II Logic Morphology Artifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_kind",
+    "artifact_id",
+    "mapping_version",
+    "behavior_domain",
+    "operation",
+    "parent_program_ids",
+    "parent_signatures",
+    "child_program_id",
+    "child_signature",
+    "changed_assignments",
+    "child_instruction_count",
+    "shared_instruction_savings",
+    "counterexample",
+    "validation",
+    "restoration_program_ids"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "artifact_kind": { "const": "class_ii_logic_morphology" },
+    "artifact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "mapping_version": { "type": "string", "minLength": 1 },
+    "behavior_domain": {
+      "const": {
+        "variables": ["A", "B", "C", "D", "E"],
+        "assignment_count": 32,
+        "bit_order": "A_lsb_through_E_msb"
+      }
+    },
+    "operation": {
+      "enum": [
+        "noop",
+        "specialize",
+        "generalize",
+        "patch_false",
+        "patch_true",
+        "conditional_compose",
+        "equivalence_merge"
+      ]
+    },
+    "parent_program_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+    },
+    "parent_signatures": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "pattern": "^0x[0-9a-f]{8}$" }
+    },
+    "child_program_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "child_signature": { "type": "string", "pattern": "^0x[0-9a-f]{8}$" },
+    "changed_assignments": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 0, "maximum": 31 }
+    },
+    "child_instruction_count": { "type": "integer", "minimum": 1, "maximum": 32 },
+    "shared_instruction_savings": { "type": "integer" },
+    "counterexample": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["assignment", "expected"],
+          "properties": {
+            "assignment": { "type": "integer", "minimum": 0, "maximum": 31 },
+            "expected": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "validation": {
+      "const": {
+        "exhaustive_assignment_count": 32,
+        "mismatch_count": 0
+      }
+    },
+    "restoration_program_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+    }
+  }
+}

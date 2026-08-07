@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prolog-tsetlin-machine.invalid/schemas/logic-evaluator-artifact-v1.schema.json",
+  "title": "PTM Class II Logic Evaluator Artifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_kind",
+    "artifact_id",
+    "mapping_version",
+    "input_shape",
+    "port_semantic",
+    "slot_bindings",
+    "kernel",
+    "validation_signature",
+    "restoration_handle"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "artifact_kind": { "const": "class_ii_logic_evaluator" },
+    "artifact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "mapping_version": { "type": "string", "minLength": 1 },
+    "input_shape": { "const": "32x32" },
+    "port_semantic": { "const": "literal_truth" },
+    "slot_bindings": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slot",
+          "source_kind",
+          "source_id",
+          "provenance_literal_ids"
+        ],
+        "properties": {
+          "slot": { "type": "integer", "minimum": 0, "maximum": 4 },
+          "source_kind": { "const": "literal" },
+          "source_id": { "type": "string", "pattern": "^logic_binding:[A-E]$" },
+          "provenance_literal_ids": { "const": [] }
+        }
+      }
+    },
+    "kernel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kernel_kind",
+        "program_capacity",
+        "binding_variables",
+        "opcodes",
+        "logic_ast_schema_version",
+        "primitive_logic_schema_version"
+      ],
+      "properties": {
+        "kernel_kind": { "const": "logic_program_32_v1" },
+        "program_capacity": { "const": 32 },
+        "binding_variables": { "const": ["A", "B", "C", "D", "E"] },
+        "opcodes": {
+          "const": {
+            "constant": 0,
+            "input": 1,
+            "not": 2,
+            "and": 3,
+            "or": 4,
+            "xor": 5
+          }
+        },
+        "logic_ast_schema_version": { "const": 1 },
+        "primitive_logic_schema_version": { "const": 1 }
+      }
+    },
+    "validation_signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataset_digest", "example_count", "mismatch_count"],
+      "properties": {
+        "dataset_digest": { "type": "string", "minLength": 1 },
+        "example_count": { "type": "integer", "minimum": 1 },
+        "mismatch_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "restoration_handle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_schema_version", "snapshot_id"],
+      "properties": {
+        "snapshot_schema_version": { "type": "integer", "minimum": 1 },
+        "snapshot_id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

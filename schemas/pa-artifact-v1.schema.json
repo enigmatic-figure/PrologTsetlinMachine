@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prolog-tsetlin-machine.local/schemas/pa-artifact-v1.schema.json",
+  "title": "PTM Class II PA artifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "artifact_kind",
+    "input_shape",
+    "port_semantic",
+    "mapping_version",
+    "slot_bindings",
+    "payload",
+    "validation_signature",
+    "restoration_handle"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifact_kind": { "const": "class_ii_kernel" },
+    "input_shape": { "enum": ["32x32", "64x64"] },
+    "port_semantic": {
+      "enum": ["literal_truth", "ta_action", "literal_condition", "clause_output"]
+    },
+    "mapping_version": { "type": "string", "minLength": 1 },
+    "slot_bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slot", "source_kind", "source_id", "provenance_literal_ids"],
+        "properties": {
+          "slot": { "type": "integer", "minimum": 0, "maximum": 4095 },
+          "source_kind": {
+            "enum": ["literal", "ta", "literal_condition", "clause", "artifact_output"]
+          },
+          "source_id": { "type": "string", "minLength": 1 },
+          "provenance_literal_ids": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[0-9]+$" },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kernel_kind", "selected_slots", "minimum_true"],
+      "properties": {
+        "kernel_kind": { "const": "masked_threshold_v1" },
+        "selected_slots": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 4095 },
+          "uniqueItems": true
+        },
+        "minimum_true": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "validation_signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataset_digest", "example_count", "mismatch_count"],
+      "properties": {
+        "dataset_digest": { "type": "string", "minLength": 1 },
+        "example_count": { "type": "integer", "minimum": 1 },
+        "mismatch_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "restoration_handle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_schema_version", "snapshot_id"],
+      "properties": {
+        "snapshot_schema_version": { "type": "integer", "minimum": 1 },
+        "snapshot_id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
