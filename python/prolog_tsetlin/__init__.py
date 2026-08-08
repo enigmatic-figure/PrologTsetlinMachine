@@ -9,6 +9,23 @@ from .artifact import (
     SourceKind,
     ValidationSignature,
 )
+from .feature_templates import (
+    ClauseConfiguration,
+    TAClauseConfiguration,
+    DataType,
+    SensorType,
+    FeatureTemplate,
+    NumericThresholdTemplate,
+    NumericRangeTemplate,
+    CategoricalTemplate,
+    SensorDataTemplate,
+    TextTokenTemplate,
+    TemplateRegistry,
+    analyze_clause_configuration,
+    create_feature_template_catalog,
+    export_template_schema,
+    load_template_from_dict,
+)
 from .fredkin import FredkinResult, fredkin_gate, fredkin_literal_condition
 from .logic_ast import (
     LogicASTFact,
@@ -112,6 +129,7 @@ from .representation import (
 )
 
 __all__ = [
+    "ClauseConfiguration",
     "CollisionReport",
     "EncodedLogicRows",
     "EncodedLogicSplit",
@@ -169,8 +187,8 @@ __all__ = [
     "NativeLogicProgramBatch",
     "NativePackedTsetlinMachine",
     "NativeRuntimeError",
-    "NullPolicy",
     "NoThresholdSolution",
+    "NullPolicy",
     "PAResult",
     "PAArtifact",
     "PackedTMResult64",
@@ -187,6 +205,17 @@ __all__ = [
     "RepresentationBatch",
     "RestorationHandle",
     "ScalarBinaryTsetlinMachine",
+    "SensorType",
+    "DataType",
+    "FeatureTemplate",
+    "NumericThresholdTemplate",
+    "NumericRangeTemplate",
+    "CategoricalTemplate",
+    "SensorDataTemplate",
+    "TextTokenTemplate",
+    "TemplateRegistry",
+    "TAClauseConfiguration",
+    "ClauseConfiguration",
     "TMSnapshot",
     "ThresholdSearchProblem",
     "ThresholdSearchResult",
@@ -210,4 +239,8 @@ __all__ = [
     "load_model_artifact_from_bytes",
     "parse_logic_tokens",
     "stratified_logic_split",
+    "analyze_clause_configuration",
+    "create_feature_template_catalog",
+    "export_template_schema",
+    "load_template_from_dict",
 ]
