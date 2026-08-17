@@ -10,7 +10,9 @@ from ..services.training import TrainingRequest, TrainingRun
 
 class JobState(str, Enum):
     IDLE = "idle"
+    QUEUED = "queued"
     RUNNING = "running"
+    CANCELLING = "cancelling"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"

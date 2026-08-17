@@ -1,9 +1,11 @@
 # Textual TUI product and implementation plan
 
 Status: implementation started. The initial vertical slice adds a shared XOR
-training service and an optional Textual Overview/Train surface; the remaining
-phases below continue to describe planned work. Textual remains outside runtime
-contracts and inference hot paths.
+training service and an optional Textual Overview/Train surface. Training can
+now be cancelled at epoch boundaries and completed runs expose a keyboard-
+accessible clause snapshot table; the remaining phases below continue to
+describe planned work. Textual remains outside runtime contracts and inference
+hot paths.
 
 ## Executive direction
 
