@@ -9,9 +9,14 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.events import Resize
-from textual.widgets import DataTable, Footer, Header, Label, Log, Static
+from textual.widgets import DataTable, Footer, Header, Input, Label, Log, Static
 
-from ..services.training import TrainingCancelled, TrainingProgress, train_xor
+from ..services.training import (
+    TrainingCancelled,
+    TrainingProgress,
+    TrainingRequest,
+    train_xor,
+)
 from .models import JobState, SessionState
 
 
@@ -23,6 +28,9 @@ class PTMApp(App[None]):
     #workspace-bar { height: 3; padding: 1 2; background: $panel; }
     #content { height: 1fr; padding: 1 2; }
     #summary { width: 1fr; border: solid $primary; padding: 1 2; }
+    .field-label { margin-top: 1; }
+    Input { height: 3; }
+    #validation { color: $error; min-height: 1; }
     #predictions { width: 2fr; border: solid $primary; }
     #clauses { width: 2fr; border: solid $primary; }
     #events { height: 7; border-top: solid $primary; }
@@ -54,7 +62,20 @@ class PTMApp(App[None]):
         with Horizontal(id="content"):
             with VerticalScroll(id="summary"):
                 yield Static("READY", id="job", classes="status")
-                yield Static("Built-in XOR · seed 7 · 20 clauses · 150 epochs", id="config")
+                yield Static("Built-in XOR training configuration", id="config")
+                yield Label("Clauses", classes="field-label")
+                yield Input(id="config-clauses", type="integer")
+                yield Label("States per action", classes="field-label")
+                yield Input(id="config-states", type="integer")
+                yield Label("Specificity (> 1)", classes="field-label")
+                yield Input(id="config-specificity", type="number")
+                yield Label("Threshold", classes="field-label")
+                yield Input(id="config-threshold", type="integer")
+                yield Label("Epochs", classes="field-label")
+                yield Input(id="config-epochs", type="integer")
+                yield Label("Seed", classes="field-label")
+                yield Input(id="config-seed", type="integer")
+                yield Static("", id="validation")
                 yield Static("Press t to train the deterministic scalar oracle.", id="next-action")
             yield DataTable(id="predictions", zebra_stripes=True)
             yield DataTable(id="clauses", zebra_stripes=True, classes="hidden")
@@ -62,11 +83,33 @@ class PTMApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        request = self.session.request
+        values = {
+            "#config-clauses": request.number_of_clauses,
+            "#config-states": request.states_per_action,
+            "#config-specificity": request.specificity,
+            "#config-threshold": request.threshold,
+            "#config-epochs": request.epochs,
+            "#config-seed": request.seed,
+        }
+        for selector, value in values.items():
+            self.query_one(selector, Input).value = str(value)
         table = self.query_one("#predictions", DataTable)
         table.add_columns("x0", "x1", "target", "prediction", "status")
         clauses = self.query_one("#clauses", DataTable)
         clauses.add_columns("clause", "polarity", "included", "literals")
         self.query_one("#events", Log).write_line("INFO session ready; Try XOR is selected")
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if not event.input.id or not event.input.id.startswith("config-"):
+            return
+        self.session.configuration_dirty = True
+        self.query_one("#validation", Static).update("")
+        if self.session.run is not None and self.session.job_state is JobState.SUCCEEDED:
+            self.query_one("#job", Static).update("SUCCEEDED · STALE CONFIGURATION")
+            self.query_one("#next-action", Static).update(
+                "Press t to train with the new configuration."
+            )
 
     def on_resize(self, event: Resize) -> None:
         self.screen.set_class(event.size.width < 80 or event.size.height < 24, "compact")
@@ -81,11 +124,46 @@ class PTMApp(App[None]):
             JobState.CANCELLING,
         ):
             return
+        try:
+            request = self._request_from_form()
+            request.validate()
+        except ValueError as error:
+            message = str(error)
+            self.session.error = message
+            self.query_one("#validation", Static).update(message)
+            self.query_one("#events", Log).write_line(f"ERROR configuration: {message}")
+            return
+        self.session.request = request
+        self.session.configuration_dirty = False
+        self.session.error = None
+        self.query_one("#validation", Static).update("")
         self._cancel = Event()
         self.session.job_state = JobState.QUEUED
         self.query_one("#job", Static).update("QUEUED")
         self.query_one("#events", Log).write_line("INFO training queued")
         self._train_worker()
+
+    def _request_from_form(self) -> TrainingRequest:
+        def integer(selector: str, label: str) -> int:
+            value = self.query_one(selector, Input).value.strip()
+            try:
+                return int(value)
+            except ValueError as error:
+                raise ValueError(f"{label} must be a whole number") from error
+
+        value = self.query_one("#config-specificity", Input).value.strip()
+        try:
+            specificity = float(value)
+        except ValueError as error:
+            raise ValueError("specificity must be a number") from error
+        return TrainingRequest(
+            number_of_clauses=integer("#config-clauses", "clauses"),
+            states_per_action=integer("#config-states", "states per action"),
+            specificity=specificity,
+            threshold=integer("#config-threshold", "threshold"),
+            epochs=integer("#config-epochs", "epochs"),
+            seed=integer("#config-seed", "seed"),
+        )
 
     def action_cancel(self) -> None:
         if self.session.job_state not in (JobState.QUEUED, JobState.RUNNING):
@@ -146,6 +224,9 @@ class PTMApp(App[None]):
         self.session.run = result
         self.session.job_state = JobState.SUCCEEDED
         self.query_one("#job", Static).update(f"SUCCEEDED · accuracy {result.accuracy:.0%}")
+        self.query_one("#next-action", Static).update(
+            "Press c to inspect the learned clause snapshot."
+        )
         table = self.query_one("#predictions", DataTable)
         table.clear()
         for row, target, prediction in zip(result.rows, result.targets, result.predictions):

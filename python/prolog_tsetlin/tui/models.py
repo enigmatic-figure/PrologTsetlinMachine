@@ -25,3 +25,4 @@ class SessionState:
     job_state: JobState = JobState.IDLE
     run: TrainingRun | None = None
     error: str | None = None
+    configuration_dirty: bool = False

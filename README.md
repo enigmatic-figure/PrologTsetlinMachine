@@ -3,15 +3,17 @@
 ## Terminal workbench (preview)
 
 The optional keyboard-first workbench currently provides the built-in XOR
-training vertical slice, including live progress, predictions, and a structured
-event dock. Install and launch it with:
+training vertical slice, including editable validated hyperparameters, live
+progress, predictions, clause snapshots, and a structured event dock. Install
+and launch it with:
 
 ```bash
 python -m pip install -e '.[tui]'
 ptm tui --demo xor
 ```
 
-Press `t` to train, `Ctrl+L` to collapse the event dock, and `q` to quit. The
+Edit the training fields and press `t` to train, press `c` to inspect clauses,
+`Ctrl+L` to collapse the event dock, and `q` to quit. The
 core Python package and existing `ptm` export commands do not require Textual;
 invoking `ptm tui` without the extra prints an installation hint.
 
