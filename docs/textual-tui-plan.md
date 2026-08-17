@@ -1,7 +1,9 @@
 # Textual TUI product and implementation plan
 
-Status: proposed. This document describes a user-facing direction; it does not
-change the runtime contracts or put Textual in an inference hot path.
+Status: implementation started. The initial vertical slice adds a shared XOR
+training service and an optional Textual Overview/Train surface; the remaining
+phases below continue to describe planned work. Textual remains outside runtime
+contracts and inference hot paths.
 
 ## Executive direction
 

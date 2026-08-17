@@ -9,8 +9,12 @@ description = "Hybrid Tsetlin, Fredkin, and bounded-Prolog research runtime"
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+tui = ["textual>=8.2,<9"]
+
 [project.scripts]
 ptm = "prolog_tsetlin.cli:main"
+ptm-tui = "prolog_tsetlin.tui:main"
 
 [tool.setuptools]
 package-dir = {"" = "python"}

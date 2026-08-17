@@ -1,5 +1,20 @@
 # Prolog Tsetlin Machine
 
+## Terminal workbench (preview)
+
+The optional keyboard-first workbench currently provides the built-in XOR
+training vertical slice, including live progress, predictions, and a structured
+event dock. Install and launch it with:
+
+```bash
+python -m pip install -e '.[tui]'
+ptm tui --demo xor
+```
+
+Press `t` to train, `Ctrl+L` to collapse the event dock, and `q` to quit. The
+core Python package and existing `ptm` export commands do not require Textual;
+invoking `ptm tui` without the extra prints an installation hint.
+
 Prolog Tsetlin Machine (PTM) is an experimental hybrid learning runtime. It
 combines recyclable Tsetlin-automata populations, reversible Fredkin data
 paths, provenance-preserving feature representation, and bounded Prolog
