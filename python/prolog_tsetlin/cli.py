@@ -178,6 +178,10 @@ def _export_pa(arguments: argparse.Namespace) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ptm")
     commands = parser.add_subparsers(dest="command", required=True)
+    tui = commands.add_parser("tui", help="launch the optional terminal workbench")
+    tui.add_argument("--workspace", type=Path)
+    tui.add_argument("--demo", choices=("xor",), default="xor")
+    tui.set_defaults(handler=_tui)
     export = commands.add_parser(
         "export", help="freeze a scalar TM snapshot JSON file into a .ptm artifact"
     )
@@ -227,6 +231,21 @@ def _parser() -> argparse.ArgumentParser:
     export_pa.add_argument("--limitations", default="research prototype")
     export_pa.set_defaults(handler=_export_pa)
     return parser
+
+
+def _tui(arguments: argparse.Namespace) -> int:
+    """Import Textual only when the optional interface is requested."""
+    try:
+        from .tui import run
+    except ModuleNotFoundError as error:
+        if error.name == "textual":
+            raise ValueError(
+                "the TUI extra is not installed; run "
+                "`python -m pip install 'prolog-tsetlin-machine[tui]'`"
+            ) from None
+        raise
+    run(workspace=arguments.workspace, demo=arguments.demo)
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
