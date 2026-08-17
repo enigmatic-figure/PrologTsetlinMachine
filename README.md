@@ -187,6 +187,7 @@ immutable; PA behavior is selected by versioned descriptors, masks, slot maps,
 and compiled artifacts.
 
 See [Architecture](docs/architecture.md), [Semantic contract](docs/semantic-contract.md),
+[Textual TUI product and implementation plan](docs/textual-tui-plan.md),
 [Logic compiler](docs/logic-compiler.md), [Typed Logic AST](docs/logic-ast.md),
 [Logic Class II consolidation](docs/logic-class-ii-consolidation.md),
 [Logic morphology](docs/logic-morphology.md),
