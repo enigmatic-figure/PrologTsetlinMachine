@@ -1,12 +1,14 @@
 from threading import Event
-
-import pytest
+from unittest import TestCase
 
 from prolog_tsetlin.services.training import (
     TrainingCancelled,
     TrainingRequest,
     train_xor,
 )
+
+
+ASSERTIONS = TestCase()
 
 
 def test_xor_training_is_deterministic_and_reports_progress() -> None:
@@ -21,12 +23,12 @@ def test_xor_training_is_deterministic_and_reports_progress() -> None:
 
 
 def test_training_request_rejects_invalid_epochs() -> None:
-    with pytest.raises(ValueError, match="epochs must be positive"):
+    with ASSERTIONS.assertRaisesRegex(ValueError, "epochs must be positive"):
         train_xor(TrainingRequest(epochs=0))
 
 
 def test_training_honors_pre_set_cancellation() -> None:
     cancel = Event()
     cancel.set()
-    with pytest.raises(TrainingCancelled, match="before epoch 1"):
+    with ASSERTIONS.assertRaisesRegex(TrainingCancelled, "before epoch 1"):
         train_xor(TrainingRequest(), cancel=cancel)

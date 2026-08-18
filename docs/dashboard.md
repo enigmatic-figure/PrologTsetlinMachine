@@ -1,5 +1,10 @@
 # PTM Dashboard - Interactive Dear PyGUI Frontend
 
+> Historical prototype: the supported interactive entry point is now
+> `ptm tui --demo xor`. See the [installation guide](../INSTALL.md) and
+> [terminal workbench](tui.md). This page documents the retained
+> Dear PyGui experiment and is not the recommended onboarding path.
+
 An interactive dashboard for exploring the Prolog Tsetlin Machine without needing to wrestle with command lines or read massive papers on cellular automata.
 
 ## Features

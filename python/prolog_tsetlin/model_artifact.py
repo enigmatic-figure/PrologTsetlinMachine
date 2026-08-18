@@ -7,8 +7,9 @@ import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
+from ._version import __version__
 from .artifact import PAArtifact
 from .logic_ast import LOGIC_AST_VARIABLES
 from .logic_consolidation import (
@@ -18,6 +19,7 @@ from .logic_consolidation import (
     LogicProgram32,
 )
 from .pa import FixedBitBlock, MaskedThresholdKernel
+from .preprocessing import PreprocessingContract
 from .reference import SNAPSHOT_SCHEMA_VERSION, TMSnapshot
 
 
@@ -41,12 +43,37 @@ _LOGIC_INSTRUCTION = struct.Struct("<IBBH")
 _MASKED_THRESHOLD_HEADER = struct.Struct("<IIIIIIII")
 _DIGEST_SIZE = 32
 _MAX_ARTIFACT_BYTES = 256 << 20
+_MAX_MANIFEST_BYTES = 16 << 20
+_MAX_MANIFEST_DEPTH = 16
+_MAX_MANIFEST_NODES = 1_000_000
 _MAX_DIMENSION = 1 << 20
 _MAX_CONFORMANCE_CASES = 16
 
 
 class ModelArtifactError(ValueError):
     """Raised when a model artifact is malformed or incompatible."""
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant {value!r} is not permitted")
+
+
+def _validate_manifest_complexity(value: object) -> None:
+    """Bound decoded JSON expansion before schema-specific construction."""
+
+    nodes = 0
+    stack: list[tuple[object, int]] = [(value, 0)]
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_MANIFEST_NODES:
+            raise ModelArtifactError("model artifact manifest is too complex")
+        if depth > _MAX_MANIFEST_DEPTH:
+            raise ModelArtifactError("model artifact manifest is nested too deeply")
+        if isinstance(current, dict):
+            stack.extend((child, depth + 1) for child in current.values())
+        elif isinstance(current, list):
+            stack.extend((child, depth + 1) for child in current)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +124,8 @@ def _decode_model_container(
         raise ModelArtifactError("unsupported model artifact kind or flags")
     if reserved != bytes(len(reserved)):
         raise ModelArtifactError("model artifact reserved bytes are nonzero")
+    if manifest_size > _MAX_MANIFEST_BYTES:
+        raise ModelArtifactError("model artifact manifest exceeds the v1 size ceiling")
     expected_size = header_size + manifest_size + payload_size + _DIGEST_SIZE
     if expected_size != len(serialized):
         raise ModelArtifactError("model artifact section sizes are inconsistent")
@@ -104,22 +133,29 @@ def _decode_model_container(
     manifest_first = header_size
     manifest_last = manifest_first + manifest_size
     try:
-        manifest = json.loads(serialized[manifest_first:manifest_last])
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        manifest = json.loads(
+            serialized[manifest_first:manifest_last],
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
         raise ModelArtifactError("model artifact manifest is invalid JSON") from error
     if not isinstance(manifest, dict):
         raise ModelArtifactError("model artifact manifest must be an object")
+    _validate_manifest_complexity(manifest)
     if manifest.get("artifact_schema") != MODEL_ARTIFACT_SCHEMA:
         raise ModelArtifactError("unsupported model artifact schema")
     if manifest.get("artifact_kind") != expected_artifact_kind:
         raise ModelArtifactError("manifest and payload kinds disagree")
-    canonical_manifest = json.dumps(
-        manifest,
-        allow_nan=False,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    try:
+        canonical_manifest = json.dumps(
+            manifest,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (RecursionError, TypeError, UnicodeEncodeError, ValueError) as error:
+        raise ModelArtifactError("model artifact manifest is invalid JSON") from error
     if canonical_manifest != serialized[manifest_first:manifest_last]:
         raise ModelArtifactError("model artifact manifest is not canonical")
 
@@ -234,6 +270,40 @@ class PackedTMInferenceArtifact:
             )
             predictions.extend(result.predictions(len(page)))
         return tuple(predictions)
+
+    @property
+    def preprocessing(self) -> PreprocessingContract | None:
+        value = self.manifest.get("preprocessing")
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise ModelArtifactError("artifact preprocessing contract is invalid")
+        try:
+            return PreprocessingContract.from_dict(value)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ModelArtifactError("artifact preprocessing contract is invalid") from error
+
+    def predict_records(
+        self, records: Iterable[Mapping[str, object]]
+    ) -> tuple[int, ...]:
+        return tuple(self.iter_predict_records(records))
+
+    def iter_predict_records(
+        self, records: Iterable[Mapping[str, object]]
+    ) -> Iterator[int]:
+        """Predict a record stream using bounded 64-record packed pages."""
+
+        preprocessing = self.preprocessing
+        if preprocessing is None:
+            raise ValueError("artifact requires precomputed Boolean features")
+        page: list[tuple[bool, ...]] = []
+        for record in records:
+            page.append(preprocessing.materialize(record))
+            if len(page) == 64:
+                yield from self.predict_rows(page)
+                page.clear()
+        if page:
+            yield from self.predict_rows(page)
 
     def verify_conformance(self) -> bool:
         for case in self.conformance_cases:
@@ -800,6 +870,8 @@ def export_packed_tm(
     validation_rows: Sequence[Sequence[bool | int]] | None = None,
     validation_signature: Mapping[str, Any] | None = None,
     restoration_reference: Mapping[str, Any] | None = None,
+    preprocessing: PreprocessingContract | None = None,
+    validation_records: Sequence[Mapping[str, object]] | None = None,
 ) -> PackedTMInferenceArtifact:
     """Freeze a scalar TM snapshot into a deterministic inference-only artifact."""
 
@@ -816,7 +888,14 @@ def export_packed_tm(
         raise ValueError("feature_names has the wrong width")
     if any(not value for value in names) or len(set(names)) != len(names):
         raise ValueError("feature names must be nonempty and unique")
-    literal_ids = tuple(feature_literal_ids or ())
+    if preprocessing is not None and len(preprocessing.outputs) != (
+        snapshot.number_of_features
+    ):
+        raise ValueError("preprocessing output width differs from the TM snapshot")
+    preprocessing_ids = preprocessing.literal_ids if preprocessing is not None else ()
+    literal_ids = tuple(feature_literal_ids or preprocessing_ids)
+    if preprocessing_ids and literal_ids != preprocessing_ids:
+        raise ValueError("feature literal IDs disagree with preprocessing outputs")
     if literal_ids and len(literal_ids) != snapshot.number_of_features:
         raise ValueError("feature_literal_ids has the wrong width")
     if any(value < 0 or value >= 1 << 64 for value in literal_ids):
@@ -840,11 +919,26 @@ def export_packed_tm(
             if states[feature * 2 + 1] > snapshot.states_per_action:
                 negative[mask_index] |= bit
 
-    rows = (
+    record_rows = (
+        preprocessing.materialize_many(validation_records)
+        if preprocessing is not None and validation_records is not None
+        else None
+    )
+    if validation_records is not None and preprocessing is None:
+        raise ValueError("validation_records require a preprocessing contract")
+    supplied_rows = (
         tuple(tuple(bool(value) for value in row) for row in validation_rows)
         if validation_rows is not None
-        else _default_conformance_rows(snapshot.number_of_features)
+        else None
     )
+    if supplied_rows is not None and record_rows is not None and supplied_rows != record_rows:
+        raise ValueError("validation rows disagree with raw-record preprocessing")
+    if supplied_rows is not None:
+        rows = supplied_rows
+    elif record_rows is not None:
+        rows = record_rows
+    else:
+        rows = _default_conformance_rows(snapshot.number_of_features)
     if len(rows) > _MAX_CONFORMANCE_CASES * 64:
         raise ValueError("validation_rows exceeds the v1 conformance ceiling")
     if not rows:
@@ -889,7 +983,11 @@ def export_packed_tm(
             "catalog_version": feature_catalog_version,
             "kind": "packed_boolean_features",
             "literal_ids": [str(value) for value in literal_ids],
-            "materialization": "precomputed",
+            "materialization": (
+                "precomputed_or_raw_record_v1"
+                if preprocessing is not None
+                else "precomputed"
+            ),
             "names": list(names),
         },
         "model": {
@@ -914,7 +1012,7 @@ def export_packed_tm(
                 {"dtype": "int32", "name": "scores", "shape": [64]},
             ],
         },
-        "producer": {"name": "prolog-tsetlin-machine", "version": "0.1.0"},
+        "producer": {"name": "prolog-tsetlin-machine", "version": __version__},
         "research": {
             "authors": [str(value) for value in authors],
             "citations": [str(value) for value in citations],
@@ -932,6 +1030,8 @@ def export_packed_tm(
     }
     if restoration_reference is not None:
         manifest["restoration_reference"] = dict(restoration_reference)
+    if preprocessing is not None:
+        manifest["preprocessing"] = preprocessing.to_dict()
     payload = bytearray(
         _PACKED_TM_HEADER.pack(
             PACKED_TM_PAYLOAD_VERSION,
@@ -1074,7 +1174,7 @@ def export_logic_program(
                 },
             ],
         },
-        "producer": {"name": "prolog-tsetlin-machine", "version": "0.1.0"},
+        "producer": {"name": "prolog-tsetlin-machine", "version": __version__},
         "research": {
             "authors": [str(value) for value in authors],
             "citations": [str(value) for value in citations],
@@ -1259,7 +1359,7 @@ def export_masked_threshold(
                 },
             ],
         },
-        "producer": {"name": "prolog-tsetlin-machine", "version": "0.1.0"},
+        "producer": {"name": "prolog-tsetlin-machine", "version": __version__},
         "research": {
             "authors": [str(value) for value in authors],
             "citations": [str(value) for value in citations],
@@ -1335,9 +1435,11 @@ def _validate_packed_tm_manifest(
         raise ModelArtifactError("model artifact lacks its feature contract")
     names = feature_contract.get("names")
     literal_ids = feature_contract.get("literal_ids")
+    materialization = feature_contract.get("materialization")
     if (
         feature_contract.get("kind") != "packed_boolean_features"
-        or feature_contract.get("materialization") != "precomputed"
+        or materialization
+        not in ("precomputed", "precomputed_or_raw_record_v1")
         or not isinstance(feature_contract.get("catalog_version"), str)
         or not feature_contract["catalog_version"]
         or not isinstance(names, list)
@@ -1357,6 +1459,24 @@ def _validate_packed_tm_manifest(
         or len(set(literal_ids)) != len(literal_ids)
     ):
         raise ModelArtifactError("feature contract is invalid")
+    raw_preprocessing = manifest.get("preprocessing")
+    if materialization == "precomputed_or_raw_record_v1":
+        if not isinstance(raw_preprocessing, dict):
+            raise ModelArtifactError("raw-record artifact lacks preprocessing")
+        try:
+            preprocessing = PreprocessingContract.from_dict(raw_preprocessing)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ModelArtifactError("preprocessing contract is invalid") from error
+        if len(preprocessing.outputs) != features or tuple(
+            str(value) for value in preprocessing.literal_ids
+        ) != tuple(literal_ids):
+            raise ModelArtifactError(
+                "preprocessing outputs disagree with the feature contract"
+            )
+    elif raw_preprocessing is not None:
+        raise ModelArtifactError(
+            "precomputed-only artifact unexpectedly contains preprocessing"
+        )
 
     expected_ports = {
         "inputs": [

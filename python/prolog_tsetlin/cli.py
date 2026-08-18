@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Sequence
 
+from ._version import __version__
 from .artifact import PAArtifact
 from .logic_consolidation import (
     FixedLogicInstruction,
@@ -19,6 +22,143 @@ from .model_artifact import (
     export_packed_tm,
 )
 from .reference import SNAPSHOT_SCHEMA_VERSION, TMSnapshot
+from .prolog_bridge import (
+    NoDecisionTreeSolution,
+    NoFeatureTemplateSolution,
+    NoTAClauseSolution,
+    NoThresholdSolution,
+    PrologBridgeError,
+)
+from .services.inference import (
+    MAX_INTERACTIVE_RECORDS,
+    inspect_artifact,
+    run_artifact_records,
+    verify_artifact,
+)
+from .services.search import (
+    BoundedSearchRequest,
+    SearchKind,
+    demo_search_document,
+    export_search_artifact,
+    run_bounded_search,
+)
+
+
+def _print_json(value: object, *, pretty: bool = False) -> None:
+    print(json.dumps(value, indent=2 if pretty else None, sort_keys=True))
+
+
+def _artifact_inspect(arguments: argparse.Namespace) -> int:
+    _print_json(
+        inspect_artifact(arguments.model, include_manifest=arguments.manifest),
+        pretty=arguments.pretty,
+    )
+    return 0
+
+
+def _artifact_verify(arguments: argparse.Namespace) -> int:
+    report = verify_artifact(arguments.model)
+    _print_json(report, pretty=arguments.pretty)
+    return 0 if report["verified"] else 1
+
+
+def _parse_record(value: str, label: str) -> dict[str, object]:
+    try:
+        record = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{label} is not valid JSON: {error.msg}") from error
+    if not isinstance(record, dict):
+        raise ValueError(f"{label} must contain a JSON object")
+    return record
+
+
+def _record_arguments(arguments: argparse.Namespace) -> tuple[dict[str, object], ...]:
+    if arguments.record is not None:
+        return tuple(
+            _parse_record(value, f"--record value {index}")
+            for index, value in enumerate(arguments.record, start=1)
+        )
+
+    assert arguments.jsonl is not None
+    if str(arguments.jsonl) == "-":
+        lines = sys.stdin
+    else:
+        lines = arguments.jsonl.open("r", encoding="utf-8")
+    records = []
+    try:
+        for line_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            records.append(_parse_record(line, f"JSONL line {line_number}"))
+            if len(records) > MAX_INTERACTIVE_RECORDS:
+                raise ValueError(
+                    "raw-record command is limited to "
+                    f"{MAX_INTERACTIVE_RECORDS} records"
+                )
+        return tuple(records)
+    finally:
+        if lines is not sys.stdin:
+            lines.close()
+
+
+def _artifact_run_record(arguments: argparse.Namespace) -> int:
+    _print_json(
+        run_artifact_records(arguments.model, _record_arguments(arguments)),
+        pretty=arguments.pretty,
+    )
+    return 0
+
+
+_NO_SEARCH_SOLUTION = (
+    NoThresholdSolution,
+    NoFeatureTemplateSolution,
+    NoTAClauseSolution,
+    NoDecisionTreeSolution,
+)
+
+
+def _search(arguments: argparse.Namespace) -> int:
+    kind = SearchKind(arguments.search_kind)
+    if arguments.demo and arguments.request is not None:
+        raise ValueError("choose either a request JSON file or --demo, not both")
+    if arguments.demo:
+        document = demo_search_document(kind)
+    else:
+        if arguments.request is None:
+            raise ValueError("provide a request JSON file or use --demo")
+        document = json.loads(arguments.request.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError("search request JSON must contain an object")
+    request = BoundedSearchRequest.from_dict(
+        document,
+        expected_kind=kind,
+        timeout_seconds=arguments.timeout,
+    )
+    try:
+        result = run_bounded_search(
+            request,
+            executable=arguments.gprolog,
+        )
+    except _NO_SEARCH_SOLUTION as error:
+        _print_json(
+            {
+                "schema": "ptm.search.result.v1",
+                "kind": kind.value,
+                "status": "no_solution",
+                "message": str(error),
+            },
+            pretty=arguments.pretty,
+        )
+        return 3
+    report = result.to_dict()
+    if getattr(arguments, "output", None) is not None:
+        report["artifact"] = export_search_artifact(
+            result,
+            arguments.output,
+            name=arguments.name or f"prolog-{kind.value}",
+        )
+    _print_json(report, pretty=arguments.pretty)
+    return 0
 
 
 def _snapshot_from_json(path: Path) -> TMSnapshot:
@@ -177,11 +317,102 @@ def _export_pa(arguments: argparse.Namespace) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ptm")
+    try:
+        package_version = version("prolog-tsetlin-machine")
+    except PackageNotFoundError:
+        package_version = f"{__version__}+source"
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {package_version}"
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     tui = commands.add_parser("tui", help="launch the optional terminal workbench")
     tui.add_argument("--workspace", type=Path)
     tui.add_argument("--demo", choices=("xor",), default="xor")
     tui.set_defaults(handler=_tui)
+
+    artifact = commands.add_parser(
+        "artifact", help="inspect, verify, or run a portable .ptm artifact"
+    )
+    artifact_commands = artifact.add_subparsers(
+        dest="artifact_command", required=True
+    )
+    artifact_inspect = artifact_commands.add_parser(
+        "inspect", help="validate and describe an artifact"
+    )
+    artifact_inspect.add_argument("model", type=Path)
+    artifact_inspect.add_argument(
+        "--manifest", action="store_true", help="include the complete manifest"
+    )
+    artifact_inspect.add_argument("--pretty", action="store_true")
+    artifact_inspect.set_defaults(handler=_artifact_inspect)
+
+    artifact_verify = artifact_commands.add_parser(
+        "verify", help="check integrity, contracts, and conformance vectors"
+    )
+    artifact_verify.add_argument("model", type=Path)
+    artifact_verify.add_argument("--pretty", action="store_true")
+    artifact_verify.set_defaults(handler=_artifact_verify)
+
+    artifact_run = artifact_commands.add_parser(
+        "run-record", help="preprocess typed JSON records and run inference"
+    )
+    artifact_run.add_argument("model", type=Path)
+    record_source = artifact_run.add_mutually_exclusive_group(required=True)
+    record_source.add_argument(
+        "--record",
+        action="append",
+        metavar="JSON",
+        help="JSON object; repeat to run multiple records",
+    )
+    record_source.add_argument(
+        "--jsonl",
+        type=Path,
+        metavar="PATH",
+        help="newline-delimited JSON records; use - for standard input",
+    )
+    artifact_run.add_argument("--pretty", action="store_true")
+    artifact_run.set_defaults(handler=_artifact_run_record)
+
+    search = commands.add_parser(
+        "search", help="run a resource-bounded GNU Prolog search"
+    )
+    search_commands = search.add_subparsers(dest="search_kind", required=True)
+    search_help = {
+        SearchKind.THRESHOLD: "find an exact monotone masked threshold",
+        SearchKind.FEATURE_TEMPLATE: "select an exact typed feature template",
+        SearchKind.TA_CLAUSE: "synthesize an exact signed TA clause",
+        SearchKind.DECISION_TREE: "synthesize an exact bounded decision tree",
+        SearchKind.REPAIR: "repair a parent tree from counterexamples",
+    }
+    for kind, help_text in search_help.items():
+        search_command = search_commands.add_parser(kind.value, help=help_text)
+        search_command.add_argument(
+            "request",
+            nargs="?",
+            type=Path,
+            help="ptm.search.request.v1 JSON file",
+        )
+        search_command.add_argument(
+            "--demo", action="store_true", help="run the built-in bounded example"
+        )
+        search_command.add_argument(
+            "--timeout",
+            type=float,
+            help="override the request deadline in seconds (0.1 through 300)",
+        )
+        search_command.add_argument(
+            "--gprolog",
+            type=Path,
+            help="GNU Prolog executable; otherwise use PTM_GPROLOG or PATH",
+        )
+        search_command.add_argument("--pretty", action="store_true")
+        if kind in (SearchKind.DECISION_TREE, SearchKind.REPAIR):
+            search_command.add_argument(
+                "--output", type=Path, help="export fixed-Logic .ptm artifact"
+            )
+            search_command.add_argument("--name", help="exported artifact title")
+        search_command.set_defaults(handler=_search)
+
     export = commands.add_parser(
         "export", help="freeze a scalar TM snapshot JSON file into a .ptm artifact"
     )
@@ -253,8 +484,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     try:
         return int(arguments.handler(arguments))
-    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        OSError,
+        json.JSONDecodeError,
+        PrologBridgeError,
+    ) as error:
         parser.error(str(error))
+    except KeyboardInterrupt:
+        print("ptm: interrupted; active child process was terminated", file=sys.stderr)
+        return 130
     return 2
 
 

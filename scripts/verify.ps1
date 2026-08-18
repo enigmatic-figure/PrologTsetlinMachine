@@ -17,19 +17,24 @@ if ($pythonLauncher) {
     $python = $pythonCommand.Source
 }
 
+$configuredGProlog = $env:PTM_GPROLOG
 $gprolog = Get-Command gprolog -ErrorAction SilentlyContinue
-if ($gprolog) {
+if ($configuredGProlog -and
+    (Test-Path -LiteralPath $configuredGProlog -PathType Leaf)) {
+    $env:PTM_GPROLOG = (Resolve-Path -LiteralPath $configuredGProlog).Path
+} elseif ($gprolog) {
     $env:PTM_GPROLOG = $gprolog.Source
-} elseif (Test-Path -LiteralPath "C:\GNU-Prolog\bin\gprolog.exe") {
-    $env:PTM_GPROLOG = "C:\GNU-Prolog\bin\gprolog.exe"
 } else {
-    throw "GNU Prolog was not found. Set PTM_GPROLOG before running verification."
+    throw "GNU Prolog was not found on PATH. Set PTM_GPROLOG to its executable."
 }
 $gprologBin = Split-Path -Parent $env:PTM_GPROLOG
 $gplc = Join-Path $gprologBin "gplc.exe"
 $env:PATH = $gprologBin + [IO.Path]::PathSeparator + $env:PATH
 
-$vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+$programFilesX86 = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::ProgramFilesX86)
+$vswhere = Join-Path $programFilesX86 `
+    "Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path -LiteralPath $vswhere)) {
     throw "Visual Studio Build Tools discovery utility was not found."
 }
@@ -75,11 +80,31 @@ if (Test-Path -LiteralPath $cache) {
 $nativeBuild = @(
     "call `"$vcvars`" >nul",
     ("`"$cmake`" -S `"$projectRoot`" -B `"$build`" -G Ninja " +
-        "-DCMAKE_MAKE_PROGRAM=`"$ninja`" -DPTM_BUILD_TESTS=ON"),
+        "-DCMAKE_MAKE_PROGRAM=`"$ninja`" -DCMAKE_BUILD_TYPE=Release " +
+        "-DPTM_BUILD_TESTS=ON"),
     "`"$cmake`" --build `"$build`"",
     "`"$ctest`" --test-dir `"$build`" --output-on-failure"
 ) -join " && "
 cmd.exe /d /c $nativeBuild
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+$installPrefix = Join-Path $build "install-root"
+$consumerBuild = Join-Path $build "consumer-smoke"
+$installConsumer = @(
+    "call `"$vcvars`" >nul",
+    "`"$cmake`" --install `"$build`" --prefix `"$installPrefix`"",
+    ("`"$cmake`" -S `"$(Join-Path $projectRoot 'tests\consumer')`" " +
+        "-B `"$consumerBuild`" -G Ninja " +
+        "-DCMAKE_MAKE_PROGRAM=`"$ninja`" " +
+        "-DCMAKE_BUILD_TYPE=Release " +
+        "-DCMAKE_PREFIX_PATH=`"$installPrefix`""),
+    "`"$cmake`" --build `"$consumerBuild`"",
+    "`"$(Join-Path $consumerBuild 'ptm_consumer_smoke.exe')`"",
+    "`"$(Join-Path $installPrefix 'bin\ptmrt.exe')`" --help >nul"
+) -join " && "
+cmd.exe /d /c $installConsumer
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
@@ -90,11 +115,17 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
+& $gplc -c --no-susp-warn `
+    -o (Join-Path $build "bounded_structure_search.obj") `
+    (Join-Path $projectRoot "prolog\bounded_structure_search.pl")
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
 
 $env:PTM_NATIVE_LIBRARY = Join-Path $build "ptm.dll"
 Push-Location $projectRoot
 try {
-    & $python @pythonArguments -m unittest discover -s tests/python -v
+    & $python @pythonArguments -m pytest tests/python -q
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -103,7 +134,31 @@ try {
         exit $LASTEXITCODE
     }
     & $python @pythonArguments examples/prolog_threshold.py
-    exit $LASTEXITCODE
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    & $python @pythonArguments examples/prolog_structures.py
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    $preprocessingArtifact = Join-Path $build "preprocessing-demo.ptm"
+    & $python @pythonArguments examples/export_preprocessing_demo.py `
+        $preprocessingArtifact
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    $ptmrt = Join-Path $build "ptmrt.exe"
+    & $ptmrt verify $preprocessingArtifact
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    $recordOutput = & $ptmrt run-record $preprocessingArtifact `
+        age:int=30 status:string=ready active:bool=true
+    if ($LASTEXITCODE -ne 0 -or
+        $recordOutput -notmatch '"features":\[1,1,1,1,1,0\]') {
+        throw "Raw-record preprocessing verification failed: $recordOutput"
+    }
+    exit 0
 } finally {
     Pop-Location
 }

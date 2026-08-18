@@ -330,7 +330,15 @@ class LiteralCatalog:
         self._require_kind(field_name, FieldKind.CATEGORY, FieldKind.BOOLEAN)
         if not values:
             raise ValueError("category membership cannot be empty")
-        canonical_values = tuple(sorted(set(values), key=lambda value: (type(value).__name__, str(value))))
+        # Python considers ``True == 1``.  Literal equality is deliberately
+        # typed, so preserve both while still removing exact typed duplicates.
+        typed_values = {(type(value), value): value for value in values}
+        canonical_values = tuple(
+            sorted(
+                typed_values.values(),
+                key=lambda value: (type(value).__name__, str(value)),
+            )
+        )
         return self._register(
             field_name,
             TransformKind.CATEGORY_IN,

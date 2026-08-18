@@ -1,218 +1,131 @@
 # Prolog Tsetlin Machine
 
-## Terminal workbench (preview)
+[![CI](https://github.com/enigmatic-figure/PrologTsetlinMachine/actions/workflows/ci.yml/badge.svg)](https://github.com/enigmatic-figure/PrologTsetlinMachine/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-The optional keyboard-first workbench currently provides the built-in XOR
-training vertical slice, including editable validated hyperparameters, live
-progress, predictions, clause snapshots, and a structured event dock. Install
-and launch it with:
+Prolog Tsetlin Machine (PTM) is an experimental toolkit for learning,
+inspecting, searching, and exporting compact Boolean models. It combines a
+Tsetlin Machine runtime, provenance-preserving feature transforms, bounded
+symbolic search, and portable `.ptm` inference artifacts.
+
+The easiest way to explore PTM is the keyboard-first terminal workbench. The
+native runtime and GNU Prolog are optional; install them only when your use case
+needs them.
+
+## Try it
+
+PTM requires Python 3.10 or newer. From a source checkout:
 
 ```bash
-python -m pip install -e '.[tui]'
+python -m venv .venv
+```
+
+Activate the environment (`.venv\Scripts\activate` on Windows or
+`source .venv/bin/activate` on Linux/macOS), then run:
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install ".[tui]"
 ptm tui --demo xor
 ```
 
-Edit the training fields and press `t` to train, press `c` to inspect clauses,
-`Ctrl+L` to collapse the event dock, and `q` to quit. The
-core Python package and existing `ptm` export commands do not require Textual;
-invoking `ptm tui` without the extra prints an installation hint.
+Press `t` to train the built-in XOR model. Use `1`-`4` to move between
+Overview, Train, Clauses, and Artifacts; `e` exports a completed run, `x`
+cancels training, and `?` opens contextual help. After export, press `l` to
+load and verify the artifact, fill its generated raw-record form, and press `r`
+to run inference with a visible preprocessing trace.
 
-Prolog Tsetlin Machine (PTM) is an experimental hybrid learning runtime. It
-combines recyclable Tsetlin-automata populations, reversible Fredkin data
-paths, provenance-preserving feature representation, and bounded Prolog
-search/compilation.
+For the dependency-free Python core instead:
 
-This repository currently contains the first executable foundation, not a
-production learner:
-
-- a Class I representation layer with deterministic literal IDs, typed facts,
-  packed Boolean rows, and per-literal provenance;
-- a deterministic scalar binary Tsetlin Machine used as the semantic oracle;
-- lossless Fredkin primitives that retain all three outputs;
-- fixed 32x32 and 64x64 PA bit buffers and a portable masked-threshold kernel;
-- a versioned C ABI, shared native library, and dependency-free Python binding;
-- bounded GNU Prolog search that lowers exact rules to Class II PA artifacts;
-- a canonical Boolean DAG, TM-to-IR compiler, preliminary cost planner, and
-  scalar/64-example packed CPU execution paths;
-- exact bit-sliced TA-state inference images with a direct 64-example clause,
-  feedback, signed-vote, and prediction C ABI;
-- capability-safe scalar/AVX2/AVX-512 runtime dispatch and a versioned JSONL
-  crossover benchmark stream;
-- optional CUDA sparse, 32-clause warp-tile, and dense-bitset execution with
-  selectable two-stage or fused-atomic voting, resident input pages, exact
-  intermediate-result gates, and Compute Sanitizer coverage;
-- a fixed 32-instruction Class II Logic evaluator with content-addressed state,
-  exact shadow validation, and a batched native C ABI;
-- immutable Logic morphology with counterexample repair, branch factoring,
-  equivalence merging, and generation-safe parent/child replacement;
-- a transactional Class II registry with O(1) atomic source resolution and
-  non-blocking shadow-audit recording;
-- atomic Class II snapshots and SHA-256-chained event logs with deterministic
-  replay, torn-tail recovery, and checkpoint compaction;
-- snapshot/restore contracts for exact TA-state recovery;
-- deterministic, content-addressed `.ptm` export for frozen packed TMs, fixed
-  Logic programs, and PA masked thresholds, plus a standalone scalar `ptmrt`
-  C ABI and inspect/verify/run CLI;
-- versioned architecture, semantic, and PA-artifact contracts.
-
-The intended production architecture is C++20 for the native execution core,
-Python for orchestration and data integration, and GNU Prolog for bounded
-symbolic search and offline artifact generation. Prolog is deliberately not in
-the per-example inference loop.
-
-## Quick start
-
-On the provisioned Windows development machine, the complete build and
-cross-layer verification is one command:
-
-```powershell
-.\scripts\verify.ps1
-```
-
-The Ubuntu 22.04/WSL path verifies the same C++, C ABI, Python/native, and GNU
-Prolog boundaries with GCC and `libptm.so`:
-
-```powershell
-wsl.exe -d Ubuntu-22.04 -- bash scripts/verify-wsl.sh
-```
-
-The Python reference path itself has no runtime dependencies:
-
-```powershell
-$env:PYTHONPATH = "$PWD\python"
-python -m unittest discover -s tests/python -v
+```bash
+python -m pip install .
 python examples/tabular_xor.py
-python examples/prolog_threshold.py
 ```
 
-Build and test the portable C++ core with any C++20 compiler:
+For Arrow/Parquet streams and image files, install the data extra and run the
+adapter pipeline example:
 
-```powershell
-cmake -S . -B build -DPTM_BUILD_TESTS=ON
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+```bash
+python -m pip install ".[data]"
+python examples/data_adapter_pipeline.py
 ```
 
-Export and run three portable inference artifacts through the same runtime:
+To exercise the complete portable-artifact path:
 
-```powershell
-$env:PYTHONPATH = "$PWD\python"
-py -3 examples/export_xor_artifact.py out/artifacts/xor-little-guy.ptm
-py -3 examples/export_logic_artifact.py out/artifacts/conditional-little-guy.ptm
-py -3 examples/export_pa_artifact.py out/artifacts/threshold-little-guy.ptm
-.\build\ptmrt.exe inspect out/artifacts/xor-little-guy.ptm
-.\build\ptmrt.exe verify out/artifacts/xor-little-guy.ptm
-.\build\ptmrt.exe run out/artifacts/xor-little-guy.ptm 0,1
-.\build\ptmrt.exe inspect out/artifacts/conditional-little-guy.ptm
-.\build\ptmrt.exe verify out/artifacts/conditional-little-guy.ptm
-.\build\ptmrt.exe run out/artifacts/conditional-little-guy.ptm 1,0,1,0,0
-.\build\ptmrt.exe inspect out/artifacts/threshold-little-guy.ptm
-.\build\ptmrt.exe verify out/artifacts/threshold-little-guy.ptm
-.\build\ptmrt.exe run out/artifacts/threshold-little-guy.ptm 1,70
+```bash
+python examples/export_raw_xor_artifact.py out/raw-xor.ptm
+ptm artifact inspect out/raw-xor.ptm --pretty
+ptm artifact verify out/raw-xor.ptm
+ptm artifact run-record out/raw-xor.ptm --pretty \
+  --record '{"left": false, "right": true}'
 ```
 
-The `.ptm` file contains canonical inference data, human/research metadata,
-stable feature identifiers, and bounded conformance vectors—not mutable
-training state. See the portable-runtime design for the current packed-TM,
-fixed-Logic, and PA scope and the planned ONNX, accelerator, and WebAssembly
-extensions.
+On PowerShell, use the same command on one line or replace the trailing `\`
+with a backtick. The result includes both the materialized Boolean features and
+the predicted label.
 
-Build and run the NoisyXOR CPU compiler calibration when the reference data is
-available locally:
+With GNU Prolog installed, try bounded symbolic synthesis without preparing a
+request file:
 
-```powershell
-.\scripts\benchmark-logic.ps1
+```bash
+ptm search decision-tree --demo --pretty
+ptm search repair --demo --output out/xor-repair.ptm --pretty
 ```
 
-Prepare and run the paired, noise-free Logic dataset exhaustion baseline:
+See [Installation](INSTALL.md) for native C/C++, GNU Prolog, CUDA, offline,
+and troubleshooting instructions.
 
-```powershell
-.\scripts\benchmark-logic-dataset.ps1 -Repeats 1
-```
+## What is included
 
-Compile and shadow-audit the structural Class II evaluator:
+- A deterministic scalar binary Tsetlin Machine and exact snapshot replay.
+- Typed raw-record transforms with stable literal IDs and provenance.
+- Bounded Arrow/Parquet streams, deterministic image/token adapters, and
+  versioned regex, aggregate, relational, sequence, and temporal pipelines.
+- Scalar, AVX2, AVX-512, and optional experimental CUDA packed-TM paths.
+- Bounded GNU Prolog searches for thresholds, typed feature templates, signed
+  TA clauses, read-once decision trees, and counterexample repair.
+- Fixed Logic and masked-threshold Class II artifacts with lifecycle auditing.
+- Deterministic `.ptm` export for binary packed TMs, Logic programs, and PA
+  thresholds, including optional raw-record preprocessing.
+- A standalone `ptmrt` C ABI and CLI for immutable inference without Python or
+  Prolog.
 
-```powershell
-.\scripts\benchmark-logic-consolidation.ps1 -Repeats 100
-```
+PTM is currently a research release. Binary classification is the complete
+packed-TM path; multiclass, regression, stateful stream processing, and richer
+transforms embedded directly in the portable native runtime remain roadmap
+work.
 
-Run the controlled-drift morphology and transactional replacement example:
+## Choose a path
 
-```powershell
-.\scripts\benchmark-logic-morphology.ps1
-```
+| Goal | Start here |
+| --- | --- |
+| Explore interactively | [Terminal workbench](docs/tui.md) |
+| Install PTM | [Installation guide](INSTALL.md) |
+| Follow a clean consumer example | [Consumer tutorial](docs/consumer-tutorial.md) |
+| Upgrade an existing checkout or integration | [Upgrade guide](UPGRADING.md) |
+| Check supported and tested versions | [Compatibility matrix](docs/compatibility.md) |
+| Export or embed `.ptm` artifacts | [Portable runtime](docs/model-export-runtime.md) |
+| Understand raw-record transforms | [Preprocessing contract](docs/preprocessing-contract.md) |
+| Stream Arrow/Parquet, images, or tokens | [Data connectors](docs/data-connectors.md) |
+| Run bounded symbolic search | [Bounded Prolog search](docs/bounded-search.md) |
+| Contribute or run the complete test matrix | [Contributor guide](CONTRIBUTING.md) |
 
-Run native Class II snapshot, replay, drift-reopen, and compaction:
+## Project boundaries
 
-```powershell
-.\scripts\run-class-ii-persistence.ps1
-```
+Python owns orchestration, reference semantics, and data integration. C++20
+owns portable and optimized execution. GNU Prolog is an offline, bounded search
+participant and is never required in the per-record inference loop.
 
-Build and run the Class II mapping microbenchmark:
+The portable artifact is the deployment boundary: training state is frozen and
+lowered into an immutable, content-addressed `.ptm` file. Applications can use
+the Python loader or the independently versioned `ptmrt` runtime.
 
-```powershell
-.\scripts\benchmark-mapping.ps1
-```
+For the detailed architecture and research records, see the
+[documentation index](docs/README.md). For background reading, use the linked
+[research references](docs/references.md); large paper copies are intentionally
+not stored in the repository.
 
-Run the scalar-backend-gated packed TM benchmark:
+## License
 
-```powershell
-.\scripts\benchmark-packed-tm.ps1
-```
-
-Emit the standard backend/density sweep as dashboard-ready JSON Lines:
-
-```powershell
-.\scripts\benchmark-packed-tm.ps1 -Sweep -JsonLines
-```
-
-On the provisioned CUDA/WSL host, verify all experimental GPU backends and run
-Compute Sanitizer:
-
-```powershell
-wsl.exe -d Ubuntu-22.04 -- bash scripts/verify-cuda-wsl.sh
-```
-
-Emit CPU/CUDA upload, kernel, resident, and cold timing records:
-
-```powershell
-.\scripts\benchmark-packed-tm-cuda-wsl.ps1 `
-    -Clauses 32,256,1024 -Features 64,1024 `
-    -Densities 0.02,0.50 -ResidentPages 1,16,256 -JsonLines
-```
-
-Set `PTM_GPROLOG` when GNU Prolog is not on `PATH`, and
-`PTM_NATIVE_LIBRARY` when the shared library is outside the default `build`
-directory. The verification script discovers the Visual Studio and
-`C:\GNU-Prolog` installations currently provisioned on this system.
-
-## Design boundaries
-
-Four distinct bit planes are never conflated:
-
-1. literal truth for one example;
-2. TA Include/Exclude action;
-3. the literal condition after action gating;
-4. the resulting clause or PA output.
-
-A TA action can be polled as one bit. It is not a complete TA snapshot. Exact
-restoration also requires the multi-state automaton values, clause weights,
-configuration, random-generator state, and mapping version.
-
-Mutable instance data lives in aligned buffers. Machine code is shared and
-immutable; PA behavior is selected by versioned descriptors, masks, slot maps,
-and compiled artifacts.
-
-See [Architecture](docs/architecture.md), [Semantic contract](docs/semantic-contract.md),
-[Textual TUI product and implementation plan](docs/textual-tui-plan.md),
-[Logic compiler](docs/logic-compiler.md), [Typed Logic AST](docs/logic-ast.md),
-[Logic Class II consolidation](docs/logic-class-ii-consolidation.md),
-[Logic morphology](docs/logic-morphology.md),
-[Packed TM execution](docs/packed-tm.md),
-[CUDA packed TM execution](docs/cuda-packed-tm.md),
-[GPU development handoff](docs/gpu-handoff.md),
-[Class II persistence](docs/class-ii-persistence.md),
-[Portable model export and static runtime](docs/model-export-runtime.md),
-[C ABI](docs/c-api.md),
-[Logic dataset baseline](docs/logic-dataset-baseline.md),
-[Class II lifecycle](docs/class-ii-lifecycle.md), and [Roadmap](docs/roadmap.md).
+PTM is licensed under the [Apache License 2.0](LICENSE). See the
+[changelog](CHANGELOG.md) for release history and pending changes.

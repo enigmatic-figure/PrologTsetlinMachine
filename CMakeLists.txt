@@ -1,7 +1,19 @@
 cmake_minimum_required(VERSION 3.20)
-project(PrologTsetlinMachine VERSION 0.1.0 LANGUAGES C CXX)
+file(STRINGS
+    "${CMAKE_CURRENT_SOURCE_DIR}/python/prolog_tsetlin/_version.py"
+    PTM_VERSION_LINE
+    REGEX "^__version__ = \"[0-9]+\\.[0-9]+\\.[0-9]+\"$")
+if(NOT PTM_VERSION_LINE)
+    message(FATAL_ERROR "Could not read the PTM version")
+endif()
+string(REGEX REPLACE
+    "^__version__ = \"([0-9]+\\.[0-9]+\\.[0-9]+)\"$" "\\1"
+    PTM_VERSION "${PTM_VERSION_LINE}")
+project(PrologTsetlinMachine VERSION ${PTM_VERSION} LANGUAGES C CXX)
 
 find_package(Threads REQUIRED)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 option(PTM_BUILD_TESTS "Build PTM native tests" ON)
 option(PTM_BUILD_BENCHMARKS "Build PTM microbenchmarks" OFF)
@@ -24,6 +36,7 @@ add_library(ptm_core
 )
 add_library(PTM::core ALIAS ptm_core)
 set_target_properties(ptm_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(ptm_core PROPERTIES EXPORT_NAME core)
 
 target_include_directories(ptm_core
     PUBLIC
@@ -75,6 +88,7 @@ target_include_directories(ptm_runtime
 )
 target_compile_features(ptm_runtime PUBLIC cxx_std_20)
 set_target_properties(ptm_runtime PROPERTIES
+    EXPORT_NAME runtime
     OUTPUT_NAME ptmrt
     POSITION_INDEPENDENT_CODE ON
 )
@@ -133,10 +147,15 @@ endif()
 add_library(ptm_c_api SHARED src/c_api.cpp)
 add_library(PTM::c_api ALIAS ptm_c_api)
 target_link_libraries(ptm_c_api PRIVATE PTM::core)
-target_include_directories(ptm_c_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(ptm_c_api
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
 target_compile_features(ptm_c_api PRIVATE cxx_std_20)
 target_compile_definitions(ptm_c_api PRIVATE PTM_C_API_BUILD)
 set_target_properties(ptm_c_api PROPERTIES OUTPUT_NAME ptm)
+set_target_properties(ptm_c_api PROPERTIES EXPORT_NAME c_api)
 
 if(MSVC)
     target_compile_options(ptm_c_api PRIVATE /W4 /permissive-)
@@ -232,3 +251,39 @@ if(PTM_BUILD_BENCHMARKS)
     endif()
     target_compile_features(ptm_packed_tm_benchmark PRIVATE cxx_std_20)
 endif()
+
+set(PTM_INSTALL_TARGETS ptm_core ptm_runtime ptm_c_api)
+if(PTM_BUILD_RUNTIME_CLI)
+    list(APPEND PTM_INSTALL_TARGETS ptmrt)
+endif()
+
+install(TARGETS ${PTM_INSTALL_TARGETS}
+    EXPORT PTMTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+configure_package_config_file(
+    cmake/PTMConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/PTMConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/PTM
+)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/PTMConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMinorVersion
+)
+install(EXPORT PTMTargets
+    FILE PTMTargets.cmake
+    NAMESPACE PTM::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/PTM
+)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/PTMConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/PTMConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/PTM
+)
+install(FILES LICENSE
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/prolog-tsetlin-machine)

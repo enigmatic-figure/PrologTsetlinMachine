@@ -4,13 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prolog-tsetlin-machine"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Hybrid Tsetlin, Fredkin, and bounded-Prolog research runtime"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
+    "Programming Language :: Prolog",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.urls]
+Homepage = "https://github.com/enigmatic-figure/PrologTsetlinMachine"
+Documentation = "https://github.com/enigmatic-figure/PrologTsetlinMachine/tree/main/docs"
+Issues = "https://github.com/enigmatic-figure/PrologTsetlinMachine/issues"
 
 [project.optional-dependencies]
 tui = ["textual>=8.2,<9"]
+test = ["pytest>=8", "pytest-asyncio>=1", "hypothesis>=6.100,<7"]
+data = ["pyarrow>=18,<26", "Pillow>=12,<13"]
 
 [project.scripts]
 ptm = "prolog_tsetlin.cli:main"
@@ -18,6 +37,15 @@ ptm-tui = "prolog_tsetlin.tui:main"
 
 [tool.setuptools]
 package-dir = {"" = "python"}
+
+[tool.setuptools.dynamic]
+version = {attr = "prolog_tsetlin._version.__version__"}
+
+[tool.setuptools.data-files]
+"share/prolog-tsetlin-machine/prolog" = [
+    "prolog/bounded_structure_search.pl",
+    "prolog/bounded_threshold_search.pl",
+]
 
 [tool.setuptools.packages.find]
 where = ["python"]

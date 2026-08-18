@@ -1,5 +1,10 @@
 # GPU development handoff
 
+> Historical environment record. This page preserves benchmark provenance and
+> host-specific recovery notes; it is not an installation guide. New users
+> should start with [Installation](../INSTALL.md) and
+> [CUDA packed TM execution](cuda-packed-tm.md).
+
 > Status (2026-08-06): the optional build boundary, `cuda_sparse`,
 > `cuda_warp_tile`, `cuda_dense_bitset`, and the independent
 > `fused_atomic` vote strategy are implemented, correctness-gated, and

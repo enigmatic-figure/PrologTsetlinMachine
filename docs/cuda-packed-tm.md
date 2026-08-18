@@ -15,16 +15,16 @@ CUDA ISA flags, and the shared `ptm` C library continues to link only
 The Quadro RTX 5000 Max-Q development host uses Ubuntu 22.04 under WSL2, CUDA
 11.8, GCC 11.4, and an SM 7.5 target. The RTX 4050 Laptop host uses CUDA 12.8,
 GCC 11.4, and SM 8.9. A Colab Tesla T4 supplies an independent CUDA 12.8/SM 7.5
-check. Reproduce the complete local CUDA verification boundary from PowerShell
-with:
+check. From a configured Linux or WSL shell, run the complete CUDA verification
+boundary with:
 
-```powershell
-wsl.exe -d Ubuntu-22.04 -- bash scripts/verify-cuda-wsl.sh
+```bash
+bash scripts/verify-cuda-wsl.sh
 ```
 
 `PTM_CUDA_ROOT`, `PTM_CUDA_ARCHITECTURES`, and `PTM_CUDA_BUILD_DIR` override
 the script defaults. A system without a CUDA compiler remains covered by the
-ordinary Windows and WSL verification scripts.
+ordinary CPU verification path.
 
 ## Ownership and execution
 
