@@ -11,6 +11,8 @@ import re
 import unicodedata
 from typing import Any
 
+from ._safe_regex import compile_safe
+
 
 RECORD_CONNECTOR_SCHEMA = "ptm.records.v1"
 TOKEN_ADAPTER_SCHEMA = "ptm.token_adapter.v1"
@@ -22,7 +24,7 @@ MAX_TOKENS = 65_536
 MAX_TOKEN_CHARS = 1_024
 MAX_IMAGE_SOURCE_PIXELS = 16_777_216
 MAX_IMAGE_OUTPUT_VALUES = 65_536
-DEFAULT_TOKEN_PATTERN = r"[^\W_]+(?:['’][^\W_]+)*"
+DEFAULT_TOKEN_PATTERN = r"[^\W_]+['’][^\W_]+|[^\W_]+"
 
 
 class ConnectorError(ValueError):
@@ -187,9 +189,9 @@ class TokenAdapter:
                 "token adapter Unicode database version differs from this runtime"
             )
         try:
-            compiled = re.compile(self.pattern, re.UNICODE)
-        except re.error as error:
-            raise ValueError(f"token pattern is invalid: {error}") from error
+            compiled = compile_safe(self.pattern, re.UNICODE)
+        except (re.error, ValueError) as error:
+            raise ValueError(f"token pattern is unsafe or invalid: {error}") from error
         object.__setattr__(self, "_compiled", compiled)
 
     @property
@@ -212,15 +214,18 @@ class TokenAdapter:
         if self.casefold:
             normalized = normalized.casefold()
         tokens: list[str] = []
-        for match in self._compiled.finditer(normalized):
-            token = match.group(0)
-            if len(token) > MAX_TOKEN_CHARS:
-                raise ConnectorError("token exceeds its character ceiling")
-            if len(tokens) == self.max_tokens:
-                if self.overflow == "truncate":
-                    break
-                raise ConnectorError("token count exceeds the adapter ceiling")
-            tokens.append(token)
+        try:
+            for match in self._compiled.finditer(normalized):
+                token = match.group(0)
+                if len(token) > MAX_TOKEN_CHARS:
+                    raise ConnectorError("token exceeds its character ceiling")
+                if len(tokens) == self.max_tokens:
+                    if self.overflow == "truncate":
+                        break
+                    raise ConnectorError("token count exceeds the adapter ceiling")
+                tokens.append(token)
+        except re.error as error:
+            raise ConnectorError(f"token pattern evaluation failed: {error}") from error
         return tuple(tokens)
 
     def adapt(self, record: Mapping[str, object]) -> dict[str, object]:

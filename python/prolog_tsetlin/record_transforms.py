@@ -12,6 +12,8 @@ import math
 import re
 from typing import Any, Protocol
 
+from ._safe_regex import compile_safe
+
 
 RECORD_PIPELINE_SCHEMA = "ptm.record_pipeline.v1"
 MAX_PIPELINE_TRANSFORMS = 256
@@ -146,9 +148,11 @@ class RegexTransform:
                 f"regex input ceiling must be between 1 and {MAX_REGEX_INPUT_CHARS}"
             )
         try:
-            compiled = re.compile(self.pattern, re.IGNORECASE if self.ignore_case else 0)
-        except re.error as error:
-            raise ValueError(f"regex pattern is invalid: {error}") from error
+            compiled = compile_safe(
+                self.pattern, re.IGNORECASE if self.ignore_case else 0
+            )
+        except (re.error, ValueError) as error:
+            raise ValueError(f"regex pattern is unsafe or invalid: {error}") from error
         if self.group > compiled.groups:
             raise ValueError("regex extraction group does not exist")
         object.__setattr__(self, "_compiled", compiled)
@@ -161,21 +165,24 @@ class RegexTransform:
             raise TransformError(
                 f"field {self.source_field!r} exceeds the regex input ceiling"
             )
-        if self.operation is RegexOperation.SEARCH:
-            return self._compiled.search(raw) is not None
-        if self.operation is RegexOperation.FULLMATCH:
-            return self._compiled.fullmatch(raw) is not None
-        if self.operation is RegexOperation.EXTRACT:
-            match = self._compiled.search(raw)
-            return None if match is None else match.group(self.group)
-        count = 0
-        for _ in self._compiled.finditer(raw):
-            count += 1
-            if count > MAX_REGEX_MATCHES:
-                raise TransformError(
-                    f"regex match count exceeds {MAX_REGEX_MATCHES}"
-                )
-        return count
+        try:
+            if self.operation is RegexOperation.SEARCH:
+                return self._compiled.search(raw) is not None
+            if self.operation is RegexOperation.FULLMATCH:
+                return self._compiled.fullmatch(raw) is not None
+            if self.operation is RegexOperation.EXTRACT:
+                match = self._compiled.search(raw)
+                return None if match is None else match.group(self.group)
+            count = 0
+            for _ in self._compiled.finditer(raw):
+                count += 1
+                if count > MAX_REGEX_MATCHES:
+                    raise TransformError(
+                        f"regex match count exceeds {MAX_REGEX_MATCHES}"
+                    )
+            return count
+        except re.error as error:
+            raise TransformError(f"regex evaluation failed: {error}") from error
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -37,6 +37,15 @@ def test_token_adapter_is_versioned_normalized_and_bounded() -> None:
     ).tokenize("one two") == ("one",)
 
 
+def test_token_adapter_rejects_backtracking_amplification() -> None:
+    hostile = r"(a+)+$"
+    with pytest.raises(ValueError, match="nested quantifiers"):
+        TokenAdapter("message", pattern=hostile)
+    descriptor = {**TokenAdapter("message").to_dict(), "pattern": hostile}
+    with pytest.raises(ValueError, match="descriptor is invalid"):
+        TokenAdapter.from_dict(descriptor)
+
+
 def test_image_adapter_materializes_stable_scalar_pixel_fields() -> None:
     adapter = ImageAdapter(2, 2, output_prefix="glyph")
     result = adapter.adapt_pixels([0, 64, 128, 255], record={"label": "x"})
