@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +53,18 @@ _MAX_CONFORMANCE_CASES = 16
 
 class ModelArtifactError(ValueError):
     """Raised when a model artifact is malformed or incompatible."""
+
+
+def _read_bounded_artifact(path: str | Path) -> bytes:
+    """Read an artifact without allowing its file to exceed the v1 limit."""
+
+    with Path(path).open("rb") as artifact_file:
+        if os.fstat(artifact_file.fileno()).st_size > _MAX_ARTIFACT_BYTES:
+            raise ModelArtifactError("model artifact exceeds the v1 size ceiling")
+        serialized = artifact_file.read(_MAX_ARTIFACT_BYTES + 1)
+    if len(serialized) > _MAX_ARTIFACT_BYTES:
+        raise ModelArtifactError("model artifact exceeds the v1 size ceiling")
+    return serialized
 
 
 def _reject_json_constant(value: str) -> None:
@@ -320,7 +333,7 @@ class PackedTMInferenceArtifact:
 
     @classmethod
     def from_file(cls, path: str | Path) -> "PackedTMInferenceArtifact":
-        return cls.from_bytes(Path(path).read_bytes())
+        return cls.from_bytes(_read_bounded_artifact(path))
 
     @classmethod
     def from_bytes(cls, data: bytes | bytearray | memoryview) -> "PackedTMInferenceArtifact":
@@ -501,7 +514,7 @@ class LogicProgramInferenceArtifact:
 
     @classmethod
     def from_file(cls, path: str | Path) -> "LogicProgramInferenceArtifact":
-        return cls.from_bytes(Path(path).read_bytes())
+        return cls.from_bytes(_read_bounded_artifact(path))
 
     @classmethod
     def from_bytes(
@@ -712,7 +725,7 @@ class MaskedThresholdInferenceArtifact:
 
     @classmethod
     def from_file(cls, path: str | Path) -> "MaskedThresholdInferenceArtifact":
-        return cls.from_bytes(Path(path).read_bytes())
+        return cls.from_bytes(_read_bounded_artifact(path))
 
     @classmethod
     def from_bytes(
@@ -849,7 +862,7 @@ def load_model_artifact_from_bytes(
 
 
 def load_model_artifact(path: str | Path) -> InferenceArtifact:
-    return load_model_artifact_from_bytes(Path(path).read_bytes())
+    return load_model_artifact_from_bytes(_read_bounded_artifact(path))
 
 
 def export_packed_tm(
