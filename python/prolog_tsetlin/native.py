@@ -25,10 +25,19 @@ PTM_ABI_VERSION = 2
 
 
 class NativeRuntimeError(RuntimeError):
+    """Exception raised for PTM native library runtime errors."""
     pass
 
 
 class PackedTMBackend(IntEnum):
+    """Backend selection for packed Tsetlin Machine evaluation.
+    
+    Attributes:
+        AUTOMATIC: Automatically select best available backend
+        SCALAR: Pure scalar implementation (no SIMD)
+        AVX2: AVX2 vectorized implementation
+        AVX512: AVX-512 vectorized implementation
+    """
     AUTOMATIC = 0
     SCALAR = 1
     AVX2 = 2
@@ -37,6 +46,19 @@ class PackedTMBackend(IntEnum):
 
 @dataclass(frozen=True, slots=True)
 class NativeCpuCapabilities:
+    """CPU capability detection results for SIMD backend selection.
+    
+    Attributes:
+        brand: CPU brand string
+        x86: Whether running on x86 architecture
+        os_xsave: Whether OS supports XSAVE instruction
+        avx: Whether AVX instructions are available
+        avx2: Whether AVX2 instructions are available
+        avx512f: Whether AVX-512 Foundation instructions are available
+        compiled_avx2: Whether library was compiled with AVX2 support
+        compiled_avx512: Whether library was compiled with AVX-512 support
+        preferred_backend: Recommended backend based on hardware and compilation
+    """
     brand: str
     x86: bool
     os_xsave: bool
@@ -48,6 +70,14 @@ class NativeCpuCapabilities:
     preferred_backend: PackedTMBackend
 
     def supports(self, backend: PackedTMBackend) -> bool:
+        """Check if the requested backend is supported by this CPU.
+        
+        Args:
+            backend: The backend to check support for
+            
+        Returns:
+            True if the backend can be used, False otherwise
+        """
         if backend in (PackedTMBackend.AUTOMATIC, PackedTMBackend.SCALAR):
             return True
         if backend == PackedTMBackend.AVX2:
@@ -167,9 +197,22 @@ if (
 
 
 class _AlignedInstance:
-    """Own an over-allocated ctypes object aligned to a 64-byte address."""
+    """Own an over-allocated ctypes object aligned to a 64-byte address.
+    
+    This class ensures proper memory alignment for native library structures
+    that require 64-byte alignment for SIMD operations.
+    
+    Attributes:
+        pointer: Pointer to the aligned structure
+        value: The aligned structure contents
+    """
 
     def __init__(self, value_type: type[ctypes.Structure]) -> None:
+        """Initialize aligned instance for the given ctypes structure type.
+        
+        Args:
+            value_type: The ctypes Structure type to allocate
+        """
         self._storage = ctypes.create_string_buffer(ctypes.sizeof(value_type) + 63)
         base = ctypes.addressof(self._storage)
         address = (base + 63) & ~63
@@ -177,13 +220,30 @@ class _AlignedInstance:
 
     @property
     def value(self) -> ctypes.Structure:
+        """Return the aligned structure contents."""
         return self.pointer.contents
 
 
 class _AlignedArray:
-    """Own a 64-byte-aligned contiguous array with an aligned element stride."""
+    """Own a 64-byte-aligned contiguous array with an aligned element stride.
+    
+    This class allocates and manages arrays of ctypes structures with proper
+    alignment for SIMD operations.
+    
+    Attributes:
+        pointer: Pointer to the first element of the aligned array
+    """
 
     def __init__(self, value_type: type[ctypes.Structure], count: int) -> None:
+        """Initialize aligned array for the given ctypes structure type.
+        
+        Args:
+            value_type: The ctypes Structure type for array elements
+            count: Number of elements in the array
+            
+        Raises:
+            ValueError: If count is not positive
+        """
         if count <= 0:
             raise ValueError("aligned native array cannot be empty")
         self._storage = ctypes.create_string_buffer(
@@ -195,6 +255,13 @@ class _AlignedArray:
 
 
 def _native_library_candidates() -> tuple[Path, ...]:
+    """Return candidate paths for the PTM native library.
+    
+    Searches in order: environment variable, build directory, system library path.
+    
+    Returns:
+        Tuple of candidate Path objects to check
+    """
     configured = os.environ.get("PTM_NATIVE_LIBRARY")
     project_root = Path(__file__).resolve().parents[2]
     names = ("ptm.dll", "libptm.so", "libptm.dylib")
@@ -209,6 +276,11 @@ def _native_library_candidates() -> tuple[Path, ...]:
 
 
 def find_native_library() -> Path | None:
+    """Find the PTM native library file.
+    
+    Returns:
+        Resolved Path to the library if found, None otherwise
+    """
     return next(
         (candidate.resolve() for candidate in _native_library_candidates() if candidate.is_file()),
         None,
@@ -218,6 +290,17 @@ def find_native_library() -> Path | None:
 def native_cpu_capabilities(
     library_path: str | os.PathLike[str] | None = None,
 ) -> NativeCpuCapabilities:
+    """Query CPU capabilities from the PTM native library.
+    
+    Args:
+        library_path: Optional path to the native library
+        
+    Returns:
+        NativeCpuCapabilities with detected hardware and compilation features
+        
+    Raises:
+        NativeRuntimeError: If library is not found or capability query fails
+    """
     resolved = Path(library_path).resolve() if library_path else find_native_library()
     if resolved is None or not resolved.is_file():
         raise NativeRuntimeError(
@@ -268,7 +351,24 @@ _SEMANTIC_VALUE = {
 
 
 class NativePAKernel:
+    """Native PA kernel for threshold evaluation using ctypes.
+    
+    This class provides access to the PTM native library's threshold evaluation
+    functions for both 1024-bit and 4096-bit input shapes.
+    
+    Attributes:
+        library_path: Path to the loaded native library
+    """
+    
     def __init__(self, library_path: str | os.PathLike[str] | None = None) -> None:
+        """Initialize the native PA kernel.
+        
+        Args:
+            library_path: Optional path to the native library
+            
+        Raises:
+            NativeRuntimeError: If library is not found or ABI version mismatch
+        """
         resolved = Path(library_path).resolve() if library_path else find_native_library()
         if resolved is None or not resolved.is_file():
             raise NativeRuntimeError(
@@ -285,6 +385,7 @@ class NativePAKernel:
             )
 
     def _configure_signatures(self) -> None:
+        """Configure ctypes function signatures for the native library."""
         library = self._library
         library.ptm_abi_version.argtypes = []
         library.ptm_abi_version.restype = ctypes.c_uint32
@@ -308,6 +409,11 @@ class NativePAKernel:
         library.ptm_threshold_4096_eval.restype = ctypes.c_int
 
     def _raise_status(self, status: int) -> None:
+        """Raise an exception for a native library error status.
+        
+        Args:
+            status: Error status code from the native library
+        """
         message = self._library.ptm_status_message(status)
         decoded = message.decode("utf-8", errors="replace") if message else "unknown"
         raise NativeRuntimeError(f"native PA evaluation failed ({status}): {decoded}")
@@ -318,6 +424,20 @@ class NativePAKernel:
         selection: FixedBitBlock,
         minimum_true: int,
     ) -> PAResult:
+        """Evaluate threshold kernel on input bits.
+        
+        Args:
+            inputs: Input bit block
+            selection: Selection mask bit block
+            minimum_true: Minimum number of selected bits that must be true
+            
+        Returns:
+            PAResult with evaluation outcome and matched/missing bit details
+            
+        Raises:
+            ValueError: If input/selection shapes or semantics differ
+            NativeRuntimeError: If native evaluation fails
+        """
         if inputs.bit_count != selection.bit_count:
             raise ValueError("input and selection shapes differ")
         if inputs.semantic is not selection.semantic:
@@ -363,6 +483,19 @@ class NativePAKernel:
     def evaluate_artifact(
         self, artifact: PAArtifact, inputs: FixedBitBlock
     ) -> PAResult:
+        """Evaluate a PA artifact against input bits.
+        
+        Args:
+            artifact: PAArtifact containing threshold configuration
+            inputs: Input bit block
+            
+        Returns:
+            PAResult with evaluation outcome
+            
+        Raises:
+            ValueError: If artifact hash is invalid or shapes/semantics differ
+            NativeRuntimeError: If native evaluation fails
+        """
         if not artifact.verify_artifact_id():
             raise ValueError("artifact content hash is invalid")
         if artifact.input_shape.bit_count != inputs.bit_count:
@@ -386,7 +519,14 @@ def _marshal_logic_program(target: _LogicProgram32, program: LogicProgram32) -> 
 
 
 class NativeLogicProgramBatch:
-    """Prepared native state whose program and binding buffers stay synchronized."""
+    """Prepared native state whose program and binding buffers stay synchronized.
+    
+    This class manages the execution of batched Logic programs on the native
+    library, ensuring proper memory alignment and result collection.
+    
+    Attributes:
+        count: Number of programs in the batch
+    """
 
     def __init__(
         self,
@@ -394,6 +534,16 @@ class NativeLogicProgramBatch:
         programs: Sequence[LogicProgram32],
         bindings: Sequence[Sequence[bool | int]],
     ) -> None:
+        """Initialize a batch of Logic programs for native evaluation.
+        
+        Args:
+            runtime: NativeLogicKernel providing the library context
+            programs: Sequence of Logic programs to evaluate
+            bindings: Variable bindings (A-E) for each program
+            
+        Raises:
+            ValueError: If program/binding counts differ or bindings are incomplete
+        """
         if len(programs) != len(bindings):
             raise ValueError("program and binding row counts differ")
         if not programs:
@@ -415,6 +565,7 @@ class NativeLogicProgramBatch:
             )
 
     def execute(self) -> None:
+        """Execute all programs in the batch on the native library."""
         status = self._runtime._library.ptm_logic_program32_eval_batch(
             self._programs.pointer,
             self._bindings,
@@ -426,6 +577,14 @@ class NativeLogicProgramBatch:
         self._has_executed = True
 
     def results(self) -> tuple[FixedLogicResult, ...]:
+        """Return evaluation results for all programs in the batch.
+        
+        Returns:
+            Tuple of FixedLogicResult for each program
+            
+        Raises:
+            NativeRuntimeError: If batch has not been executed
+        """
         if not self._has_executed:
             raise NativeRuntimeError("native Logic batch has not been executed")
         return tuple(
@@ -438,12 +597,34 @@ class NativeLogicProgramBatch:
         )
 
     def evaluate(self) -> tuple[FixedLogicResult, ...]:
+        """Execute the batch and return results.
+        
+        Returns:
+            Tuple of FixedLogicResult for each program
+        """
         self.execute()
         return self.results()
 
 
 class NativeLogicKernel:
+    """Native Logic kernel for evaluating compiled Logic programs.
+    
+    This class provides access to the PTM native library's Logic program
+    evaluation functions.
+    
+    Attributes:
+        library_path: Path to the loaded native library
+    """
+    
     def __init__(self, library_path: str | os.PathLike[str] | None = None) -> None:
+        """Initialize the native Logic kernel.
+        
+        Args:
+            library_path: Optional path to the native library
+            
+        Raises:
+            NativeRuntimeError: If library is not found or ABI version mismatch
+        """
         resolved = Path(library_path).resolve() if library_path else find_native_library()
         if resolved is None or not resolved.is_file():
             raise NativeRuntimeError(
@@ -470,6 +651,11 @@ class NativeLogicKernel:
             )
 
     def _raise_status(self, status: int) -> None:
+        """Raise an exception for a native library error status.
+        
+        Args:
+            status: Error status code from the native library
+        """
         message = self._library.ptm_status_message(status)
         decoded = message.decode("utf-8", errors="replace") if message else "unknown"
         raise NativeRuntimeError(
@@ -481,11 +667,30 @@ class NativeLogicKernel:
         programs: Sequence[LogicProgram32],
         bindings: Sequence[Sequence[bool | int]],
     ) -> NativeLogicProgramBatch:
+        """Prepare a batch of Logic programs for evaluation.
+        
+        Args:
+            programs: Sequence of Logic programs to evaluate
+            bindings: Variable bindings (A-E) for each program
+            
+        Returns:
+            NativeLogicProgramBatch ready for execution
+        """
         return NativeLogicProgramBatch(self, programs, bindings)
 
 
 @dataclass(frozen=True, slots=True)
 class PackedTMResult64:
+    """Results from a 64-example packed TM evaluation.
+    
+    Attributes:
+        valid_example_mask: Bitmask of valid examples in the batch
+        prediction_mask: Bitmask of positive predictions
+        scores: Raw clause sum scores for each example
+        clause_outputs: Clause output bitmasks
+        feedback_clause_outputs: Feedback clause output bitmasks
+        backend: Backend used for evaluation
+    """
     valid_example_mask: int
     prediction_mask: int
     scores: tuple[int, ...]
@@ -494,6 +699,17 @@ class PackedTMResult64:
     backend: PackedTMBackend
 
     def predictions(self, lane_count: int) -> tuple[int, ...]:
+        """Extract individual predictions from the prediction mask.
+        
+        Args:
+            lane_count: Number of examples to extract (0-64)
+            
+        Returns:
+            Tuple of prediction bits (0 or 1) for each lane
+            
+        Raises:
+            ValueError: If lane_count is out of range or mask is invalid
+        """
         if not 0 <= lane_count <= 64:
             raise ValueError("lane_count must be between zero and 64")
         expected_mask = (1 << lane_count) - 1 if lane_count < 64 else (1 << 64) - 1
@@ -503,13 +719,32 @@ class PackedTMResult64:
 
 
 class NativePackedTsetlinMachine:
-    """Immutable bit-sliced TA state and 64-example packed inference image."""
+    """Immutable bit-sliced TA state and 64-example packed inference image.
+    
+    This class provides high-throughput TM inference by packing up to 64
+    examples into SIMD-wide operations.
+    
+    Attributes:
+        library_path: Path to the loaded native library
+        number_of_clauses: Number of clauses in the TM model
+        number_of_features: Number of features in the TM model
+    """
 
     def __init__(
         self,
         snapshot: TMSnapshot,
         library_path: str | os.PathLike[str] | None = None,
     ) -> None:
+        """Initialize a packed TM from a snapshot.
+        
+        Args:
+            snapshot: TMSnapshot containing TM state and configuration
+            library_path: Optional path to the native library
+            
+        Raises:
+            NativeRuntimeError: If library is not found or ABI version mismatch
+            ValueError: If snapshot configuration is invalid
+        """
         resolved = Path(library_path).resolve() if library_path else find_native_library()
         if resolved is None or not resolved.is_file():
             raise NativeRuntimeError(

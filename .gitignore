@@ -1,32 +1,35 @@
 ```
-# Build artifacts
-out/
-build/
-build-wsl/
-cmake-build-*/
-dist/
-*.egg-info/
-*.json
-
-# External reference downloads belong in docs/references.md as links
-/*.pdf
-
-# Dependencies
-.venv/
-venv/
+# Python
 __pycache__/
 *.pyc
-
-# Logs and temp files
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
 *.log
-*.tmp
-
-# Environment
-.env
-.env.local
-*.env.*
-
-# Editors
-.vscode/
-.idea/
+*.pot
+*.pyc
+*.pyo
+*.pyd
+.MF
+tags
+TAGS
+ID
+GTAGS
+GRTAGS
+GSYMS
+GPATH
+.DS_Store
+Thumbs.db
 ```

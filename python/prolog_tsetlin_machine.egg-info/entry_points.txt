@@ -1,0 +1,3 @@
+[console_scripts]
+ptm = prolog_tsetlin.cli:main
+ptm-tui = prolog_tsetlin.tui:main
