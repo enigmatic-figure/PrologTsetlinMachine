@@ -1,7 +1,8 @@
 # Portable model export and static inference runtime
 
-Status: packed-TM, fixed-Logic, and PA masked-threshold vertical slices
-implemented; host integration and broader Milestone 5 work are in progress.
+Status: packed-TM, fixed-Logic, PA masked-threshold, packed-TM raw-record
+preprocessing, installed CMake targets, and Python/native inspection commands
+are implemented; broader host integration and Milestone 5 work are in progress.
 
 ## Motivation
 
@@ -145,12 +146,15 @@ and load-time network access are forbidden.
 A model is not portable when its feature ordering exists only in the training
 script. Every export therefore includes an introspectable input contract.
 
-All artifacts must support already-materialized typed tensor or packed-feature
-inputs. An artifact may additionally contain a bounded, versioned Class I
-transform graph for raw records. In that case the same runtime may expose a
-record-oriented convenience path. If a transform cannot be represented by the
-portable catalog, export must require precomputed features and say so in the
-manifest; it must not silently approximate training-time preprocessing.
+All artifacts support already-materialized typed tensor or packed-feature
+inputs. Packed binary TMs may additionally embed `ptm.preprocessing.v1`, a
+bounded ordered transform contract for numeric thresholds/ranges, typed
+categorical equality/membership, Boolean values, and missingness. The Python
+loader and standalone runtime expose record-oriented paths with identical
+non-coercing value rules. If a transform cannot be represented by this portable
+catalog, export requires precomputed features and says so in the manifest; it
+does not silently approximate training-time preprocessing. The exact schema is
+specified in [deterministic raw-record preprocessing](preprocessing-contract.md).
 
 This distinction allows a tiny learned Boolean feature to be embedded in a
 larger tensor system without requiring that system to adopt PTM's data-loading
@@ -174,6 +178,8 @@ The initial ABI exposes:
 - `ptmrt_model_open_file` and `ptmrt_model_open_memory`;
 - `ptmrt_model_describe`;
 - `ptmrt_model_manifest_json` and `ptmrt_model_verify`;
+- `ptmrt_model_has_preprocessing` and `ptmrt_model_preprocess_record` for
+  artifacts that embed the optional raw-record contract;
 - `ptmrt_model_run` over named, caller-owned tensor views;
 - `ptmrt_model_close`;
 - `ptmrt_status_message`.
@@ -185,8 +191,8 @@ that must pass artifact conformance vectors and exact semantic gates before
 selection. Read-only handles are safe for concurrent inference with
 caller-private input and output buffers.
 
-A companion `ptmrt` CLI provides `inspect`, `verify`, and `run` commands so a
-shared artifact can be evaluated without writing host code.
+A companion `ptmrt` CLI provides `inspect`, `verify`, `run`, and `run-record`
+commands so a shared artifact can be evaluated without writing host code.
 
 ## Implemented slice
 
@@ -196,6 +202,7 @@ packed-TM, fixed-Logic, and PA masked-threshold paths:
 ```powershell
 $env:PYTHONPATH = "$PWD\python"
 py -3 examples/export_xor_artifact.py out/artifacts/xor-little-guy.ptm
+py -3 examples/export_raw_xor_artifact.py out/artifacts/raw-xor-little-guy.ptm
 py -3 examples/export_logic_artifact.py out/artifacts/conditional-little-guy.ptm
 py -3 examples/export_pa_artifact.py out/artifacts/threshold-little-guy.ptm
 
@@ -203,6 +210,8 @@ py -3 examples/export_pa_artifact.py out/artifacts/threshold-little-guy.ptm
 .\build\ptmrt.exe inspect out/artifacts/xor-little-guy.ptm
 .\build\ptmrt.exe verify out/artifacts/xor-little-guy.ptm
 .\build\ptmrt.exe run out/artifacts/xor-little-guy.ptm 0,1
+.\build\ptmrt.exe run-record out/artifacts/raw-xor-little-guy.ptm `
+    left:bool=false right:bool=true
 .\build\ptmrt.exe inspect out/artifacts/conditional-little-guy.ptm
 .\build\ptmrt.exe verify out/artifacts/conditional-little-guy.ptm
 .\build\ptmrt.exe run out/artifacts/conditional-little-guy.ptm 1,0,1,0,0
@@ -256,19 +265,41 @@ The PA masked-threshold ports are:
 | output | `matched_slots` | `uint64[S]` | selected matching slots per lane |
 | output | `missing_slots` | `uint64[S]` | selected missing slots per lane |
 
-The present limitations are intentional and explicit: only binary packed TM,
-five-binding `LogicProgram32`, and fixed 32x32/64x64 PA masked-threshold
-artifacts with precomputed Boolean inputs are supported; each call uses the
-fixed 64-lane packed interface; execution is scalar; and there is not yet a
-raw-record transform graph, installed shared-library package, thin language
-binding, ONNX bridge, accelerator dispatch, or WebAssembly build.
+The present limitations are intentional and explicit: model heads remain
+binary packed TM, five-binding `LogicProgram32`, and fixed 32x32/64x64 PA
+masked thresholds; only packed TMs currently accept raw records; tokenization,
+regex, aggregates, relational comparisons, sequences, and temporal transforms
+are available in the Python host pipeline but must be materialized before this
+portable runtime boundary; each inference call uses the fixed 64-lane packed
+interface; execution is scalar; and there is not yet a thin language binding,
+multiclass/regression artifact, durable stream-checkpoint protocol, ONNX bridge,
+accelerator dispatch, or WebAssembly build.
+
+## Python artifact commands
+
+The installed `ptm` command provides the same portable workflow without
+requiring the native runtime:
+
+```bash
+ptm artifact inspect model.ptm --pretty
+ptm artifact inspect model.ptm --manifest --pretty
+ptm artifact verify model.ptm
+ptm artifact run-record model.ptm \
+  --record '{"age": 30, "status": "ready", "active": true}'
+ptm artifact run-record model.ptm --jsonl records.jsonl
+```
+
+`run-record` is intentionally limited to packed-TM artifacts carrying a
+`ptm.preprocessing.v1` contract. Its result reports the deterministic Boolean
+feature vector alongside each prediction. Use `--jsonl -` to read records from
+standard input.
 
 The native loader validates bounds, versions, reserved fields, declared model
 dimensions and ports, TM bitset tails, Logic instruction graphs, conformance
-structure, and the SHA-256 trailer. Full canonical-JSON and metadata-schema
-validation currently belongs to the Python reference loader; the native
-runtime treats non-execution metadata as opaque UTF-8 bytes after checking the
-execution-critical fields.
+structure, embedded preprocessing types/order/literal IDs, and the SHA-256
+trailer. Full canonical-JSON and metadata-schema validation currently belongs
+to the Python reference loader; the native runtime treats non-execution
+metadata as opaque UTF-8 bytes after checking the execution-critical fields.
 
 ## Export routine
 
@@ -286,9 +317,10 @@ The standardized exporter performs these stages explicitly:
 
 The current Python exporters perform this gate with the independent artifact
 loader and the source-specific scalar oracle. Cross-language golden artifacts
-for all three model kinds are loaded and executed by `ptmrt`. Invoking the
-native runtime as an additional gate inside every export remains a packaging
-step rather than a semantic dependency of the Python writer.
+for all three model kinds, including a packed-TM raw-record artifact, are loaded
+and executed by `ptmrt`. Invoking the native runtime as an additional gate
+inside every export remains a packaging step rather than a semantic dependency
+of the Python writer.
 
 The same source state and export options must produce byte-identical output.
 Partial, unaudited, activating, or hash-inconsistent lifecycle state is not

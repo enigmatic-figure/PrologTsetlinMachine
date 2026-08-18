@@ -166,6 +166,113 @@ void test_generic_tensor_run() {
             "runtime accepted a missing named tensor port");
 }
 
+void test_raw_record_preprocessing() {
+    const auto bytes = read_fixture("raw_xor_packed_tm_v1.hex");
+    auto model = open_golden(bytes);
+    require(ptmrt_model_has_preprocessing(model.value) == 1,
+            "runtime did not expose embedded preprocessing");
+
+    std::array<ptmrt_record_field, 2> fields{};
+    fields[0].name = "left";
+    fields[0].kind = PTMRT_VALUE_BOOL;
+    fields[0].boolean_value = 0;
+    fields[1].name = "right";
+    fields[1].kind = PTMRT_VALUE_BOOL;
+    fields[1].boolean_value = 1;
+    std::uint64_t required = 0;
+    require(ptmrt_model_preprocess_record(
+                model.value, fields.data(), fields.size(), nullptr, 0,
+                &required) == PTMRT_STATUS_OK && required == 2,
+            "runtime preprocessing size query failed");
+    std::array<std::uint64_t, 2> features{9, 9};
+    require(ptmrt_model_preprocess_record(
+                model.value, fields.data(), fields.size(), features.data(),
+                features.size(), &required) == PTMRT_STATUS_OK &&
+                features[0] == 0 && features[1] == 1,
+            "runtime raw Boolean materialization is wrong");
+
+    std::uint64_t valid = 1;
+    std::uint64_t predictions = 0;
+    std::array<std::int32_t, 64> scores{};
+    std::array<ptmrt_tensor_view, 2> inputs{};
+    inputs[0] = {"features", features.data(), sizeof(features),
+                 PTMRT_DTYPE_UINT64, 1, {2, 0, 0, 0}};
+    inputs[1] = {"valid_mask", &valid, sizeof(valid),
+                 PTMRT_DTYPE_UINT64, 0, {0, 0, 0, 0}};
+    std::array<ptmrt_tensor_view, 2> outputs{};
+    outputs[0] = {"predictions", &predictions, sizeof(predictions),
+                  PTMRT_DTYPE_UINT64, 0, {0, 0, 0, 0}};
+    outputs[1] = {"scores", scores.data(), sizeof(scores),
+                  PTMRT_DTYPE_INT32, 1, {64, 0, 0, 0}};
+    require(ptmrt_model_run(model.value, inputs.data(), inputs.size(),
+                            outputs.data(), outputs.size()) ==
+                PTMRT_STATUS_OK && predictions == 1 && scores[0] == 1,
+            "runtime raw-record inference is wrong");
+
+    auto invalid_fields = fields;
+    invalid_fields[0].kind = PTMRT_VALUE_INT64;
+    invalid_fields[0].integer_value = 0;
+    features = {9, 9};
+    require(ptmrt_model_preprocess_record(
+                model.value, invalid_fields.data(), invalid_fields.size(),
+                features.data(), features.size(), &required) ==
+                PTMRT_STATUS_INVALID_ARGUMENT &&
+                features[0] == 9 && features[1] == 9,
+            "runtime accepted an untyped Boolean or partially wrote output");
+    require(ptmrt_model_preprocess_record(
+                model.value, fields.data(), fields.size(), features.data(), 1,
+                &required) == PTMRT_STATUS_INSUFFICIENT_CAPACITY,
+            "runtime accepted an undersized preprocessing buffer");
+
+    const auto old_bytes = read_golden();
+    auto old_model = open_golden(old_bytes);
+    require(ptmrt_model_has_preprocessing(old_model.value) == 0 &&
+                ptmrt_model_preprocess_record(
+                    old_model.value, nullptr, 0, nullptr, 0, &required) ==
+                    PTMRT_STATUS_UNSUPPORTED_MODEL,
+            "precomputed-only artifacts advertised raw preprocessing");
+}
+
+void test_all_portable_preprocessing_transforms() {
+    const auto bytes = read_fixture("preprocessing_demo_v1.hex");
+    auto model = open_golden(bytes);
+    const std::string status = "ready";
+    std::array<ptmrt_record_field, 3> fields{};
+    fields[0].name = "age";
+    fields[0].kind = PTMRT_VALUE_FLOAT64;
+    fields[0].number_value = 30.0;
+    fields[1].name = "status";
+    fields[1].kind = PTMRT_VALUE_UTF8;
+    fields[1].string_data = status.data();
+    fields[1].string_size = status.size();
+    fields[2].name = "active";
+    fields[2].kind = PTMRT_VALUE_BOOL;
+    fields[2].boolean_value = 1;
+    std::array<std::uint64_t, 6> features{};
+    std::uint64_t required = 0;
+    require(ptmrt_model_preprocess_record(
+                model.value, fields.data(), fields.size(), features.data(),
+                features.size(), &required) == PTMRT_STATUS_OK &&
+                features == std::array<std::uint64_t, 6>{1, 1, 1, 1, 1, 0},
+            "native preprocessing transforms disagree with the contract");
+
+    fields[0].kind = PTMRT_VALUE_INT64;
+    fields[0].integer_value = 19;
+    fields[1].kind = PTMRT_VALUE_NULL;
+    fields[2].kind = PTMRT_VALUE_NULL;
+    require(ptmrt_model_preprocess_record(
+                model.value, fields.data(), fields.size(), features.data(),
+                features.size(), &required) == PTMRT_STATUS_OK &&
+                features == std::array<std::uint64_t, 6>{1, 0, 1, 0, 0, 1},
+            "native preprocessing null policies are wrong");
+
+    require(ptmrt_model_preprocess_record(
+                model.value, fields.data() + 1, fields.size() - 1,
+                features.data(), features.size(), &required) ==
+                PTMRT_STATUS_INVALID_ARGUMENT,
+            "native preprocessing ignored a required missing field");
+}
+
 void test_logic_artifact_and_generic_tensor_run() {
     const auto bytes = read_fixture("conditional_logic_program_v1.hex");
     auto model = open_golden(bytes);
@@ -327,6 +434,48 @@ void test_integrity_and_argument_rejection() {
     require(ptmrt_model_open_memory(bytes.data(), 12, &model) ==
                 PTMRT_STATUS_INVALID_FORMAT,
             "runtime accepted a truncated artifact");
+}
+
+void test_bounded_hostile_artifact_corpus() {
+    const auto golden = read_golden();
+    ptmrt_model* model = nullptr;
+
+    const auto reject = [&model](const std::uint8_t* data, std::uint64_t size,
+                                 std::string_view message) {
+        model = nullptr;
+        const auto status = ptmrt_model_open_memory(data, size, &model);
+        require(status != PTMRT_STATUS_OK && model == nullptr, message);
+    };
+
+    const auto prefix_limit = std::min<std::size_t>(golden.size(), 96U);
+    for (std::size_t size = 0; size < prefix_limit; ++size) {
+        reject(golden.data(), size,
+               "runtime accepted a hostile truncated artifact prefix");
+    }
+    for (std::size_t removed = 1;
+         removed <= std::min<std::size_t>(golden.size(), 64U); ++removed) {
+        reject(golden.data(), golden.size() - removed,
+               "runtime accepted a hostile truncated artifact suffix");
+    }
+
+    const auto stride = std::max<std::size_t>(1U, golden.size() / 128U);
+    for (std::size_t offset = 0; offset < golden.size(); offset += stride) {
+        auto mutated = golden;
+        mutated[offset] ^= 0xa5U;
+        reject(mutated.data(), mutated.size(),
+               "runtime accepted a single-byte artifact mutation");
+    }
+
+    auto oversized_manifest = golden;
+    const auto hostile_size = std::numeric_limits<std::uint64_t>::max();
+    for (std::size_t byte = 0; byte < sizeof(hostile_size); ++byte) {
+        oversized_manifest[24U + byte] = static_cast<std::uint8_t>(
+            hostile_size >> (byte * 8U));
+    }
+    reject(oversized_manifest.data(), oversized_manifest.size(),
+           "runtime accepted an overflowing manifest size");
+    reject(golden.data(), hostile_size,
+           "runtime accepted an artifact size above its allocation ceiling");
 }
 
 void test_file_loader() {
@@ -524,9 +673,12 @@ int main() {
     try {
         test_description_manifest_and_conformance();
         test_generic_tensor_run();
+        test_raw_record_preprocessing();
+        test_all_portable_preprocessing_transforms();
         test_logic_artifact_and_generic_tensor_run();
         test_masked_threshold_artifact_and_generic_tensor_run();
         test_integrity_and_argument_rejection();
+        test_bounded_hostile_artifact_corpus();
         test_file_loader();
         test_concurrent_read_only_inference();
         test_concurrent_logic_inference();

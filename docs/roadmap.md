@@ -7,7 +7,7 @@
 - [x] Portable C++ bit blocks, Fredkin primitives, PA kernel, and scalar TM.
 - [x] Cross-language kernel vectors and exact snapshot replay tests.
 
-## Milestone 1: native vertical slice — in progress
+## Milestone 1: native vertical slice — complete
 
 - [x] Stable C ABI and dependency-free Python native binding.
 - [x] Strongly typed 32x32 and 64x64 PA buffers.
@@ -37,14 +37,14 @@
 - [x] Exhaustive behavior signatures and equivalence merging for five inputs.
 - [x] Atomic snapshots, hash-chained event-log persistence, replay, and compaction.
 
-## Milestone 3: Class III bounded search — in progress
+## Milestone 3: Class III bounded search — complete
 
 - [x] Discover and verify GNU Prolog 1.5 toolchain.
 - [x] Implement a resource-bounded exact masked-threshold search template.
 - [x] Lower Prolog solutions to content-addressed Class II artifacts.
 - [x] Validate generated artifacts through the native runtime.
-- [ ] Add typed feature-template and TA-clause-configuration outputs.
-- [ ] Add bounded decision-tree and counterexample-guided repair templates.
+- [x] Add typed feature-template and TA-clause-configuration outputs.
+- [x] Add bounded decision-tree and counterexample-guided repair templates.
 
 ## Milestone 4: data connectors and learned allocation
 
@@ -53,8 +53,11 @@
 - [x] Collision ceilings and clause/state exhaustion calibration.
 - [x] Safe typed Logic AST, fact interface, evaluator, and primitive-IR lowering.
 - [x] Bounded AST count/depth/edge/two-hop relational encoding.
-- [ ] Arrow/Parquet streaming and image/token adapters.
-- [ ] Regex, aggregate, relational, sequence, and temporal transforms.
+- [x] Deterministic portable raw-record preprocessing contract for numeric,
+  typed categorical, Boolean, and missingness transforms.
+- [x] Connector-neutral bounded record iterator for packed-TM inference.
+- [x] Arrow/Parquet streaming and image/token adapters.
+- [x] Regex, aggregate, relational, sequence, and temporal transforms.
 - [ ] Budgeted feature persistence and retirement.
 - [ ] Multi-class, convolutional, regression, and graph adapters.
 
@@ -84,9 +87,26 @@
 - [x] Implement an immutable, training-free scalar CPU executor.
 - [ ] Add optional, correctness-gated SIMD/CUDA runtime dispatch.
 - [x] Add `ptmrt inspect`, `verify`, and `run` CLI commands.
+- [x] Add an embedded preprocessing contract, typed record C ABI, and
+  `ptmrt run-record` path for packed binary TMs.
 - [ ] Add thin language bindings over the same task-neutral tensor interface.
 - [x] Verify deterministic concurrent inference and bounded, corrupted, and
   incompatible-artifact rejection on Windows and Linux.
 - [ ] Add broader hostile-input fuzzing and a sandboxed/WebAssembly build.
 - [ ] Add standard-operator ONNX lowering where exact and a compact PTM custom
   operator for artifacts that are better embedded through `ptmrt`.
+
+## Milestone 6: integrated explorer and release hardening — in progress
+
+- [x] Adopt the Apache License 2.0 and publish package license metadata.
+- [x] Establish one version source shared by Python artifacts, packaging, and
+  CMake.
+- [x] Add Windows/Linux Python, native, installed-consumer, wheel, release
+  metadata, and documentation CI gates.
+- [x] Add `ptm artifact inspect`, `verify`, and typed `run-record` commands.
+- [x] Add a schema-driven artifact explorer to the Textual workbench.
+- [x] Expose bounded Prolog searches through stable CLI and TUI services.
+- [ ] Split the artifact, Prolog bridge, and TUI application modules by
+  responsibility while preserving their tested behavior.
+- [x] Add property-based and hostile-input fuzzing at artifact and
+  preprocessing boundaries.

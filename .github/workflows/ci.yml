@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install test environment
+        run: python -m pip install -e ".[tui,test]"
+      - name: Run Python tests
+        run: python -m pytest tests/python
+
+  native:
+    name: Native / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure PTM
+        run: >-
+          cmake -S . -B out/ci-native
+          -DPTM_BUILD_TESTS=ON
+          -DPTM_BUILD_BENCHMARKS=OFF
+          -DCMAKE_BUILD_TYPE=Release
+      - name: Build PTM
+        run: cmake --build out/ci-native --config Release --parallel
+      - name: Run native tests
+        run: ctest --test-dir out/ci-native -C Release --output-on-failure
+      - name: Install PTM
+        run: cmake --install out/ci-native --config Release --prefix "${{ runner.temp }}/ptm-install"
+      - name: Configure clean consumer
+        run: >-
+          cmake -S tests/consumer -B out/ci-consumer
+          -DCMAKE_PREFIX_PATH="${{ runner.temp }}/ptm-install"
+          -DCMAKE_BUILD_TYPE=Release
+      - name: Build clean consumer
+        run: cmake --build out/ci-consumer --config Release --parallel
+      - name: Run clean consumer
+        run: ctest --test-dir out/ci-consumer -C Release --output-on-failure
+
+  data:
+    name: Streaming data adapters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install data adapter tests
+        run: python -m pip install -e ".[data,test]"
+      - name: Run connector and transform tests
+        run: >-
+          python -m pytest
+          tests/python/test_data_connectors.py
+          tests/python/test_record_transforms.py
+
+  prolog:
+    name: GNU Prolog bounded search
+    runs-on: ubuntu-latest
+    env:
+      PTM_GPROLOG: /usr/bin/gprolog
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install GNU Prolog
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gprolog
+      - name: Install PTM tests
+        run: python -m pip install -e ".[test,tui]"
+      - name: Compile bounded search templates
+        run: |
+          gplc -c --no-susp-warn -o /tmp/bounded_threshold_search.o prolog/bounded_threshold_search.pl
+          gplc -c --no-susp-warn -o /tmp/bounded_structure_search.o prolog/bounded_structure_search.pl
+      - name: Run Prolog bridge tests
+        run: >-
+          python -m pytest
+          tests/python/test_prolog_bridge.py
+          tests/python/test_search_service.py
+          tests/python/test_tui.py::test_tui_runs_repair_shows_counterexamples_and_exports
+
+  distribution:
+    name: Distribution and documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Check release metadata and links
+        run: |
+          python scripts/check_release_metadata.py
+          python scripts/check_markdown_links.py
+      - name: Build source and wheel distributions
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Test the built wheel in isolation
+        run: |
+          python -m venv out/wheel-smoke
+          out/wheel-smoke/bin/python -m pip install dist/*.whl
+          out/wheel-smoke/bin/ptm --version
+          out/wheel-smoke/bin/python -c "from prolog_tsetlin import TokenAdapter; assert TokenAdapter('text').tokenize('Hello') == ('hello',)"
+          test -f out/wheel-smoke/share/prolog-tsetlin-machine/prolog/bounded_structure_search.pl

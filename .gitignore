@@ -1,7 +1,15 @@
 ```
 # Build artifacts
 out/
+build/
+build-wsl/
+cmake-build-*/
+dist/
+*.egg-info/
 *.json
+
+# External reference downloads belong in docs/references.md as links
+/*.pdf
 
 # Dependencies
 .venv/

@@ -1,25 +1,98 @@
 from __future__ import annotations
 
 import os
+import shutil
 import unittest
 from pathlib import Path
 
+from prolog_tsetlin import prolog_bridge
 from prolog_tsetlin import (
+    BooleanDecisionTree,
+    DataType,
+    DecisionTreeSearchProblem,
+    FeatureSchema,
+    FeatureTemplateCandidate,
+    FeatureTemplateSearchProblem,
+    FieldKind,
+    GNUPrologSearch,
     GNUPrologThresholdSearch,
     FixedBitBlock,
     InputShape,
     NoThresholdSolution,
     NativePAKernel,
+    NoDecisionTreeSolution,
+    NoFeatureTemplateSolution,
+    NoTAClauseSolution,
     PortSemantic,
     RestorationHandle,
     SlotBinding,
     SourceKind,
+    TAClauseSearchProblem,
     ThresholdSearchProblem,
     find_native_library,
 )
 
 
-GPROLOG = Path(os.environ.get("PTM_GPROLOG", r"C:\GNU-Prolog\bin\gprolog.exe"))
+GPROLOG = Path(
+    os.environ.get("PTM_GPROLOG")
+    or shutil.which("gprolog")
+    or r"C:\GNU-Prolog\bin\gprolog.exe"
+)
+
+
+class BoundedStructureProblemTests(unittest.TestCase):
+    def test_windows_prolog_environment_disables_gui_console_without_mutation(
+        self,
+    ) -> None:
+        parent = {"LINEDIT": "gui=silent", "PTM_SENTINEL": "preserved"}
+
+        child = prolog_bridge._prolog_process_environment(parent, windows=True)
+
+        self.assertEqual(parent["LINEDIT"], "gui=silent")
+        self.assertEqual(child["LINEDIT"], "gui=no")
+        self.assertEqual(child["PTM_SENTINEL"], "preserved")
+
+    def test_non_windows_prolog_environment_preserves_linedit(self) -> None:
+        parent = {"LINEDIT": "ansi=no"}
+
+        child = prolog_bridge._prolog_process_environment(parent, windows=False)
+
+        self.assertEqual(child, parent)
+        self.assertIsNot(child, parent)
+
+    def test_typed_template_candidate_must_match_registry_type(self) -> None:
+        with self.assertRaisesRegex(ValueError, "has type"):
+            FeatureTemplateCandidate.create(
+                field_name="temperature",
+                template_id="numeric_threshold_v1",
+                data_type=DataType.CATEGORICAL,
+                parameters={"thresholds": [20.0]},
+            )
+
+    def test_ta_clause_and_tree_candidate_budgets_are_enforced(self) -> None:
+        with self.assertRaisesRegex(ValueError, "candidates"):
+            TAClauseSearchProblem.create(
+                feature_count=256,
+                max_literals=3,
+                examples=[{0}, set()],
+                labels=[1, 0],
+            )
+        with self.assertRaisesRegex(ValueError, "candidates"):
+            DecisionTreeSearchProblem.create(
+                slot_count=5,
+                max_depth=3,
+                examples=[set()],
+                labels=[0],
+            )
+
+    def test_decision_tree_problem_rejects_contradictory_rows(self) -> None:
+        with self.assertRaisesRegex(ValueError, "contradictory"):
+            DecisionTreeSearchProblem.create(
+                slot_count=2,
+                max_depth=2,
+                examples=[{0}, {0}],
+                labels=[0, 1],
+            )
 
 
 @unittest.skipUnless(GPROLOG.is_file(), "GNU Prolog is not installed")
@@ -77,6 +150,140 @@ class GNUPrologBridgeTests(unittest.TestCase):
                 max_selected=3,
                 positive_examples=[{0}],
                 negative_examples=[set()],
+            )
+
+    def test_search_selects_a_typed_feature_template(self) -> None:
+        candidates = (
+            FeatureTemplateCandidate.create(
+                field_name="status",
+                template_id="categorical_v1",
+                data_type=DataType.CATEGORICAL,
+                parameters={"categories": ["cold"]},
+            ),
+            FeatureTemplateCandidate.create(
+                field_name="status",
+                template_id="categorical_v1",
+                data_type=DataType.CATEGORICAL,
+                parameters={"categories": ["hot"]},
+            ),
+        )
+        problem = FeatureTemplateSearchProblem.create(
+            candidates=candidates,
+            labels=[0, 1, 1, 0],
+            coverage=[
+                [0, 0, 1, 0],
+                [0, 1, 1, 0],
+            ],
+        )
+        result = GNUPrologSearch(GPROLOG).search_feature_template(problem)
+        self.assertEqual(result.candidate_index, 1)
+        self.assertEqual(result.dataset_digest, problem.dataset_digest())
+        schema = FeatureSchema.from_fields(status=FieldKind.CATEGORY)
+        catalog, generated = result.create_catalog(schema)
+        self.assertEqual(len(catalog.literals), 1)
+        self.assertEqual(len(generated["status"]), 1)
+
+    def test_search_emits_a_signed_ta_clause_configuration(self) -> None:
+        rows = [set(), {0}, {1}, {0, 1}]
+        problem = TAClauseSearchProblem.create(
+            feature_count=2,
+            max_literals=2,
+            examples=rows,
+            labels=[0, 1, 0, 0],
+        )
+        result = GNUPrologSearch(GPROLOG).search_ta_clause(problem)
+        self.assertEqual(result.included_literals, (0, 3))
+        configuration = result.to_ta_configuration(
+            problem,
+            states_per_action=100,
+            specificity=3.0,
+            threshold=10,
+        )
+        self.assertEqual(configuration.clause_configs[0].included_literals, (0, 3))
+        self.assertEqual(configuration.final_accuracy, 1.0)
+        self.assertEqual(configuration.metadata["analysis_type"], "prolog_ta_clause_configuration")
+
+    def test_searches_xor_tree_and_lowers_to_fixed_logic(self) -> None:
+        rows = [set(), {0}, {1}, {0, 1}]
+        problem = DecisionTreeSearchProblem.create(
+            slot_count=2,
+            max_depth=2,
+            examples=rows,
+            labels=[0, 1, 1, 0],
+        )
+        result = GNUPrologSearch(GPROLOG).search_decision_tree(problem)
+        self.assertEqual(result.tree.depth, 2)
+        self.assertEqual(
+            tuple(result.tree.evaluate(row) for row in rows),
+            (False, True, True, False),
+        )
+        program = result.tree.to_logic_program()
+        self.assertEqual(
+            tuple(
+                program.evaluate((x0, x1, 0, 0, 0)).value
+                for x0, x1 in ((0, 0), (1, 0), (0, 1), (1, 1))
+            ),
+            (False, True, True, False),
+        )
+
+    def test_counterexample_guided_repair_synthesizes_a_guard(self) -> None:
+        rows = [set(), {0}, {1}, {0, 1}]
+        problem = DecisionTreeSearchProblem.create(
+            slot_count=2,
+            max_depth=2,
+            examples=rows,
+            labels=[0, 1, 1, 0],
+        )
+        result = GNUPrologSearch(GPROLOG).repair_decision_tree(
+            BooleanDecisionTree.leaf(False),
+            problem,
+            max_iterations=4,
+        )
+        self.assertEqual(result.mismatches_before, 2)
+        self.assertEqual(result.mismatch_count, 0)
+        self.assertEqual(len(result.counterexamples), 4)
+        self.assertEqual(
+            tuple(result.evaluate(row) for row in rows),
+            (False, True, True, False),
+        )
+        program = result.to_logic_program()
+        self.assertTrue(program.evaluate((1, 0, 0, 0, 0)).value)
+        self.assertFalse(program.evaluate((1, 1, 0, 0, 0)).value)
+
+    def test_structure_searches_report_typed_no_solution_results(self) -> None:
+        search = GNUPrologSearch(GPROLOG)
+        candidate = FeatureTemplateCandidate.create(
+            field_name="status",
+            template_id="categorical_v1",
+            data_type=DataType.CATEGORICAL,
+            parameters={"categories": ["hot"]},
+        )
+        with self.assertRaises(NoFeatureTemplateSolution):
+            search.search_feature_template(
+                FeatureTemplateSearchProblem.create(
+                    candidates=[candidate],
+                    labels=[0, 1],
+                    coverage=[[0, 0]],
+                )
+            )
+        rows = [set(), {0}, {1}, {0, 1}]
+        with self.assertRaises(NoTAClauseSolution):
+            search.search_ta_clause(
+                TAClauseSearchProblem.create(
+                    feature_count=2,
+                    max_literals=2,
+                    examples=rows,
+                    labels=[0, 1, 1, 0],
+                )
+            )
+        with self.assertRaises(NoDecisionTreeSolution):
+            search.search_decision_tree(
+                DecisionTreeSearchProblem.create(
+                    slot_count=2,
+                    max_depth=1,
+                    examples=rows,
+                    labels=[0, 1, 1, 0],
+                )
             )
 
 

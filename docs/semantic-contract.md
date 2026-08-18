@@ -26,9 +26,10 @@ trace additionally records the record ID, raw value, and result. This connects
 apparently independent thresholds back to their shared continuous variable.
 
 The initial bounded transform catalog contains numeric thresholds/intervals,
-categorical equality/membership, missingness, and token membership. Regex,
-aggregates, relational identity, and temporal windows are planned but are not
-silently approximated in version 1.
+categorical equality/membership, missingness, and token membership. Versioned
+host adapters now provide regex, aggregates, relational identity, sequences,
+and pairwise temporal windows, but these are not silently approximated in the
+portable artifact's version 1 preprocessing contract.
 
 ## Bit-plane types
 

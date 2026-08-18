@@ -109,6 +109,14 @@ be embedded in applications or model containers, but they never contain
 arbitrary executable code. See
 [Portable model export and static inference runtime](model-export-runtime.md).
 
+Packed-TM artifacts may also embed `ptm.preprocessing.v1`, an ordered and
+bounded transform contract for numeric thresholds/ranges, typed categorical
+equality/membership, Boolean values, and missingness. The Python and standalone
+C++ paths enforce the same non-coercing value rules and stable literal order.
+Connector parsing and richer transforms remain host responsibilities unless a
+later portable contract explicitly versions them. See
+[deterministic raw-record preprocessing](preprocessing-contract.md).
+
 ## Prolog boundary
 
 GNU Prolog is used as a compiler/search participant, not as the hot Boolean
@@ -123,11 +131,15 @@ Unbounded recursion, arbitrary dynamic predicates, and unrestricted foreign
 calls are excluded from generated inference artifacts. Search limits and the
 allowed Horn-clause subset will be explicit and versioned.
 
-The first implemented template performs exact, monotone masked-threshold search.
-Its finite combinatorial candidate count is checked in Python before GNU Prolog
-is launched, and a subprocess deadline supplies a second bound. A successful
-result is hashed with its slot map, validation signature, and restoration
-handle, then evaluated by the native kernel.
+The available templates perform exact monotone masked-threshold search, typed
+feature-template selection, signed TA-clause search, and read-once Boolean
+decision-tree search. Their finite candidate counts are checked in Python before
+GNU Prolog is launched, and a subprocess deadline supplies a second bound.
+Python re-evaluates every returned structure before it can instantiate a literal
+catalog, emit a TA-clause configuration, lower to a fixed Logic program, or
+create a content-addressed PA artifact. Counterexample repair leaves the parent
+immutable and synthesizes a bounded XOR guard until full finite validation has
+zero mismatches or an explicit iteration/search bound is exhausted.
 
 ## Consolidation lifecycle
 

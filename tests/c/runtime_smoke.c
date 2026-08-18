@@ -4,6 +4,7 @@
 
 int main(void) {
     ptmrt_model_description description = {0};
+    ptmrt_record_field field = {0};
     ptmrt_tensor_view tensor = {0};
     if (ptmrt_abi_version() != PTMRT_ABI_VERSION) {
         return 1;
@@ -19,5 +20,6 @@ int main(void) {
         PTMRT_MODEL_MASKED_THRESHOLD_V1 != 3) {
         return 3;
     }
-    return tensor.shape[0] == 2 ? 0 : 4;
+    field.kind = PTMRT_VALUE_NULL;
+    return tensor.shape[0] == 2 && field.kind == 0 ? 0 : 4;
 }

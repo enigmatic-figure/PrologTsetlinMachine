@@ -1,11 +1,13 @@
 # Textual TUI product and implementation plan
 
-Status: implementation started. The initial vertical slice adds a shared XOR
-training service and an optional Textual Overview/Train surface. Training can
-now be cancelled at epoch boundaries and completed runs expose a keyboard-
-accessible clause snapshot table; the remaining phases below continue to
-describe planned work. Textual remains outside runtime contracts and inference
-hot paths.
+Status: the initial vertical slice is implemented. It includes shared services,
+environment preflight, cancellable XOR training, clause inspection, safe
+artifact export, artifact loading and verification, schema-driven typed record
+controls, and packed-TM preprocessing/inference traces. The remaining phases
+below continue to describe planned work. A bounded Search workspace now covers
+thresholds, typed templates, TA clauses, decision trees, repair
+counterexamples, cancellation, and fixed-Logic export. Textual remains outside
+runtime contracts and inference hot paths.
 
 ## Executive direction
 
@@ -42,7 +44,7 @@ gets a short installation hint rather than an import traceback.
 | Class I representation | inspect schemas, literals, encoded rows, typed facts, and provenance traces | Python API is ready; custom data ingestion is not a general product workflow yet |
 | Scalar TM oracle | configure, train, predict, inspect TA state, snapshot | synchronous and intended as the semantic oracle, so UI work must leave the event loop |
 | Native packed TM | show CPU capabilities, selected backend, clause outputs, feedback outputs, scores, and predictions | depends on a discoverable shared library; CUDA control is not exposed by the Python binding |
-| Feature templates | browse template registry and analyze TA clause configurations | roadmap outputs that connect templates to bounded Prolog search are incomplete |
+| Feature templates | browse template registry and analyze TA clause configurations | bounded Prolog outputs now exist; a TUI search adapter is not yet implemented |
 | Logic dataset/AST | load, split, encode, report collisions/signatures, inspect AST and primitive graph | valuable but more advanced than the first-run path |
 | Prolog bridge | configure and run bounded monotone threshold search | GNU Prolog is optional and discovery can fail |
 | Class II logic/morphology | inspect fixed programs, behavior signatures, repairs, factoring, and merges | Python models artifacts, but the live native registry and persistence control plane lack a Python facade |
@@ -316,10 +318,13 @@ units, and quality/status rather than encoding meaning in message strings.
 - **Native:** call existing capability and packed-evaluation APIs. Discovery
   failure falls back to the scalar oracle and is shown in preflight.
 - **Artifacts:** use Python artifact APIs for training-side export/load. Invoke
-  `ptmrt` for independent verification/inference until thin runtime bindings
-  exist; capture its exact stdout/stderr and exit code.
+  the canonical Python verifier and inference service in the dependency-light
+  workbench. A later optional `ptmrt` adapter can display independent native
+  verification without changing the artifact controls.
 - **Prolog:** retain candidate-count and subprocess deadline safeguards from the
-  bridge. Present the command and bounds, not unrestricted query entry.
+  bridge. The workbench uses `ptm.search.request.v1`, displays bounds before
+  launch, and provides cooperative child-process cancellation; it never exposes
+  unrestricted query entry.
 - **Class II registry:** add a read-only snapshot/telemetry facade before live
   panels. Do not bind the TUI directly to C++ persistence internals.
 - **Benchmarks:** treat `ptm.benchmark.v1` JSONL as the source of truth and add

@@ -1,4 +1,5 @@
 #include "ptm/runtime.h"
+#include "preprocessing_runtime.hpp"
 
 #include <algorithm>
 #include <array>
@@ -32,6 +33,7 @@ constexpr std::size_t masked_threshold_header_size = 32;
 constexpr std::size_t logic_instruction_size = 8;
 constexpr std::size_t digest_size = 32;
 constexpr std::size_t maximum_artifact_size = 256U * 1024U * 1024U;
+constexpr std::size_t maximum_manifest_size = 16U * 1024U * 1024U;
 constexpr std::uint32_t maximum_dimension = 1U << 20U;
 constexpr std::uint32_t maximum_conformance_cases = 16;
 constexpr std::uint32_t logic_program_capacity = 32;
@@ -349,8 +351,11 @@ void describe_port(ptmrt_port_description& port,
                          "\"shape\":[64]") &&
            manifest_contains(
                manifest, "\"kind\":\"binary_classification\"") &&
-           manifest_contains(
-               manifest, "\"materialization\":\"precomputed\"");
+           (manifest_contains(
+                manifest, "\"materialization\":\"precomputed\"") ||
+            manifest_contains(
+                manifest,
+                "\"materialization\":\"precomputed_or_raw_record_v1\""));
 }
 
 [[nodiscard]] bool logic_manifest_matches(std::string_view manifest,
@@ -469,6 +474,7 @@ struct ptmrt_model {
     std::uint32_t pa_slot_count{};
     std::uint32_t pa_minimum_true{};
     MaskedThresholdConformanceCase pa_conformance{};
+    std::vector<ptm::runtime_detail::PreprocessingOutput> preprocessing;
 };
 
 namespace {
@@ -1037,7 +1043,8 @@ namespace {
                                   })) {
         return PTMRT_STATUS_INVALID_FORMAT;
     }
-    if (manifest_size_u64 > std::numeric_limits<std::size_t>::max() ||
+    if (manifest_size_u64 > maximum_manifest_size ||
+        manifest_size_u64 > std::numeric_limits<std::size_t>::max() ||
         payload_size_u64 > std::numeric_limits<std::size_t>::max()) {
         return PTMRT_STATUS_INVALID_FORMAT;
     }
@@ -1125,6 +1132,30 @@ namespace {
     }
 
     auto model = std::make_unique<ptmrt_model>();
+    const auto materialization =
+        ptm::runtime_detail::feature_materialization(manifest);
+    const auto literal_ids =
+        ptm::runtime_detail::feature_literal_ids(manifest);
+    if (!ptm::runtime_detail::parse_preprocessing(
+            manifest, features, model->preprocessing) ||
+        !materialization || !literal_ids ||
+        (*materialization != "precomputed" &&
+         *materialization != "precomputed_or_raw_record_v1") ||
+        (*materialization == "precomputed_or_raw_record_v1") !=
+            !model->preprocessing.empty()) {
+        return PTMRT_STATUS_INVALID_FORMAT;
+    }
+    if (!model->preprocessing.empty()) {
+        if (literal_ids->size() != model->preprocessing.size()) {
+            return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        for (std::size_t index = 0; index < literal_ids->size(); ++index) {
+            if ((*literal_ids)[index] !=
+                model->preprocessing[index].literal_id) {
+                return PTMRT_STATUS_INVALID_FORMAT;
+            }
+        }
+    }
     model->manifest = std::move(manifest);
     model->feature_word_count = feature_word_count;
     model->positive_masks.resize(mask_count);
@@ -1359,6 +1390,47 @@ ptmrt_status ptmrt_model_verify(const ptmrt_model* model) {
     }
     try {
         return verify_model(*model);
+    } catch (...) {
+        return PTMRT_STATUS_INTERNAL_ERROR;
+    }
+}
+
+std::uint32_t ptmrt_model_has_preprocessing(const ptmrt_model* model) {
+    return model != nullptr && !model->preprocessing.empty() ? 1U : 0U;
+}
+
+ptmrt_status ptmrt_model_preprocess_record(
+    const ptmrt_model* model,
+    const ptmrt_record_field* fields,
+    std::uint32_t field_count,
+    std::uint64_t* output_words,
+    std::uint64_t capacity,
+    std::uint64_t* required_words) {
+    if (model == nullptr || required_words == nullptr ||
+        (field_count != 0 && fields == nullptr)) {
+        return PTMRT_STATUS_NULL_POINTER;
+    }
+    if (model->preprocessing.empty()) {
+        *required_words = 0;
+        return PTMRT_STATUS_UNSUPPORTED_MODEL;
+    }
+    const auto required = static_cast<std::uint64_t>(model->preprocessing.size());
+    *required_words = required;
+    if (output_words == nullptr) {
+        return capacity == 0 ? PTMRT_STATUS_OK : PTMRT_STATUS_NULL_POINTER;
+    }
+    if (capacity < required) {
+        return PTMRT_STATUS_INSUFFICIENT_CAPACITY;
+    }
+    try {
+        std::vector<std::uint64_t> materialized(required);
+        if (!ptm::runtime_detail::materialize_preprocessing(
+                model->preprocessing, fields, field_count,
+                materialized.data())) {
+            return PTMRT_STATUS_INVALID_ARGUMENT;
+        }
+        std::copy(materialized.begin(), materialized.end(), output_words);
+        return PTMRT_STATUS_OK;
     } catch (...) {
         return PTMRT_STATUS_INTERNAL_ERROR;
     }

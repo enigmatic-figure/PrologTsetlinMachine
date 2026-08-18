@@ -2,6 +2,7 @@
 
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -308,14 +309,145 @@ void run(const char* path, std::string_view input_text) {
     fail("run", PTMRT_STATUS_UNSUPPORTED_MODEL);
 }
 
+struct OwnedRecordField {
+    std::string name;
+    std::string text;
+    std::uint32_t kind{};
+    std::uint32_t boolean_value{};
+    std::int64_t integer_value{};
+    double number_value{};
+};
+
+[[nodiscard]] OwnedRecordField parse_record_field(std::string_view argument) {
+    const auto colon = argument.find(':');
+    if (colon == std::string_view::npos || colon == 0) {
+        std::cerr << "ptmrt: record fields use NAME:TYPE=VALUE\n";
+        std::exit(2);
+    }
+    OwnedRecordField result{};
+    result.name = argument.substr(0, colon);
+    const auto specification = argument.substr(colon + 1);
+    if (specification == "null") {
+        result.kind = PTMRT_VALUE_NULL;
+        return result;
+    }
+    const auto equals = specification.find('=');
+    if (equals == std::string_view::npos) {
+        std::cerr << "ptmrt: non-null fields require NAME:TYPE=VALUE\n";
+        std::exit(2);
+    }
+    const auto type = specification.substr(0, equals);
+    const auto value = specification.substr(equals + 1);
+    if (type == "bool") {
+        result.kind = PTMRT_VALUE_BOOL;
+        if (value == "true") result.boolean_value = 1;
+        else if (value == "false") result.boolean_value = 0;
+        else {
+            std::cerr << "ptmrt: bool values must be true or false\n";
+            std::exit(2);
+        }
+    } else if (type == "int") {
+        result.kind = PTMRT_VALUE_INT64;
+        const auto parsed = std::from_chars(
+            value.data(), value.data() + value.size(), result.integer_value);
+        if (value.empty() || parsed.ec != std::errc{} ||
+            parsed.ptr != value.data() + value.size()) {
+            std::cerr << "ptmrt: int values must be signed 64-bit integers\n";
+            std::exit(2);
+        }
+    } else if (type == "float") {
+        result.kind = PTMRT_VALUE_FLOAT64;
+        const auto parsed = std::from_chars(
+            value.data(), value.data() + value.size(), result.number_value);
+        if (value.empty() || parsed.ec != std::errc{} ||
+            parsed.ptr != value.data() + value.size() ||
+            !std::isfinite(result.number_value)) {
+            std::cerr << "ptmrt: float values must be finite numbers\n";
+            std::exit(2);
+        }
+    } else if (type == "string") {
+        result.kind = PTMRT_VALUE_UTF8;
+        result.text = value;
+    } else {
+        std::cerr << "ptmrt: field type must be bool, int, float, string, or null\n";
+        std::exit(2);
+    }
+    return result;
+}
+
+void run_record(const char* path, int field_count, char** field_arguments) {
+    const auto model = open_model(path);
+    const auto description = describe(model);
+    if (description.model_kind != PTMRT_MODEL_PACKED_TM_BINARY_V1 ||
+        ptmrt_model_has_preprocessing(model.get()) == 0) {
+        fail("run-record", PTMRT_STATUS_UNSUPPORTED_MODEL);
+    }
+    if (field_count < 0 || field_count > 4096) {
+        fail("run-record", PTMRT_STATUS_INVALID_ARGUMENT);
+    }
+    std::vector<OwnedRecordField> owned;
+    owned.reserve(static_cast<std::size_t>(field_count));
+    for (int index = 0; index < field_count; ++index) {
+        owned.push_back(parse_record_field(field_arguments[index]));
+    }
+    std::vector<ptmrt_record_field> fields;
+    fields.reserve(owned.size());
+    for (const auto& item : owned) {
+        fields.push_back({
+            item.name.c_str(), item.kind, item.boolean_value,
+            item.integer_value, item.number_value,
+            item.kind == PTMRT_VALUE_UTF8 ? item.text.data() : nullptr,
+            item.kind == PTMRT_VALUE_UTF8 ? item.text.size() : 0U});
+    }
+    std::uint64_t required = 0;
+    auto status = ptmrt_model_preprocess_record(
+        model.get(), fields.data(), static_cast<std::uint32_t>(fields.size()),
+        nullptr, 0, &required);
+    if (status != PTMRT_STATUS_OK) fail("preprocess query", status);
+    std::vector<std::uint64_t> words(static_cast<std::size_t>(required));
+    status = ptmrt_model_preprocess_record(
+        model.get(), fields.data(), static_cast<std::uint32_t>(fields.size()),
+        words.data(), words.size(), &required);
+    if (status != PTMRT_STATUS_OK) fail("preprocess", status);
+
+    std::uint64_t valid_mask = 1;
+    std::array<ptmrt_tensor_view, 2> inputs{};
+    inputs[0] = {description.inputs[0].name, words.data(),
+                 words.size() * sizeof(std::uint64_t), PTMRT_DTYPE_UINT64, 1,
+                 {words.size(), 0, 0, 0}};
+    inputs[1] = {"valid_mask", &valid_mask, sizeof(valid_mask),
+                 PTMRT_DTYPE_UINT64, 0, {0, 0, 0, 0}};
+    std::uint64_t prediction_mask = 0;
+    std::array<std::int32_t, 64> scores{};
+    std::array<ptmrt_tensor_view, 2> outputs{};
+    outputs[0] = {"predictions", &prediction_mask, sizeof(prediction_mask),
+                  PTMRT_DTYPE_UINT64, 0, {0, 0, 0, 0}};
+    outputs[1] = {"scores", scores.data(), sizeof(scores),
+                  PTMRT_DTYPE_INT32, 1, {64, 0, 0, 0}};
+    status = ptmrt_model_run(
+        model.get(), inputs.data(), inputs.size(), outputs.data(),
+        outputs.size());
+    if (status != PTMRT_STATUS_OK) fail("run", status);
+    std::cout << "{\"artifact_id\":\"" << description.artifact_id
+              << "\",\"features\":[";
+    for (std::size_t index = 0; index < words.size(); ++index) {
+        if (index != 0) std::cout << ',';
+        std::cout << words[index];
+    }
+    std::cout << "],\"prediction\":" << (prediction_mask & 1U)
+              << ",\"score\":" << scores[0] << "}\n";
+}
+
 void print_help() {
     std::cout << "PTM static inference runtime\n\n"
               << "Usage:\n"
               << "  ptmrt inspect MODEL.ptm\n"
               << "  ptmrt verify MODEL.ptm\n"
-              << "  ptmrt run MODEL.ptm INPUT0,INPUT1,...\n\n"
+              << "  ptmrt run MODEL.ptm INPUT0,INPUT1,...\n"
+              << "  ptmrt run-record MODEL.ptm [NAME:TYPE=VALUE ...]\n\n"
               << "Packed-TM and Logic inputs are binary values. Masked-threshold\n"
-              << "inputs are active slot indices, or 'none'.\n";
+              << "inputs are active slot indices, or 'none'. Raw field TYPE is\n"
+              << "bool, int, float, string, or null (written NAME:null).\n";
 }
 
 }  // namespace
@@ -336,6 +468,10 @@ int main(int argc, char** argv) {
     }
     if (argc == 4 && std::strcmp(argv[1], "run") == 0) {
         run(argv[2], argv[3]);
+        return 0;
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "run-record") == 0) {
+        run_record(argv[2], argc - 3, argv + 3);
         return 0;
     }
     print_help();
