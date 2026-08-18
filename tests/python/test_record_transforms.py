@@ -82,6 +82,19 @@ def test_regex_operations_are_bounded_and_typed() -> None:
         RegexTransform("text", "x", r"a", max_input_chars=2).evaluate(record)
 
 
+def test_regex_transform_rejects_hostile_nested_quantifier() -> None:
+    hostile = r"(a+)+$"
+    near_match = "a" * 50_000 + "!"
+    with pytest.raises(ValueError, match="nested quantifiers"):
+        RegexTransform("text", "x", hostile)
+    pipeline = RecordTransformPipeline((RegexTransform("text", "x", "a+"),))
+    descriptor = pipeline.to_dict()
+    descriptor["transforms"][0]["pattern"] = hostile
+    with pytest.raises(ValueError, match="descriptor is invalid"):
+        RecordTransformPipeline.from_dict(descriptor)
+    assert near_match.endswith("!")
+
+
 def test_aggregate_null_boolean_and_numeric_rules() -> None:
     record = {"values": [1, None, 3], "flags": [True, False, True]}
     assert AggregateTransform(("values",), "x", AggregateOperation.SUM).evaluate(record) == 4

@@ -112,9 +112,15 @@ UTC epoch seconds. No transform reads the wall clock. Aggregates are record
 local, and temporal windows compare two fields in the same record, so streaming
 does not require hidden cross-record state.
 
-Python's regular-expression engine has no hard execution timeout. PTM bounds
-pattern, input, and result sizes, but pipeline descriptors remain trusted
-configuration: do not accept arbitrary regex patterns from untrusted users.
+Configurable regexes use a validated subset of Python's Unicode `re` syntax.
+Literals, character classes, categories, anchors, groups, top-level alternation,
+and greedy or lazy quantifiers are supported. Lookaround, backreferences,
+conditionals, nested quantifiers, and quantified alternation are rejected when
+an adapter or transform descriptor is constructed or deserialized. In
+particular, patterns such as `(a+)+$` are never evaluated. This structural rule
+prevents backtracking amplification; the existing pattern, input, token, and
+match ceilings remain defense in depth. Invalid descriptors raise `ValueError`,
+while failures processing a record raise `ConnectorError` or `TransformError`.
 
 ## Portability boundary
 
