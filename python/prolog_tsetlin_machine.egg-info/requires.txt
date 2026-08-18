@@ -1,0 +1,12 @@
+
+[data]
+pyarrow<26,>=18
+Pillow<13,>=12
+
+[test]
+pytest>=8
+pytest-asyncio>=1
+hypothesis<7,>=6.100
+
+[tui]
+textual<9,>=8.2
