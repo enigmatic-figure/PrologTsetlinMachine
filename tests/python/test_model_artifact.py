@@ -8,12 +8,15 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from prolog_tsetlin.cli import main as cli_main
+from prolog_tsetlin import model_artifact
 from prolog_tsetlin.model_artifact import (
     ModelArtifactError,
     PackedTMInferenceArtifact,
     export_packed_tm,
+    load_model_artifact,
     load_model_artifact_from_bytes,
 )
 from prolog_tsetlin.reference import ScalarBinaryTsetlinMachine
@@ -105,6 +108,47 @@ class ModelArtifactTests(unittest.TestCase):
         tampered[len(tampered) // 2] ^= 1
         with self.assertRaisesRegex(ModelArtifactError, "SHA-256"):
             PackedTMInferenceArtifact.from_bytes(tampered)
+
+    def test_generic_file_loader_round_trip(self) -> None:
+        artifact = export_xor()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "xor.ptm"
+            artifact.write(path)
+            loaded = load_model_artifact(path)
+        self.assertEqual(loaded.artifact_id, artifact.artifact_id)
+        self.assertEqual(loaded.serialized, artifact.serialized)
+
+    def test_oversized_sparse_file_is_rejected_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "oversized.ptm"
+            with path.open("wb") as sparse_file:
+                sparse_file.truncate(model_artifact._MAX_ARTIFACT_BYTES + 1)
+
+            real_open = Path.open
+            read_attempted = False
+
+            class TrackedFile:
+                def __init__(self) -> None:
+                    self.file = real_open(path, "rb")
+
+                def __enter__(self) -> "TrackedFile":
+                    return self
+
+                def __exit__(self, *args: object) -> None:
+                    self.file.close()
+
+                def fileno(self) -> int:
+                    return self.file.fileno()
+
+                def read(self, size: int = -1) -> bytes:
+                    nonlocal read_attempted
+                    read_attempted = True
+                    return self.file.read(size)
+
+            with mock.patch.object(Path, "open", return_value=TrackedFile()):
+                with self.assertRaisesRegex(ModelArtifactError, "v1 size ceiling"):
+                    load_model_artifact(path)
+            self.assertFalse(read_attempted)
 
     def test_noncanonical_manifest_is_rejected_even_with_valid_digest(self) -> None:
         artifact = export_xor()
