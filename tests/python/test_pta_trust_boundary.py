@@ -80,8 +80,8 @@ def test_literal_must_exist_in_catalog():
 def test_fake_composite_gate_fails_exact():
     gate = discover_specialist_gates([{"edges": [1]}], {"graph_model": [0.9]})[0]
     prop = gate_to_proposal(gate)
-    # Composite reference gate now lowers to candidate (native composite not yet, but reference implementation)
-    assert isinstance(lower_exact(prop), LoweredCandidate)
+    # Composite not yet native — exact is NotRepresentable
+    assert isinstance(lower_exact(prop), NotRepresentable)
     # But empty composite should fail
     empty = PTAEscalationProposal(
         proposal_id="empty-comp",
@@ -113,8 +113,8 @@ def test_malformed_descriptor_string_fails():
 def test_unsupported_graph_fails_exact():
     hyp = RelationalHypothesis("ancestor", depth=2, recursive=True, support=1)
     prop = graph_hypothesis_to_proposal(hyp)
-    # Bounded graph now lowers to candidate placeholder (even though runtime UNSUPPORTED) — per current reference implementation
-    assert isinstance(lower_exact(prop), LoweredCandidate)
+    # Graph not yet native — exact is NotRepresentable
+    assert isinstance(lower_exact(prop), NotRepresentable)
     # Unbounded must fail
     hyp2 = RelationalHypothesis("transitive_closure", depth=9, recursive=True, support=1)
     prop2 = graph_hypothesis_to_proposal(hyp2)
@@ -239,11 +239,10 @@ def test_session_requires_example_label_for_input():
 
 
 def test_composite_exact_fails_until_native():
-    # Updated: composite reference gate now succeeds; empty gate fails
     gate = discover_specialist_gates([{"edges": [1], "text": "hi"}], {"graph_model": [0.9], "text_model": [0.1]})[0]
     prop = gate_to_proposal(gate)
     res = lower_exact(prop)
-    assert isinstance(res, LoweredCandidate)
+    assert isinstance(res, NotRepresentable)
     empty = PTAEscalationProposal(
         proposal_id="empty-comp2",
         source_pta_ids=("pta:test",),

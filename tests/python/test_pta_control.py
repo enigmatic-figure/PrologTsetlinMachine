@@ -20,13 +20,23 @@ def test_input_pta_numeric_proposal_and_lowering():
     assert len(props) == 2
     # First threshold should be 72.5 (between 72→73 where label flips)
     assert props[0].parameters["threshold"] == pytest.approx(72.5)
-    # Every proposal must be lowerable
+    # Every proposal must be syntactically bounded; exact requires catalog and ClauseConfiguration
+    from prolog_tsetlin.pta import syntactically_bounded, lower_exact, LoweredCandidate
     for p in props:
-        assert lowerable(pta.to_proposal(p))[0] is True
+        prop = pta.to_proposal(p)
+        assert syntactically_bounded(prop)[0] is True
+        # Exact lowering requires catalog materialization — with catalog it should produce LoweredCandidate
+        # Materialize descriptor in catalog first
+        desc = catalog.preview_numeric_ge("temperature", p.parameters["threshold"])
+        cat2 = catalog  # preview already computed stable ID
+        # Register it to make exact succeed (simulating publish step)
+        catalog.numeric_ge("temperature", p.parameters["threshold"])
+        assert isinstance(lower_exact(prop, catalog=catalog), LoweredCandidate)
     # Intervals
     intervals = pta.propose_interval("temperature", vals, labels, max_proposals=1)
     assert intervals
-    assert lowerable(pta.to_proposal(intervals[0]))[0] is True
+    # Interval proposal syntactically bounded, but exact without clause is NotRepresentable until clause materialized
+    assert syntactically_bounded(pta.to_proposal(intervals[0]))[0] is True
     # Budget enforced
     pta2 = InputPTA(catalog, budget=1, pta_id="input:score")
     many = pta2.propose_for_numeric("score", vals, labels, max_proposals=10)
@@ -84,20 +94,19 @@ def test_deescalation_stable_absorption():
 
 
 def test_escalation_cotm_and_graph_depth():
-    from prolog_tsetlin.pta import LoweredCandidate
+    from prolog_tsetlin.pta import LoweredCandidate, NotRepresentable
 
     esc = EscalationPTA()
     weights = esc.allocate_cotm_weights(4, 2, {(0, 0): 0.9, (1, 0): 0.4, (2, 1): 0.85, (3, 1): 0.2})
     assert len(weights) > 0
     prop = esc.weights_to_proposal(weights)
-    # CoTM now lowers to LoweredCandidate via lower_exact (reference implementation)
-    assert isinstance(esc.weights_to_proposal(weights).proposal_id, str)
+    # CoTM not yet native — exact should be NotRepresentable
     from prolog_tsetlin.pta import lower_exact
 
-    assert isinstance(lower_exact(prop), LoweredCandidate)
-    # Graph depth increase — now via lower_exact LoweredCandidate (reference placeholder, even though runtime UNSUPPORTED)
+    assert isinstance(lower_exact(prop), NotRepresentable)
+    # Graph depth increase — not yet native, exact is NotRepresentable
     gprop = esc.propose_graph_depth_increase(3, [{"edges": []}], max_depth=8)
-    assert gprop is not None and isinstance(lower_exact(gprop), LoweredCandidate)
+    assert gprop is not None and isinstance(lower_exact(gprop), NotRepresentable)
     # At max depth, no proposal
     assert esc.propose_graph_depth_increase(8, [], max_depth=8) is None
     # Unbounded recursion not lowerable (checked via lowerable directly)

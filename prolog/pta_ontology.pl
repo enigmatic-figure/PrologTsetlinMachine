@@ -10,6 +10,7 @@
 % lowerable(Candidate, Target).  % exact, no approximation
 
 :- dynamic(observation/4).
+:- dynamic(example_domain/1).
 :- dynamic(example_label/2).
 :- dynamic(feature_support/3).
 :- dynamic(feature_relation/3).

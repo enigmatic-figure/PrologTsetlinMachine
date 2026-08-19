@@ -150,83 +150,80 @@ def _construct_native(proposal: PTAEscalationProposal, *, catalog: Any | None = 
     target = proposal.native_target
     struct = proposal.structure
 
-    # For binary/regression/threshold: need real LiteralDescriptors
-    if target in ("binary_clause", "regression_clause", "threshold"):
+    # Exact lowering: binary/regression/threshold require catalog and real ClauseConfiguration
+    if target == "threshold":
+        # Threshold is a single-literal binary clause with threshold semantics — separate from binary_clause
         clause = struct.get("clause") or struct.get("literals") or []
+        if not clause and not proposal.required_literals:
+            return None
         if clause:
-            # Check for magic small IDs without catalog — must fail exact gate
             if catalog is None:
-                # Heuristic: real stable IDs are 64-bit hashes > 1<<32; magic 104 etc are small
-                if any(lit < 1000000 for lit in clause):
+                return None
+            for lit in clause:
+                if not any(d.literal_id == lit for d in getattr(catalog, "literals", ())):
                     return None
-            else:
-                for lit in clause:
-                    if not any(d.literal_id == lit for d in getattr(catalog, "literals", ())):
-                        return None
             try:
                 from ..feature_templates import ClauseConfiguration
-
-                cfg = ClauseConfiguration(
-                    clause_index=0,
-                    included_literals=tuple(clause),
-                    excluded_literals=(),
-                    polarity=1,
-                )
+                cfg = ClauseConfiguration(clause_index=0, included_literals=tuple(clause), excluded_literals=(), polarity=1)
                 return cfg, "clause_configuration"
             except Exception:
-                return {"clause": list(clause), "kind": target}, target
-
-        # Descriptor-only: need to preview each required_literal descriptor
-        if proposal.required_literals:
-            if catalog is not None:
-                for req in proposal.required_literals:
-                    if hasattr(req, "literal_id"):
-                        if not any(d.literal_id == req.literal_id for d in getattr(catalog, "literals", ())):
-                            return None
-                    elif isinstance(req, str):
-                        if req.startswith("literal:"):
-                            try:
-                                lit_id = int(req.split(":")[1])
-                                if not any(d.literal_id == lit_id for d in getattr(catalog, "literals", ())):
-                                    return None
-                            except Exception:
-                                return None
-                        elif ":" not in req:
-                            return None
-                    else:
-                        return None
-                return {"descriptors": list(proposal.required_literals), "kind": target}, target
+                return None
+        # descriptor-only threshold
+        if catalog is None:
+            return None
+        for req in proposal.required_literals:
+            if hasattr(req, "literal_id"):
+                if not any(d.literal_id == req.literal_id for d in getattr(catalog, "literals", ())):
+                    return None
+            elif isinstance(req, str):
+                if ":" not in req:
+                    return None
             else:
-                for req in proposal.required_literals:
-                    if isinstance(req, str):
-                        if ":" not in req:
-                            return None
-                    elif hasattr(req, "literal_id"):
-                        if getattr(req, "literal_id") <= 0:
-                            return None
-                    else:
+                return None
+        # descriptors previewed and catalog contains them — construct placeholder ClauseConfiguration with those IDs
+        # For exact gate we still need clause ints, so descriptor-only threshold without clause is NotRepresentable
+        return None
+
+    if target in ("binary_clause", "regression_clause"):
+        clause = struct.get("clause") or struct.get("literals") or []
+        if clause:
+            if catalog is None:
+                return None
+            for lit in clause:
+                if not any(d.literal_id == lit for d in getattr(catalog, "literals", ())):
+                    return None
+            try:
+                from ..feature_templates import ClauseConfiguration
+                cfg = ClauseConfiguration(clause_index=0, included_literals=tuple(clause), excluded_literals=(), polarity=1)
+                return cfg, "clause_configuration"
+            except Exception:
+                return None
+        # descriptor-only requires catalog and real descriptors
+        if proposal.required_literals:
+            if catalog is None:
+                return None
+            for req in proposal.required_literals:
+                if hasattr(req, "literal_id"):
+                    if not any(d.literal_id == req.literal_id for d in getattr(catalog, "literals", ())):
                         return None
-                return {"descriptors": list(proposal.required_literals), "kind": target}, target
+                elif isinstance(req, str):
+                    if ":" not in req:
+                        return None
+                    # string descriptors like "numeric_ge:field:123" are not yet materialized — need catalog preview to become literal_id
+                    # Without materialization to literal_id, not exact
+                    return None
+                else:
+                    return None
+            # All required_literals are real descriptors already in catalog — but we still need clause ints to build ClauseConfiguration
+            # So descriptor-only without clause is NotRepresentable until clause is materialized
+            return None
         return None
 
     if target == "shared_weighted_clause":
-        from collections.abc import Mapping
-
-        weights_src = struct.get("weights") if isinstance(struct.get("weights"), Mapping) else None
-        if weights_src is not None:
-            return {"weights": dict(weights_src), "kind": "shared_weighted"}, "shared_weighted_clause"
-        if proposal.weights is not None:
-            return {"weights": list(proposal.weights), "output_assignments": list(proposal.output_assignments or []), "kind": "shared_weighted"}, "shared_weighted_clause"
         return None
 
     if target == "graph_clause":
-        depth = struct.get("depth", proposal.resource_bounds.get("graph_depth", 1))
-        unbounded = struct.get("recursive_unbounded") is True
-        if unbounded or not isinstance(depth, int) or not 1 <= depth <= MAX_GRAPH_DEPTH:
-            return None
-        # Graph still UNSUPPORTED_MODEL for execution, but lowering can produce DeepClause-like placeholder
-        # For trust boundary, we allow graph_clause with bounded depth to lower to candidate (even if runtime not yet)
-        return {"depth": depth, "relation": struct.get("relation"), "kind": "graph_clause"}, "graph_clause"
+        return None
 
     if target == "patch_clause":
         kind = struct.get("kind")
@@ -237,7 +234,7 @@ def _construct_native(proposal: PTAEscalationProposal, *, catalog: Any | None = 
             cells = patch.get("rows", 1) * patch.get("cols", 1)
             if cells > PATCH_MAX_CELLS:
                 return None
-        return {"patch": patch, "kind": kind}, "patch_clause"
+        return None  # CTM/patch not yet native — scaffold, not exact
 
     if target == "logic_program":
         # Exact requires actual LogicProgram32, not just pattern/window
@@ -260,24 +257,13 @@ def _construct_native(proposal: PTAEscalationProposal, *, catalog: Any | None = 
         if "pattern" in struct or "window" in struct:
             return None
         if "clause" in struct:
-            # Clause-based logic program can be considered binary clause fallback
-            clause = struct.get("clause")
-            if isinstance(clause, list) and clause:
-                return {"clause": clause}, "logic_program"
+            return None  # clause-based logic scaffold — not exact until LogicProgram32
         return None
 
     if target == "threshold":
-        if "threshold" in struct or "clause" in struct:
-            return {"threshold": struct.get("threshold"), "clause": struct.get("clause")}, "threshold"
-        # Otherwise not enough to construct
         return None
 
     if target == "composite_gate":
-        # Composite: allow as candidate for now (reference gate), even though native composite not yet
-        gate = struct.get("gate")
-        spec = struct.get("specialist")
-        if isinstance(gate, str) and isinstance(spec, str):
-            return {"gate": gate, "specialist": spec}, "composite_gate"
         return None
 
     return None

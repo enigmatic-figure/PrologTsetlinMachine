@@ -102,6 +102,7 @@ class PTAReasoningSession:
     max_insights: int = 256
     observations: list[tuple[str, int, str, Any]] = field(default_factory=list)
     example_labels: list[tuple[int, int]] = field(default_factory=list)
+    example_domains: set[int] = field(default_factory=set)
     literal_truths: list[tuple[int, int, int]] = field(default_factory=list)
     clause_truths: list[tuple[int, int, int]] = field(default_factory=list)
     clause_literals: list[tuple[int, int]] = field(default_factory=list)
@@ -130,6 +131,12 @@ class PTAReasoningSession:
         if type(label) is not int or label not in (0, 1):
             raise ValueError("label must be 0/1")
         self.example_labels.append((example, label))
+        self.example_domains.add(example)
+
+    def add_example_domain(self, example: int) -> None:
+        if type(example) is not int or isinstance(example, bool):
+            raise ValueError("example must be strict int")
+        self.example_domains.add(example)
 
     def add_literal_truth(self, literal: int, example: int, truth: int) -> None:
         if type(literal) is not int or type(example) is not int or type(truth) is not int:
@@ -161,6 +168,8 @@ class PTAReasoningSession:
         lines: list[str] = ["% PTAReasoningSession facts — auto-generated, bounded, safe-encoded"]
         for pta, ex, fld, val in self.observations:
             lines.append(f"observation({_prolog_atom(pta)},{ex},{_prolog_atom(fld)},{_prolog_term(val)}).")
+        for ex in sorted(self.example_domains):
+            lines.append(f"example_domain({ex}).")
         for ex, label in self.example_labels:
             lines.append(f"example_label({ex},{label}).")
         for lit, ex, truth in self.literal_truths:

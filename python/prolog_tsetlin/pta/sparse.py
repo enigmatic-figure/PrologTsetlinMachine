@@ -173,14 +173,20 @@ def propose_sparse_morphology(
     all_lits = tuple(sorted({lid for c in clauses for lid in c.literal_ids}))
     index = {c.clause_id: idx for idx, c in enumerate(clauses)}
     morphed = SparseClauseBank(clauses, all_lits, index)
+    # Content-addressed morphology_id
+    bank_dict = morphed.to_proposal_structure()
+    # Determine removed clause IDs
+    removed_cids = tuple(sorted(set(clause_literals.keys()) - set(final.keys())))
+    content_id = PTAMorphologyProposal.content_address(None, tuple(sorted(to_remove)), removed_cids, bank_dict, tuple(redundant))
     proposal = PTAMorphologyProposal(
-        morphology_id=f"morphology:sparse:{len(to_remove)}-removed:{len(clause_literals)-len(final)}-dedup",
+        morphology_id=content_id,
         parent_artifact_id=None,
         source_pta_ids=(pta.pta_id,),
         supporting_insights=tuple(redundant),
         removed_literals=tuple(sorted(to_remove)),
+        removed_clause_ids=removed_cids,
         removed_clauses=len(clause_literals) - len(final),
-        morphed_bank=morphed.to_proposal_structure(),
+        morphed_bank=bank_dict,
         resource_bounds={"literal_count": max(1, len(all_lits))},
     )
     exact = to_sparse_exact(clause_literals)
