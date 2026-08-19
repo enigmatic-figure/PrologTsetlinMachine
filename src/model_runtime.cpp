@@ -304,9 +304,64 @@ void describe_port(ptmrt_port_description& port,
     return true;
 }
 
-[[nodiscard]] bool manifest_contains(std::string_view manifest,
-                                     std::string_view value) noexcept {
-    return manifest.find(value) != std::string_view::npos;
+[[nodiscard]] bool json_string_field_equals(
+    const ptm::runtime_detail::JsonValue::Object& obj,
+    std::string_view key,
+    std::string_view expected) noexcept {
+    auto* value = ptm::runtime_detail::member(obj, std::string(key));
+    auto* text = value ? ptm::runtime_detail::as<std::string>(*value) : nullptr;
+    return text && *text == expected;
+}
+
+[[nodiscard]] bool json_int_field_equals(
+    const ptm::runtime_detail::JsonValue::Object& obj,
+    std::string_view key,
+    std::int64_t expected) noexcept {
+    auto* value = ptm::runtime_detail::member(obj, std::string(key));
+    if (!value) return false;
+    if (auto* integer = ptm::runtime_detail::as<std::int64_t>(*value)) {
+        return *integer == expected;
+    }
+    if (auto* number = ptm::runtime_detail::as<double>(*value)) {
+        return *number == static_cast<double>(expected);
+    }
+    return false;
+}
+
+[[nodiscard]] bool json_shape_equals(
+    const ptm::runtime_detail::JsonValue& shape_value,
+    std::span<const std::int64_t> expected) noexcept {
+    auto* array = ptm::runtime_detail::as<
+        ptm::runtime_detail::JsonValue::Array>(shape_value);
+    if (!array || array->size() != expected.size()) return false;
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        auto* number = ptm::runtime_detail::as<std::int64_t>((*array)[index]);
+        if (!number || *number != expected[index]) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool port_matches(
+    const ptm::runtime_detail::JsonValue& port_value,
+    std::string_view dtype,
+    std::optional<std::string_view> layout,
+    std::string_view name,
+    std::span<const std::int64_t> shape) noexcept {
+    auto* object = ptm::runtime_detail::as<
+        ptm::runtime_detail::JsonValue::Object>(port_value);
+    if (!object) return false;
+    if (!json_string_field_equals(*object, "dtype", dtype)) return false;
+    if (layout) {
+        if (!json_string_field_equals(*object, "layout", *layout)) return false;
+    } else {
+        if (ptm::runtime_detail::member(*object, "layout")) return false;
+    }
+    if (!json_string_field_equals(*object, "name", name)) return false;
+    auto* shape_value = ptm::runtime_detail::member(*object, "shape");
+    if (!shape_value || !json_shape_equals(*shape_value, shape)) return false;
+    std::size_t expected_keys = layout ? 4 : 3;
+    if (object->size() != expected_keys) return false;
+    return true;
 }
 
 [[nodiscard]] bool packed_manifest_matches(std::string_view manifest,
@@ -314,97 +369,138 @@ void describe_port(ptmrt_port_description& port,
                                            std::uint32_t features,
                                            std::int32_t threshold,
                                            std::uint32_t conformance_count) {
-    return manifest_contains(
-               manifest, "\"artifact_schema\":\"ptm.model.v1\"") &&
-           manifest_contains(
-               manifest,
-               "\"artifact_kind\":\"packed_tm_binary_v1\"") &&
-           manifest_contains(
-               manifest,
-               "\"container_digest\":\"sha256-trailer-v1\"") &&
-           manifest_contains(
-               manifest, "\"number_of_clauses\":" +
-                             std::to_string(clauses)) &&
-           manifest_contains(
-               manifest, "\"number_of_features\":" +
-                             std::to_string(features)) &&
-           manifest_contains(
-               manifest, "\"threshold\":" + std::to_string(threshold)) &&
-           manifest_contains(
-               manifest, "\"conformance_case_count\":" +
-                             std::to_string(conformance_count)) &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint64\","
-                         "\"layout\":\"feature_major_packed64\","
-                         "\"name\":\"features\",\"shape\":[" +
-                             std::to_string(features) + "]") &&
-           manifest_contains(
-               manifest,
-               "\"dtype\":\"uint64\",\"name\":\"valid_mask\","
-               "\"shape\":[]") &&
-           manifest_contains(
-               manifest,
-               "\"dtype\":\"uint64\",\"name\":\"predictions\","
-               "\"shape\":[]") &&
-           manifest_contains(
-               manifest, "\"dtype\":\"int32\",\"name\":\"scores\","
-                         "\"shape\":[64]") &&
-           manifest_contains(
-               manifest, "\"kind\":\"binary_classification\"") &&
-           (manifest_contains(
-                manifest, "\"materialization\":\"precomputed\"") ||
-            manifest_contains(
-                manifest,
-                "\"materialization\":\"precomputed_or_raw_record_v1\""));
+    auto parsed = ptm::runtime_detail::JsonParser(manifest).parse();
+    if (!parsed) return false;
+    auto* root = ptm::runtime_detail::as<
+        ptm::runtime_detail::JsonValue::Object>(*parsed);
+    if (!root) return false;
+    if (!json_string_field_equals(*root, "artifact_schema", "ptm.model.v1")) return false;
+    if (!json_string_field_equals(*root, "artifact_kind", "packed_tm_binary_v1")) return false;
+    if (!json_string_field_equals(*root, "container_digest", "sha256-trailer-v1")) return false;
+    auto* model_value = ptm::runtime_detail::member(*root, "model");
+    auto* model = model_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*model_value)
+        : nullptr;
+    if (!model) return false;
+    if (!json_int_field_equals(*model, "number_of_clauses", clauses)) return false;
+    if (!json_int_field_equals(*model, "number_of_features", features)) return false;
+    if (!json_int_field_equals(*model, "threshold", threshold)) return false;
+    if (!json_string_field_equals(*model, "clause_polarity", "even_positive_odd_negative")) return false;
+    if (!json_string_field_equals(*model, "score_clamp", "symmetric_threshold")) return false;
+    auto* validation_value = ptm::runtime_detail::member(*root, "validation");
+    auto* validation = validation_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*validation_value)
+        : nullptr;
+    if (!validation) return false;
+    if (!json_int_field_equals(*validation, "conformance_case_count", conformance_count)) return false;
+    auto* task_value = ptm::runtime_detail::member(*root, "task");
+    auto* task = task_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*task_value)
+        : nullptr;
+    if (!task || !json_string_field_equals(*task, "kind", "binary_classification")) return false;
+    auto* features_value = ptm::runtime_detail::member(*root, "features");
+    auto* features_obj = features_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*features_value)
+        : nullptr;
+    if (!features_obj) return false;
+    auto* materialization_value = ptm::runtime_detail::member(*features_obj, "materialization");
+    auto* materialization = materialization_value
+        ? ptm::runtime_detail::as<std::string>(*materialization_value)
+        : nullptr;
+    if (!materialization || (*materialization != "precomputed" && *materialization != "precomputed_or_raw_record_v1")) return false;
+    auto* ports_value = ptm::runtime_detail::member(*root, "ports");
+    auto* ports = ports_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*ports_value)
+        : nullptr;
+    if (!ports || ports->size() != 2) return false;
+    auto* inputs_value = ptm::runtime_detail::member(*ports, "inputs");
+    auto* outputs_value = ptm::runtime_detail::member(*ports, "outputs");
+    auto* inputs = inputs_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*inputs_value)
+        : nullptr;
+    auto* outputs = outputs_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*outputs_value)
+        : nullptr;
+    if (!inputs || inputs->size() != 2) return false;
+    if (!outputs || outputs->size() != 2) return false;
+    std::array<std::int64_t,1> features_shape{static_cast<std::int64_t>(features)};
+    if (!port_matches((*inputs)[0], "uint64", std::string_view{"feature_major_packed64"}, "features", features_shape)) return false;
+    if (!port_matches((*inputs)[1], "uint64", std::nullopt, "valid_mask", {})) return false;
+    if (!port_matches((*outputs)[0], "uint64", std::nullopt, "predictions", {})) return false;
+    std::array<std::int64_t,1> scores_shape{64};
+    if (!port_matches((*outputs)[1], "int32", std::nullopt, "scores", scores_shape)) return false;
+    return true;
 }
 
 [[nodiscard]] bool logic_manifest_matches(std::string_view manifest,
                                           std::uint32_t instructions,
                                           std::uint32_t root,
                                           std::uint32_t conformance_count) {
-    return manifest_contains(
-               manifest, "\"artifact_schema\":\"ptm.model.v1\"") &&
-           manifest_contains(
-               manifest, "\"artifact_kind\":\"logic_program32_v1\"") &&
-           manifest_contains(
-               manifest,
-               "\"container_digest\":\"sha256-trailer-v1\"") &&
-           manifest_contains(
-               manifest, "\"binding_count\":5") &&
-           manifest_contains(
-               manifest, "\"instruction_count\":" +
-                             std::to_string(instructions)) &&
-           manifest_contains(
-               manifest, "\"root_instruction\":" +
-                             std::to_string(root)) &&
-           manifest_contains(
-               manifest, "\"conformance_case_count\":" +
-                             std::to_string(conformance_count)) &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint64\","
-                         "\"layout\":\"binding_major_packed64\","
-                         "\"name\":\"bindings\",\"shape\":[5]") &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint64\","
-                         "\"name\":\"valid_mask\",\"shape\":[]") &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint64\","
-                         "\"name\":\"values\",\"shape\":[]") &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint32\","
-                         "\"name\":\"true_instruction_masks\","
-                         "\"shape\":[64]") &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint32\","
-                         "\"name\":\"evaluated_instruction_masks\","
-                         "\"shape\":[64]") &&
-           manifest_contains(
-               manifest, "\"kind\":\"boolean_function\"") &&
-           manifest_contains(
-               manifest, "\"opcodes\":{\"and\":3,\"constant\":0,"
-                         "\"input\":1,\"not\":2,\"or\":4,\"xor\":5}") &&
-           manifest_contains(
-               manifest, "\"materialization\":\"precomputed\"");
+    auto parsed = ptm::runtime_detail::JsonParser(manifest).parse();
+    if (!parsed) return false;
+    auto* obj = ptm::runtime_detail::as<
+        ptm::runtime_detail::JsonValue::Object>(*parsed);
+    if (!obj) return false;
+    if (!json_string_field_equals(*obj, "artifact_schema", "ptm.model.v1")) return false;
+    if (!json_string_field_equals(*obj, "artifact_kind", "logic_program32_v1")) return false;
+    if (!json_string_field_equals(*obj, "container_digest", "sha256-trailer-v1")) return false;
+    auto* model_value = ptm::runtime_detail::member(*obj, "model");
+    auto* model = model_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*model_value)
+        : nullptr;
+    if (!model) return false;
+    if (!json_int_field_equals(*model, "instruction_count", instructions)) return false;
+    if (!json_int_field_equals(*model, "root_instruction", root)) return false;
+    if (!json_int_field_equals(*model, "binding_count", 5)) return false;
+    auto* validation_value = ptm::runtime_detail::member(*obj, "validation");
+    auto* validation = validation_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*validation_value)
+        : nullptr;
+    if (!validation || !json_int_field_equals(*validation, "conformance_case_count", conformance_count)) return false;
+    auto* task_value = ptm::runtime_detail::member(*obj, "task");
+    auto* task = task_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*task_value)
+        : nullptr;
+    if (!task || !json_string_field_equals(*task, "kind", "boolean_function")) return false;
+    auto* bindings_value = ptm::runtime_detail::member(*obj, "bindings");
+    auto* bindings = bindings_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*bindings_value)
+        : nullptr;
+    if (!bindings || !json_string_field_equals(*bindings, "materialization", "precomputed")) return false;
+    auto* opcodes_value = ptm::runtime_detail::member(*model, "opcodes");
+    auto* opcodes = opcodes_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*opcodes_value)
+        : nullptr;
+    if (!opcodes || opcodes->size() != 6) return false;
+    if (!json_int_field_equals(*opcodes, "and", 3)) return false;
+    if (!json_int_field_equals(*opcodes, "constant", 0)) return false;
+    if (!json_int_field_equals(*opcodes, "input", 1)) return false;
+    if (!json_int_field_equals(*opcodes, "not", 2)) return false;
+    if (!json_int_field_equals(*opcodes, "or", 4)) return false;
+    if (!json_int_field_equals(*opcodes, "xor", 5)) return false;
+    auto* ports_value = ptm::runtime_detail::member(*obj, "ports");
+    auto* ports = ports_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*ports_value)
+        : nullptr;
+    if (!ports || ports->size() != 2) return false;
+    auto* inputs_value = ptm::runtime_detail::member(*ports, "inputs");
+    auto* outputs_value = ptm::runtime_detail::member(*ports, "outputs");
+    auto* inputs = inputs_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*inputs_value)
+        : nullptr;
+    auto* outputs = outputs_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*outputs_value)
+        : nullptr;
+    if (!inputs || inputs->size() != 2) return false;
+    if (!outputs || outputs->size() != 3) return false;
+    std::array<std::int64_t,1> bindings_shape{5};
+    std::array<std::int64_t,1> diag_shape{64};
+    if (!port_matches((*inputs)[0], "uint64", std::string_view{"binding_major_packed64"}, "bindings", bindings_shape)) return false;
+    if (!port_matches((*inputs)[1], "uint64", std::nullopt, "valid_mask", {})) return false;
+    if (!port_matches((*outputs)[0], "uint64", std::nullopt, "values", {})) return false;
+    if (!port_matches((*outputs)[1], "uint32", std::nullopt, "true_instruction_masks", diag_shape)) return false;
+    if (!port_matches((*outputs)[2], "uint32", std::nullopt, "evaluated_instruction_masks", diag_shape)) return false;
+    return true;
 }
 
 [[nodiscard]] bool pa_manifest_matches(std::string_view manifest,
@@ -412,50 +508,61 @@ void describe_port(ptmrt_port_description& port,
                                        std::uint32_t minimum_true,
                                        std::uint32_t selected_count,
                                        std::uint32_t conformance_count) {
-    const auto slot_shape = "\"shape\":[" + std::to_string(slots) + "]";
-    return manifest_contains(
-               manifest, "\"artifact_schema\":\"ptm.model.v1\"") &&
-           manifest_contains(
-               manifest, "\"artifact_kind\":\"masked_threshold_v1\"") &&
-           manifest_contains(
-               manifest,
-               "\"container_digest\":\"sha256-trailer-v1\"") &&
-           manifest_contains(
-               manifest, "\"slot_count\":" + std::to_string(slots)) &&
-           manifest_contains(
-               manifest, "\"minimum_true\":" +
-                             std::to_string(minimum_true)) &&
-           manifest_contains(
-               manifest, "\"selected_count\":" +
-                             std::to_string(selected_count)) &&
-           manifest_contains(
-               manifest, "\"conformance_case_count\":" +
-                             std::to_string(conformance_count)) &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint64\","
-                         "\"layout\":\"slot_major_packed64\","
-                         "\"name\":\"slots\"," + slot_shape) &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint64\","
-                         "\"name\":\"valid_mask\",\"shape\":[]") &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint64\","
-                         "\"name\":\"values\",\"shape\":[]") &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint32\","
-                         "\"name\":\"matched_counts\",\"shape\":[64]") &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint64\","
-                         "\"layout\":\"slot_major_packed64\","
-                         "\"name\":\"matched_slots\"," + slot_shape) &&
-           manifest_contains(
-               manifest, "\"dtype\":\"uint64\","
-                         "\"layout\":\"slot_major_packed64\","
-                         "\"name\":\"missing_slots\"," + slot_shape) &&
-           manifest_contains(
-               manifest, "\"kind\":\"boolean_threshold\"") &&
-           manifest_contains(
-               manifest, "\"materialization\":\"precomputed\"");
+    auto parsed = ptm::runtime_detail::JsonParser(manifest).parse();
+    if (!parsed) return false;
+    auto* obj = ptm::runtime_detail::as<
+        ptm::runtime_detail::JsonValue::Object>(*parsed);
+    if (!obj) return false;
+    if (!json_string_field_equals(*obj, "artifact_schema", "ptm.model.v1")) return false;
+    if (!json_string_field_equals(*obj, "artifact_kind", "masked_threshold_v1")) return false;
+    if (!json_string_field_equals(*obj, "container_digest", "sha256-trailer-v1")) return false;
+    auto* model_value = ptm::runtime_detail::member(*obj, "model");
+    auto* model = model_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*model_value)
+        : nullptr;
+    if (!model) return false;
+    if (!json_int_field_equals(*model, "slot_count", slots)) return false;
+    if (!json_int_field_equals(*model, "minimum_true", minimum_true)) return false;
+    if (!json_int_field_equals(*model, "selected_count", selected_count)) return false;
+    auto* validation_value = ptm::runtime_detail::member(*obj, "validation");
+    auto* validation = validation_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*validation_value)
+        : nullptr;
+    if (!validation || !json_int_field_equals(*validation, "conformance_case_count", conformance_count)) return false;
+    auto* task_value = ptm::runtime_detail::member(*obj, "task");
+    auto* task = task_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*task_value)
+        : nullptr;
+    if (!task || !json_string_field_equals(*task, "kind", "boolean_threshold")) return false;
+    auto* slots_value = ptm::runtime_detail::member(*obj, "slots");
+    auto* slots_obj = slots_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*slots_value)
+        : nullptr;
+    if (!slots_obj || !json_string_field_equals(*slots_obj, "materialization", "precomputed")) return false;
+    auto* ports_value = ptm::runtime_detail::member(*obj, "ports");
+    auto* ports = ports_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*ports_value)
+        : nullptr;
+    if (!ports || ports->size() != 2) return false;
+    auto* inputs_value = ptm::runtime_detail::member(*ports, "inputs");
+    auto* outputs_value = ptm::runtime_detail::member(*ports, "outputs");
+    auto* inputs = inputs_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*inputs_value)
+        : nullptr;
+    auto* outputs = outputs_value
+        ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*outputs_value)
+        : nullptr;
+    if (!inputs || inputs->size() != 2) return false;
+    if (!outputs || outputs->size() != 4) return false;
+    std::array<std::int64_t,1> slot_shape{static_cast<std::int64_t>(slots)};
+    std::array<std::int64_t,1> count_shape{64};
+    if (!port_matches((*inputs)[0], "uint64", std::string_view{"slot_major_packed64"}, "slots", slot_shape)) return false;
+    if (!port_matches((*inputs)[1], "uint64", std::nullopt, "valid_mask", {})) return false;
+    if (!port_matches((*outputs)[0], "uint64", std::nullopt, "values", {})) return false;
+    if (!port_matches((*outputs)[1], "uint32", std::nullopt, "matched_counts", count_shape)) return false;
+    if (!port_matches((*outputs)[2], "uint64", std::string_view{"slot_major_packed64"}, "matched_slots", slot_shape)) return false;
+    if (!port_matches((*outputs)[3], "uint64", std::string_view{"slot_major_packed64"}, "missing_slots", slot_shape)) return false;
+    return true;
 }
 
 }  // namespace

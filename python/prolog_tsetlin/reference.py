@@ -84,7 +84,7 @@ class ScalarBinaryTsetlinMachine:
             raise ValueError("feature vector has the wrong width")
         result: list[bool] = []
         for feature in features:
-            truth = bool(feature)
+            truth = self._require_binary(feature)
             result.extend((truth, not truth))
         return tuple(result)
 
@@ -143,9 +143,7 @@ class ScalarBinaryTsetlinMachine:
                 self._increment(clause, literal)
 
     def update(self, features: Sequence[bool | int], target: int | bool) -> None:
-        target_value = int(target)
-        if target_value not in (0, 1):
-            raise ValueError("binary target must be zero or one")
+        target_value = int(self._require_binary(target))
         literals = self._literals(features)
         class_sum = self.score(features)
         for clause in range(self.number_of_clauses):
@@ -194,6 +192,40 @@ class ScalarBinaryTsetlinMachine:
         rows = [batch.row_values(index) for index in range(batch.row_count)]
         return self.fit(rows, targets, epochs=epochs)
 
+    @staticmethod
+    def _require_binary(value: object) -> bool:
+        if value is True or value is False:
+            return bool(value)
+        if type(value) is int and value in (0, 1):
+            return bool(value)
+        raise ValueError("binary value must be bool or integer 0/1")
+
+    @staticmethod
+    def _check_snapshot_states(
+        snapshot: TMSnapshot,
+        *,
+        number_of_clauses: int,
+        number_of_features: int,
+        states_per_action: int,
+    ) -> None:
+        if not isinstance(snapshot.states, (tuple, list)):
+            raise ValueError("snapshot states must be a sequence")
+        if len(snapshot.states) != number_of_clauses:
+            raise ValueError("snapshot clause count does not match configuration")
+        upper = 2 * states_per_action
+        for row in snapshot.states:
+            if not isinstance(row, (tuple, list)):
+                raise ValueError("snapshot state row must be a sequence")
+            if len(row) != 2 * number_of_features:
+                raise ValueError("snapshot state row has wrong width")
+            for state in row:
+                if not isinstance(state, int) or isinstance(state, bool):
+                    raise ValueError("snapshot TA state must be an integer")
+                if not 1 <= state <= upper:
+                    raise ValueError(
+                        "snapshot TA state lies outside its two action regions"
+                    )
+
     def snapshot(self) -> TMSnapshot:
         return TMSnapshot(
             schema_version=SNAPSHOT_SCHEMA_VERSION,
@@ -225,6 +257,12 @@ class ScalarBinaryTsetlinMachine:
         )
         if actual != expected:
             raise ValueError("snapshot configuration does not match this machine")
+        self._check_snapshot_states(
+            snapshot,
+            number_of_clauses=self.number_of_clauses,
+            number_of_features=self.number_of_features,
+            states_per_action=self.states_per_action,
+        )
         self._states = [list(row) for row in snapshot.states]
         self._rng.setstate(copy.deepcopy(snapshot.rng_state))
 

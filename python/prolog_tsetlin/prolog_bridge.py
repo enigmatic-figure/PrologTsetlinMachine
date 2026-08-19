@@ -77,6 +77,14 @@ class PrologSearchCancelled(PrologBridgeError):
     pass
 
 
+def _require_binary(value: object) -> bool:
+    if value is True or value is False:
+        return bool(value)
+    if type(value) is int and value in (0, 1):
+        return bool(value)
+    raise ValueError("binary value must be bool or integer 0/1")
+
+
 def _normalized_example(example: Iterable[int], slot_count: int) -> tuple[int, ...]:
     result = tuple(sorted(set(example)))
     if any(slot < 0 or slot >= slot_count for slot in result):
@@ -134,6 +142,38 @@ class ThresholdSearchProblem:
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _validate_threshold_result(
+    problem: "ThresholdSearchProblem",
+    result: "ThresholdSearchResult",
+) -> None:
+    """Pure-Python trust-boundary check for GNU Prolog threshold output."""
+
+    selected = result.selected_slots
+    minimum = result.minimum_true
+    mismatches = result.mismatch_count
+    if mismatches != 0:
+        raise PrologBridgeError("Prolog threshold result reports nonzero mismatches")
+    if not selected:
+        raise PrologBridgeError("Prolog threshold result has no selected slots")
+    if len(selected) != len(set(selected)):
+        raise PrologBridgeError("Prolog threshold result has duplicate slots")
+    if len(selected) > problem.max_selected:
+        raise PrologBridgeError(
+            "Prolog threshold result exceeds the declared max_selected bound"
+        )
+    if any(not 0 <= slot < problem.slot_count for slot in selected):
+        raise PrologBridgeError("Prolog threshold result has a slot outside its domain")
+    if not 1 <= minimum <= len(selected):
+        raise PrologBridgeError("Prolog threshold result has an invalid minimum")
+    selected_set = frozenset(selected)
+    for example in problem.positive_examples:
+        if len(selected_set.intersection(example)) < minimum:
+            raise PrologBridgeError("Prolog threshold result failed Python validation")
+    for example in problem.negative_examples:
+        if len(selected_set.intersection(example)) >= minimum:
+            raise PrologBridgeError("Prolog threshold result failed Python validation")
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,14 +363,23 @@ class GNUPrologThresholdSearch:
                 cancel=cancel,
             )
         output = completed.stdout + "\n" + completed.stderr
+        if completed.returncode != 0:
+            raise PrologBridgeError(
+                f"GNU Prolog exited with status {completed.returncode}\n"
+                f"{output[-2000:]}"
+            )
         match = _RESULT_PATTERN.search(output)
         if match is not None:
-            selected = tuple(int(slot) for slot in match.group("slots").split(","))
-            return ThresholdSearchResult(
+            selected = tuple(
+                int(slot) for slot in match.group("slots").split(",") if slot
+            )
+            result = ThresholdSearchResult(
                 selected_slots=selected,
                 minimum_true=int(match.group("minimum")),
                 mismatch_count=int(match.group("mismatches")),
             )
+            _validate_threshold_result(problem, result)
+            return result
         if _NO_SOLUTION_PATTERN.search(output):
             raise NoThresholdSolution("no exact bounded threshold rule exists")
         raise PrologBridgeError(
@@ -472,9 +521,9 @@ class FeatureTemplateSearchProblem:
         coverage: Iterable[Iterable[bool | int]],
     ) -> "FeatureTemplateSearchProblem":
         candidate_tuple = tuple(candidates)
-        label_tuple = tuple(bool(value) for value in labels)
+        label_tuple = tuple(_require_binary(value) for value in labels)
         coverage_tuple = tuple(
-            tuple(bool(value) for value in candidate) for candidate in coverage
+            tuple(_require_binary(value) for value in candidate) for candidate in coverage
         )
         if not 1 <= len(candidate_tuple) <= 4096:
             raise ValueError("typed template search accepts 1 through 4096 candidates")
@@ -536,7 +585,7 @@ def _labeled_examples(
     require_both_classes: bool,
 ) -> tuple[tuple[tuple[int, ...], ...], tuple[bool, ...]]:
     rows = tuple(_normalized_example(example, slot_count) for example in examples)
-    outputs = tuple(bool(value) for value in labels)
+    outputs = tuple(_require_binary(value) for value in labels)
     if not rows or len(rows) != len(outputs):
         raise ValueError("examples and labels must be nonempty and equal in length")
     if len(rows) > 4096:
@@ -777,8 +826,8 @@ class BooleanDecisionTree:
             raise ValueError("decision-tree node requires a feature and two branches")
 
     @classmethod
-    def leaf(cls, value: bool) -> "BooleanDecisionTree":
-        return cls(value=bool(value))
+    def leaf(cls, value: bool | int) -> "BooleanDecisionTree":
+        return cls(value=_require_binary(value))
 
     @classmethod
     def node(

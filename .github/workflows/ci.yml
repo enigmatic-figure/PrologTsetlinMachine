@@ -103,6 +103,47 @@ jobs:
           tests/python/test_search_service.py
           tests/python/test_tui.py::test_tui_runs_repair_shows_counterexamples_and_exports
 
+  sanitizers:
+    name: Sanitizers (ASan+UBSan) / ubuntu-latest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure PTM with sanitizers
+        run: >-
+          cmake -S . -B out/ci-sanitize
+          -DPTM_BUILD_TESTS=ON
+          -DPTM_BUILD_BENCHMARKS=OFF
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build PTM (sanitized)
+        run: cmake --build out/ci-sanitize --config RelWithDebInfo --parallel
+      - name: Run sanitized native tests
+        run: ctest --test-dir out/ci-sanitize -C RelWithDebInfo --output-on-failure
+      - name: Install sanitized PTM
+        run: cmake --install out/ci-sanitize --config RelWithDebInfo --prefix "${{ runner.temp }}/ptm-sanitize-install"
+      - name: Fuzz ptmrt open memory (smoke)
+        run: |
+          python -c "
+          import subprocess, json, struct, hashlib, tempfile, os
+          from pathlib import Path
+          from prolog_tsetlin.reference import ScalarBinaryTsetlinMachine
+          from prolog_tsetlin.model_artifact import export_packed_tm
+          tm = ScalarBinaryTsetlinMachine(number_of_clauses=2, number_of_features=2, threshold=2)
+          art = export_packed_tm(tm.snapshot(), name='fuzz-smoke', path=None)
+          data = bytearray(art.serialized)
+          for offset in [64, 100, 200]:
+              if offset < len(data):
+                  data[offset] ^= 0x01
+                  Path(tempfile.gettempdir()+f'/fuzz_{offset}.ptm').write_bytes(data)
+                  data[offset] ^= 0x01
+          print('fuzz artifacts written')
+          "
+          for f in /tmp/fuzz_*.ptm; do out/ci-sanitize/ptmrt verify \"$f\" || true; done
+          echo 'sanitizer fuzz smoke done'
+
   distribution:
     name: Distribution and documentation
     runs-on: ubuntu-latest
