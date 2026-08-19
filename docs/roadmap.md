@@ -58,8 +58,8 @@
 - [x] Connector-neutral bounded record iterator for packed-TM inference.
 - [x] Arrow/Parquet streaming and image/token adapters.
 - [x] Regex, aggregate, relational, sequence, and temporal transforms.
-- [ ] Budgeted feature persistence and retirement.
-- [ ] Multi-class, convolutional, regression, and graph adapters.
+- [x] Budgeted feature persistence and retirement.
+- [x] Multi-class, convolutional, regression, and graph adapters.
 
 ## Milestone 5: portable model artifacts and static inference — in progress
 

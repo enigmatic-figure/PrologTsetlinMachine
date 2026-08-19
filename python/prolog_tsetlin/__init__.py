@@ -157,6 +157,14 @@ from .record_transforms import (
     TemporalTransform,
     TransformError,
 )
+from .adapters import (
+    MultiClassAdapter,
+    PatchAdapter,
+    RegressionAdapter,
+    GraphConnector,
+    GraphInput,
+)
+from .budgeted_features import BudgetedFeatureStore
 from .representation import (
     EvaluationTrace,
     FeatureSchema,
@@ -299,6 +307,12 @@ __all__ = [
     "TransformError",
     "TransformKind",
     "TypedFact",
+    "BudgetedFeatureStore",
+    "MultiClassAdapter",
+    "PatchAdapter",
+    "RegressionAdapter",
+    "GraphConnector",
+    "GraphInput",
     "SlotBinding",
     "SourceKind",
     "ValidationSignature",
