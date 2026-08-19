@@ -1,4 +1,4 @@
-% PTA shared ontology — compiled Prolog module, keep in sync with python/prolog_tsetlin/pta/proposal.py
+% PTA shared ontology -- compiled Prolog module, keep in sync with python/prolog_tsetlin/pta/proposal.py
 % observation(PTA, Example, Field, RawValue).
 % feature_support(Literal, Pos, Neg).
 % feature_relation(L1, subsumes, L2).  % subsumes | equivalent | thresholds_equivalent
@@ -9,10 +9,22 @@
 % proposal(PTA, Kind, Candidate).
 % lowerable(Candidate, Target).  % exact, no approximation
 
-:- dynamic observation/4, feature_support/3, feature_relation/3.
-:- dynamic clause_support/2, clause_conflict/2, insight/4, counterexample/4, proposal/3.
+:- dynamic(observation/4).
+:- dynamic(example_label/2).
+:- dynamic(feature_support/3).
+:- dynamic(feature_relation/3).
+:- dynamic(literal_truth/3).
+:- dynamic(clause_truth/3).
+:- dynamic(clause_literal/2).
+:- dynamic(class_support/3).
+:- dynamic(clause_class_score/3).
+:- dynamic(clause_support/2).
+:- dynamic(clause_conflict/2).
+:- dynamic(insight/4).
+:- dynamic(counterexample/4).
+:- dynamic(proposal/3).
 
-% Bounded lowerability — exact gate (stubs, Python validates natively)
+% Bounded lowerability -- exact gate (stubs, Python validates natively)
 lowerable(Candidate, Target) :-
     nonvar(Candidate), nonvar(Target),
     member(Target, [binary_clause, shared_weighted_clause, regression_clause, patch_clause, graph_clause, logic_program, threshold, composite_gate]),

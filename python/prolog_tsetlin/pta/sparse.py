@@ -20,7 +20,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from ..representation import LiteralCatalog
 from .deescalation import DeescalationPTA
-from .proposal import PTAEscalationProposal, PTAInsight
+from .proposal import PTAEscalationProposal, PTAInsight, PTAMorphologyProposal
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,18 +89,12 @@ def propose_sparse_morphology(
     rows: Sequence[Mapping[str, Any]],
     *,
     pta: DeescalationPTA | None = None,
-) -> tuple[SparseClauseBank, PTAEscalationProposal | None]:
+) -> tuple[SparseClauseBank, PTAMorphologyProposal | None]:
     """Model morphology: propose removing redundancy, requires new artifact.
 
-    Uses DeescalationPTA to find:
-      - duplicate clauses (identical sets) → 2 identical clauses contribute 2 votes, not 1
-      - subsumed clauses → independent vote, different polarity/weight
-      - thresholds_equivalent on observed rows ≠ logically equivalent over domain
-      - never-true literal removal can make clause fire
-
-    Returns (exact_bank, morphology_proposal). morphology_proposal is a
-    PTAEscalationProposal describing the removals; caller must validate via
-    oracle/shadow and publish as child artifact with restoration lineage.
+    Uses DeescalationPTA to find redundancy. Returns (exact_bank,
+    morphology_proposal) where morphology_proposal is a PTAMorphologyProposal
+    (Class II lifecycle, not NativeTarget) requiring oracle/shadow validation.
     If no redundancy found, morphology_proposal is None.
     """
     pta = pta or DeescalationPTA()
@@ -179,15 +173,14 @@ def propose_sparse_morphology(
     all_lits = tuple(sorted({lid for c in clauses for lid in c.literal_ids}))
     index = {c.clause_id: idx for idx, c in enumerate(clauses)}
     morphed = SparseClauseBank(clauses, all_lits, index)
-    # Build morphology proposal for trust boundary
-    proposal = PTAEscalationProposal(
-        proposal_id=f"morphology:sparse:{len(to_remove)}-removed:{len(clause_literals)-len(final)}-dedup",
+    proposal = PTAMorphologyProposal(
+        morphology_id=f"morphology:sparse:{len(to_remove)}-removed:{len(clause_literals)-len(final)}-dedup",
+        parent_artifact_id=None,
         source_pta_ids=(pta.pta_id,),
         supporting_insights=tuple(redundant),
-        counterexamples_addressed=(),
-        required_literals=(),
-        native_target="threshold",  # morphology proposal delegates to threshold logic for now
-        structure={"removed_literals": sorted(to_remove), "removed_clauses": len(clause_literals)-len(final), "morphed_clauses": morphed.to_proposal_structure()},
+        removed_literals=tuple(sorted(to_remove)),
+        removed_clauses=len(clause_literals) - len(final),
+        morphed_bank=morphed.to_proposal_structure(),
         resource_bounds={"literal_count": max(1, len(all_lits))},
     )
     exact = to_sparse_exact(clause_literals)

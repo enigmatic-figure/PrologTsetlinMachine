@@ -39,26 +39,38 @@ def _canon(v: Any) -> str:
     return json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def _deep_canonicalize(value: Any) -> Any:
+def _deep_freeze(value: Any) -> Any:
+    """Recursively freeze to immutable, JSON-compatible, canonical values."""
     if isinstance(value, Mapping):
-        return {str(k): _deep_canonicalize(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_deep_canonicalize(v) for v in sorted(value, key=lambda x: _canon(x)) if not isinstance(value, (list, tuple)) or True] if isinstance(value, (set, frozenset)) else [_deep_canonicalize(v) for v in value]
+        from types import MappingProxyType
+
+        return MappingProxyType({str(k): _deep_freeze(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(v) for v in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted((_deep_freeze(v) for v in value), key=lambda x: _canon(x)))
     if isinstance(value, (str, int, float, bool)) or value is None:
+        # Use int for bool check: bool is subclass of int, so check bool first already done
+        if isinstance(value, float) and not __import__("math").isfinite(value):
+            raise ValueError("non-finite float not allowed in proposal")
         return value
-    # For dataclasses / tuples containing mixed types, canon via json
-    try:
-        json.dumps(value, sort_keys=True)
-        return value
-    except Exception:
-        return str(value)
+    # Reject unsupported types rather than str(value) — unstable
+    raise TypeError(f"unsupported proposal value type: {type(value).__name__}: {value!r}")
+
+
+def _deep_canonicalize(value: Any) -> Any:
+    return _deep_freeze(value)
 
 
 def _freeze_mapping(m: Mapping[str, Any]) -> Mapping[str, Any]:
     from types import MappingProxyType
-    # Deep copy and freeze
-    frozen = {k: _deep_canonicalize(v) for k, v in m.items()}
+
+    frozen = {str(k): _deep_freeze(v) for k, v in m.items()}
     return MappingProxyType(frozen)
+
+
+def _freeze_evidence(evidence: tuple[Any, ...]) -> tuple[Any, ...]:
+    return tuple(_deep_freeze(v) for v in evidence)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +79,10 @@ class PTAInsight:
     kind: str  # e.g. literal_redundant, clause_subsumes, thresholds_equivalent
     subject: str
     evidence: tuple[Any, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Deeply freeze evidence
+        object.__setattr__(self, "evidence", _freeze_evidence(tuple(self.evidence)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,3 +192,27 @@ class PTAEscalationProposal:
             "validation_signature": dict(self.validation_signature),
             "support_trace": list(self.support_trace),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class PTAMorphologyProposal:
+    """Class II lifecycle morphology — behavior-changing model, not native primitive.
+
+    Produces a candidate child model requiring oracle/shadow validation and
+    restoration lineage, not an exact native lowering.
+    """
+
+    morphology_id: str
+    parent_artifact_id: str | None
+    source_pta_ids: tuple[str, ...]
+    supporting_insights: tuple[PTAInsight, ...]
+    removed_literals: tuple[int, ...]
+    removed_clauses: int
+    morphed_bank: Any  # SparseClauseBank dict
+    resource_bounds: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.morphology_id or any(ord(c) < 0x20 for c in self.morphology_id):
+            raise ValueError("morphology_id must be nonempty printable")
+        object.__setattr__(self, "removed_literals", tuple(self.removed_literals))
+        object.__setattr__(self, "supporting_insights", tuple(self.supporting_insights))

@@ -96,6 +96,14 @@ jobs:
         run: |
           gplc -c --no-susp-warn -o /tmp/bounded_threshold_search.o prolog/bounded_threshold_search.pl
           gplc -c --no-susp-warn -o /tmp/bounded_structure_search.o prolog/bounded_structure_search.pl
+          gplc -c --no-susp-warn -o /tmp/pta_ontology.o prolog/pta_ontology.pl
+          gplc -c --no-susp-warn -o /tmp/pta_input.o prolog/pta_input.pl
+          gplc -c --no-susp-warn -o /tmp/pta_deescalation.o prolog/pta_deescalation.pl
+          gplc -c --no-susp-warn -o /tmp/pta_escalation.o prolog/pta_escalation.pl
+          echo "=== PTA integration driver ===" | cat
+          printf ":- include('prolog/pta_ontology.pl').\n:- include('prolog/pta_input.pl').\n:- include('prolog/pta_deescalation.pl').\n:- include('prolog/pta_escalation.pl').\n:- initialization((write('PTA collective compiled'), nl, halt)).\n" > /tmp/pta_driver.pl
+          gplc --no-top-level -o /tmp/pta_driver /tmp/pta_driver.pl
+          /tmp/pta_driver
       - name: Run Prolog bridge tests
         run: >-
           python -m pytest

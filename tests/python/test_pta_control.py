@@ -84,14 +84,20 @@ def test_deescalation_stable_absorption():
 
 
 def test_escalation_cotm_and_graph_depth():
+    from prolog_tsetlin.pta import LoweredCandidate
+
     esc = EscalationPTA()
     weights = esc.allocate_cotm_weights(4, 2, {(0, 0): 0.9, (1, 0): 0.4, (2, 1): 0.85, (3, 1): 0.2})
     assert len(weights) > 0
     prop = esc.weights_to_proposal(weights)
-    assert lowerable(prop)[0] is True
-    # Graph depth increase
+    # CoTM now lowers to LoweredCandidate via lower_exact (reference implementation)
+    assert isinstance(esc.weights_to_proposal(weights).proposal_id, str)
+    from prolog_tsetlin.pta import lower_exact
+
+    assert isinstance(lower_exact(prop), LoweredCandidate)
+    # Graph depth increase — now via lower_exact LoweredCandidate (reference placeholder, even though runtime UNSUPPORTED)
     gprop = esc.propose_graph_depth_increase(3, [{"edges": []}], max_depth=8)
-    assert gprop is not None and lowerable(gprop)[0] is True
+    assert gprop is not None and isinstance(lower_exact(gprop), LoweredCandidate)
     # At max depth, no proposal
     assert esc.propose_graph_depth_increase(8, [], max_depth=8) is None
     # Unbounded recursion not lowerable (checked via lowerable directly)
@@ -111,9 +117,17 @@ def test_escalation_cotm_and_graph_depth():
 
 
 def test_check_example_lowerable():
+    from prolog_tsetlin.pta import LoweredCandidate, NotRepresentable, lower_exact, syntactically_bounded
+
     p = check_example()
+    # check_example uses magic IDs 104 etc — syntactically bounded True, but exact without catalog is NotRepresentable
+    synt_ok, _ = syntactically_bounded(p)
+    assert synt_ok is True
+    assert isinstance(lower_exact(p), NotRepresentable)
+    # With a catalog containing those IDs, it would be lowerable via lower_exact with catalog
+    # But lowerable (alias to lower_exact without catalog) should be False per exact gate
     ok, _ = lowerable(p)
-    assert ok is True
+    assert ok is False
 
 
 def test_input_categorical_group():

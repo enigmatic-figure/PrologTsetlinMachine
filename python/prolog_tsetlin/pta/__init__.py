@@ -1,5 +1,5 @@
-from .proposal import PTAEscalationProposal, PTAInsight
-from .lowering import lowerable, lower_exact, syntactically_bounded, check_example
+from .proposal import PTAEscalationProposal, PTAInsight, PTAMorphologyProposal
+from .lowering import LoweredCandidate, NotRepresentable, lowerable, lower_exact, syntactically_bounded, check_example
 from .ontology import PROLOG_ONTOLOGY
 from .input import InputPTA, LiteralProposal
 from .deescalation import DeescalationPTA
@@ -16,6 +16,9 @@ from .session import PTAReasoningSession
 __all__ = [
     "PTAEscalationProposal",
     "PTAInsight",
+    "PTAMorphologyProposal",
+    "LoweredCandidate",
+    "NotRepresentable",
     "lowerable",
     "lower_exact",
     "syntactically_bounded",

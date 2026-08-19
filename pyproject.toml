@@ -50,6 +50,10 @@ version = {attr = "prolog_tsetlin._version.__version__"}
 "share/prolog-tsetlin-machine/prolog" = [
     "prolog/bounded_structure_search.pl",
     "prolog/bounded_threshold_search.pl",
+    "prolog/pta_ontology.pl",
+    "prolog/pta_input.pl",
+    "prolog/pta_deescalation.pl",
+    "prolog/pta_escalation.pl",
 ]
 
 [tool.setuptools.packages.find]
