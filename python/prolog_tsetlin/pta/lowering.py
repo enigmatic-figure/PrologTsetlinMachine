@@ -31,7 +31,18 @@ def lowerable(proposal: PTAEscalationProposal) -> tuple[bool, str]:
 
     target = proposal.native_target
     if target in ("binary_clause", "shared_weighted_clause", "regression_clause"):
-        # structure must contain clause literal IDs list, all ints
+        # For shared weighted, weights dict is primary; clause check is flexible
+        if target == "shared_weighted_clause" and "weights" in struct:
+            if not isinstance(struct["weights"], dict) or not struct["weights"]:
+                return False, "shared weights must be nonempty dict"
+            if any(not isinstance(w, int) or abs(w) > MAX_WEIGHT_ABS for w in struct["weights"].values()):
+                return False, "weight out of int32 bounded range"
+            if proposal.weights is not None:
+                if any(not isinstance(w, int) or abs(w) > MAX_WEIGHT_ABS for w in proposal.weights):
+                    return False, "weight out of int32 bounded range"
+            if "clause_count" in rb and rb["clause_count"] > MAX_CLAUSES:
+                return False, "clause_count exceeds native bank"
+            return True, "ok"
         clause = struct.get("clause") or struct.get("literals") or []
         if not isinstance(clause, list) or not clause:
             return False, "clause literals must be nonempty list"
