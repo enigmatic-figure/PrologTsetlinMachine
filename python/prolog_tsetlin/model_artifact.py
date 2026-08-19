@@ -922,8 +922,10 @@ class GraphTMInferenceArtifact:
             raise ModelArtifactError("graph-TM payload has unsupported flags")
         if not 1 <= depth <= 8 or not 1 <= clauses <= 8192 or hv_dim not in (256, 512, 1024, 2048, 4096, 8192):
             raise ModelArtifactError("graph-TM payload describes an unsupported configuration")
-        if conformance_count > 256:
-            raise ModelArtifactError("graph-TM conformance length is excessive")
+        if not 1 <= conformance_count <= 256:
+            raise ModelArtifactError("graph-TM conformance length is invalid")
+        if edge_type_count != 16:
+            raise ModelArtifactError("graph-TM edge_type_count must be 16")
         offset = _GRAPH_TM_HEADER.size
         # weights: clauses * 2 int32
         weight_bytes = clauses * 2 * 4
@@ -966,12 +968,13 @@ class GraphTMInferenceArtifact:
             expected_labels.append(int(expected))
         if offset != len(payload):
             raise ModelArtifactError("graph-TM payload has trailing bytes")
-        # Validate manifest against payload
+        # Validate manifest against payload — binary is authoritative
         _validate_graph_tm_manifest(
             decoded.manifest,
             depth,
             clauses,
             hv_dim,
+            edge_type_count,
             tuple(weights),
             tuple(conformance_graphs),
             tuple(expected_labels),
@@ -2385,6 +2388,7 @@ def _validate_graph_tm_manifest(
     depth: int,
     clauses: int,
     hv_dim: int,
+    edge_type_count: int,
     weights: tuple[tuple[int, int], ...],
     conformance_graphs: tuple[Any, ...],
     expected_labels: tuple[int, ...],
@@ -2407,6 +2411,7 @@ def _validate_graph_tm_manifest(
         graph.get("depth") != depth
         or graph.get("clauses") != clauses
         or graph.get("hv_dim") != hv_dim
+        or graph.get("edge_type_count") != edge_type_count
         or graph.get("edge_type_count") != 16
         or not isinstance(graph.get("components"), list)
         or len(graph["components"]) != clauses
@@ -2414,9 +2419,15 @@ def _validate_graph_tm_manifest(
         or len(graph["weights"]) != clauses
     ):
         raise ModelArtifactError("graph contract is invalid")
-    for w in graph["weights"]:
+    manifest_weights = graph["weights"]
+    # binary weights are authoritative — manifest must exactly equal them
+    if manifest_weights != [list(w) for w in weights]:
+        raise ModelArtifactError("graph manifest weights disagree with payload")
+    for w in manifest_weights:
         if not isinstance(w, list) or len(w) != 2 or any(not isinstance(v, int) for v in w):
             raise ModelArtifactError("graph weight contract is invalid")
+        if not -1_000_000 <= w[0] <= 1_000_000 or not -1_000_000 <= w[1] <= 1_000_000:
+            raise ModelArtifactError("graph weight value out of range")
     for raw in graph["components"]:
         if not isinstance(raw, dict):
             raise ModelArtifactError("graph component contract is invalid")

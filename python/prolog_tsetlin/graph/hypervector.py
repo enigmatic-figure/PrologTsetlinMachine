@@ -79,25 +79,39 @@ def bundle(hvs: list[Hypervector]) -> Hypervector:
 
 
 def bind(a: Hypervector, b: Hypervector) -> Hypervector:
-    """Binding (⊗) = XOR with permutation — reversible, distinct per pair.
+    """Binding (⊗) = XOR with permutation — reversible, exact.
 
-    Implemented as: permute `b` by a fixed rotation (dim//3) then XOR.
+    Implemented as: permute `b` by a fixed rotation (dim//3) then XOR (symmetric difference).
+    No hidden sparsification — result size is |a| + |b| - 2|a∩perm(b)|. To sparsify, call sparsify() explicitly.
+    Reversible via unbind(): bind(bind(a,b), b) with same permutation equals a (up to permutation).
     """
     if a.dim != b.dim:
         raise ValueError("dim mismatch in bind")
     dim = a.dim
-    # permute b
     shift = dim // 3 or 1
     perm_b = frozenset((i + shift) % dim for i in b.indices)
-    # XOR = symmetric difference of active bits after permutation
-    # But to keep binding distinct from plain XOR, we XOR a with permuted b
     result = a.indices.symmetric_difference(perm_b)
-    # Keep sparsity roughly sum: no further sparsify — binding is dense-ish
-    # To stay sparse, we keep result as is (size ~ |a|+|b|)
-    # If too dense, sparsify deterministically by hashing
-    if len(result) > dim // 2:
-        # keep first half sorted
-        result = frozenset(sorted(result)[: dim // 2])
+    return Hypervector(dim, result)
+
+
+def sparsify(hv: Hypervector, keep: int | None = None) -> Hypervector:
+    """Explicit lossy sparsification — keep first `keep` sorted indices."""
+    if keep is None:
+        keep = hv.dim // 2
+    if len(hv.indices) <= keep:
+        return hv
+    return Hypervector(hv.dim, frozenset(sorted(hv.indices)[:keep]))
+
+
+def unbind(bound: Hypervector, b: Hypervector) -> Hypervector:
+    """Inverse of bind — recovers a from bind(a,b) given b."""
+    if bound.dim != b.dim:
+        raise ValueError("dim mismatch in unbind")
+    dim = bound.dim
+    shift = dim // 3 or 1
+    perm_b = frozenset((i + shift) % dim for i in b.indices)
+    # XOR is its own inverse
+    result = bound.indices.symmetric_difference(perm_b)
     return Hypervector(dim, result)
 
 

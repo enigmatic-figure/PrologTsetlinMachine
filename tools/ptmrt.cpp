@@ -204,6 +204,9 @@ void print_active_slots(std::span<const std::uint64_t> words) {
 void run(const char* path, std::string_view input_text) {
     const auto model = open_model(path);
     const auto description = describe(model);
+    if (description.model_kind == PTMRT_MODEL_GRAPH_TM_V1) {
+        fail("run", PTMRT_STATUS_UNSUPPORTED_MODEL);
+    }
     const auto width = description.inputs[0].shape[0];
     std::vector<std::uint64_t> packed_words;
     if (description.model_kind == PTMRT_MODEL_MASKED_THRESHOLD_V1) {

@@ -1,7 +1,22 @@
-"""Graph Tsetlin Machine — layered message passing + CoTM voting (Python reference).
+"""Graph Tsetlin Machine — structural prototype for layered message passing + CoTM voting.
 
-Implements the paper Algorithm §2 (steps 1–5) in scalar Python.
-This is the oracle before any native optimisation.
+**Status: experimental structural prototype, not yet a full Graph Tsetlin Machine.**
+
+This module provides a deterministic, bounded Python reference that mirrors the
+paper's Algorithm §2 (steps 1–5) *structure* (per-node per-clause per-layer
+evaluation, message inboxes, CoTM voting), but does **not** yet implement the
+full Tsetlin-automata feedback, hypervector bundle/⊗ participation in
+inference, or the shared CoTM clause pool dynamics. HypervectorEncoder is
+constructed (hv_dim, bundle/bind) but _evaluate_graph() currently operates on
+Python sets of hashed property strings and strings such as "M:0:3⊗edge" for
+clarity and testability. fit() is a heuristic weight + random literal
+insertion scaffold (see its docstring) — not TA/CoTM learning.
+
+Use as: deterministic oracle for exact message-routing, edge-type, and
+negated-literal semantics; serialize→reload exact-prediction checks; and for
+native load/inspect of graph_tm_v1 artifacts (native run/verify currently
+returns UNSUPPORTED_MODEL). The eventual full Graph TM will integrate TA
+states, sparse binary hypervectors in inference, and coalesced voting.
 """
 
 from __future__ import annotations
@@ -24,6 +39,8 @@ MAX_CLAUSES = 1024
 
 @dataclass
 class GraphTsetlinMachine:
+    """Experimental structural prototype — see module docstring for status."""
+
     depth: int
     clauses: int
     specificity: float = 3.9
@@ -31,8 +48,9 @@ class GraphTsetlinMachine:
     hv_dim: int = 4096
     edge_type_count: int = 4
     seed: int = 1
-    # internal TA states per component literal (simplified: dict for demo)
-    # For full TM learning we store include/exclude per literal per component per clause
+    # internal TA states per component literal (simplified: prototype scaffold)
+    # Full TM would store per-literal TA states and CoTM shared pool; here we
+    # store literal sets and per-class weights heuristically.
     _components: list[DeepClause] = field(default_factory=list, init=False, repr=False)
     _weights: list[list[int]] = field(default_factory=list, init=False, repr=False)
     _rng: random.Random = field(default_factory=lambda: random.Random(1), init=False, repr=False)
@@ -144,21 +162,22 @@ class GraphTsetlinMachine:
         return 0 if scores[0] >= scores[1] else 1
 
     def fit(self, graphs: list[GraphInput], labels: list[int], *, epochs: int = 1) -> "GraphTsetlinMachine":
+        """Heuristic scaffold — not TA/CoTM learning.
+
+        Updates per-class weights and occasionally inserts a randomly selected
+        property literal. Exists only to provide a deterministic training path
+        for serialization and smoke tests until the true TA feedback is
+        implemented. Do not use to claim learning accuracy.
+        """
         if len(graphs) != len(labels):
             raise ValueError("graphs/labels length mismatch")
         for _ in range(epochs):
             for g, y in zip(graphs, labels):
                 pred = self.predict(g)
-                # Simple feedback: if mispredict, reinforce correct class clauses
-                # For demo, we just adjust weights (CoTM) and randomly add/remove literals
-                # This is not full TA feedback but suffices for toy AAA to be tested via hypothesis
+                # Heuristic scaffold: not full TA feedback
                 if pred != y:
-                    # increase weight of clauses that would have been correct? Simple heuristic:
                     for j in range(self.clauses):
-                        # Flip weight slightly
                         self._weights[j][y] += 1
-                        # Randomly mutate one component literal toward graph properties (imitate learning)
-                        # Pick a node and its property to include
                         if g.node_count > 0 and self._rng.random() < 0.1:
                             node = self._rng.randrange(g.node_count)
                             props = list(g.node_properties[node])
@@ -167,14 +186,12 @@ class GraphTsetlinMachine:
                                 comp = self._components[j].components[0]
                                 new_lits = set(comp.literals)
                                 new_lits.add(prop)
-                                # bound size
                                 if len(new_lits) < 8:
                                     new_comp = DeepClauseComponent(layer=0, literals=frozenset(new_lits), negated=comp.negated)
                                     comps = list(self._components[j].components)
                                     comps[0] = new_comp
                                     self._components[j] = DeepClause(tuple(comps))
                 else:
-                    # correct: slightly reward
                     pass
         return self
 

@@ -19,26 +19,51 @@ class GraphValidationError(ValueError):
     """Raised when a supplied graph violates its bounded contract."""
 
 
-def _stable_property_id(value: object) -> str:
+def _typed_canonical_key(value: object) -> tuple[str, str]:
+    """Canonical (type, repr) for typed equality, ordering, and dedup."""
     if isinstance(value, str):
         if not value or len(value) > MAX_PROPERTY_STRING_CHARS:
             raise GraphValidationError("property string must be 1..256 chars")
         if any(ord(c) < 0x20 for c in value):
             raise GraphValidationError("property contains control character")
-        canonical = f"str:{value}"
-    elif isinstance(value, int) and not isinstance(value, bool):
+        return ("str", value)
+    if isinstance(value, bool):
+        return ("bool", str(value))
+    if isinstance(value, int):
         if not -(1 << 53) <= value <= (1 << 53):
             raise GraphValidationError("integer property out of 53-bit range")
-        canonical = f"int:{value}"
-    elif isinstance(value, bool):
-        canonical = f"bool:{value}"
-    elif isinstance(value, float):
+        return ("int", str(value))
+    if isinstance(value, float):
         if not (value == value and abs(value) != float("inf")):
             raise GraphValidationError("property float must be finite")
-        canonical = f"float:{repr(value)}"
-    else:
-        raise GraphValidationError("property must be str, int, bool, or finite float")
+        return ("float", repr(value))
+    raise GraphValidationError("property must be str, int, bool, or finite float")
+
+
+def _stable_property_id(value: object) -> str:
+    type_name, repr_str = _typed_canonical_key(value)
+    canonical = f"{type_name}:{repr_str}"
     return "prop:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _canonical_property_string(value: object) -> str:
+    type_name, repr_str = _typed_canonical_key(value)
+    return f"{type_name}:{repr_str}"
+
+
+def _decode_canonical_string(s: str) -> object:
+    if ":" not in s:
+        return s
+    type_name, repr_str = s.split(":", 1)
+    if type_name == "str":
+        return repr_str
+    if type_name == "int":
+        return int(repr_str)
+    if type_name == "bool":
+        return repr_str == "True"
+    if type_name == "float":
+        return float(repr_str)
+    return s
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +79,7 @@ class GraphInput:
 
     node_count: int
     edges: tuple[tuple[int, int, object], ...]
-    node_properties_raw: tuple[frozenset[object], ...]
+    node_properties_raw: tuple[frozenset[str], ...]  # typed canonical strings "type:repr"
     node_properties: tuple[frozenset[str], ...]
     edge_types: frozenset[object]
     schema: str = GRAPH_SCHEMA
@@ -73,22 +98,25 @@ class GraphInput:
         if not 1 <= node_count <= MAX_NODES:
             raise GraphValidationError(f"node_count must be 1..{MAX_NODES}")
         raw_edges = tuple(edges or ())
-        raw_props: dict[int, frozenset[object]] = {}
+        raw_props: dict[int, frozenset[str]] = {}
         if node_properties:
             for node, props in node_properties.items():
                 if not isinstance(node, int) or isinstance(node, bool):
                     raise GraphValidationError("node index must be int")
                 if not 0 <= node < node_count:
                     raise GraphValidationError("node property for unknown node")
-                prop_set = frozenset(props) if props is not None else frozenset()
-                # validate each property
-                for p in prop_set:
-                    _stable_property_id(p)
+                # canonicalize before dedup to keep typed distinction (1 vs True vs 1.0)
+                dedup: dict[tuple[str, str], str] = {}
+                for p in (props or []):
+                    key = _typed_canonical_key(p)
+                    if key not in dedup:
+                        dedup[key] = _canonical_property_string(p)
+                prop_set = frozenset(dedup.values())
                 if len(prop_set) > 256:
                     raise GraphValidationError("too many properties on one node")
                 raw_props[node] = prop_set
         # fill missing nodes with empty set
-        node_props_raw: list[frozenset[object]] = []
+        node_props_raw: list[frozenset[str]] = []
         for n in range(node_count):
             node_props_raw.append(raw_props.get(n, frozenset()))
 
@@ -121,7 +149,8 @@ class GraphInput:
         distinct_props: set[str] = set()
         node_props_hashed: list[frozenset[str]] = []
         for s in node_props_raw:
-            hashed = frozenset(_stable_property_id(p) for p in s)
+            # s already canonical strings like "int:1"; hash directly via same canonical
+            hashed = frozenset("prop:" + hashlib.sha256(p.encode("utf-8")).hexdigest()[:16] for p in s)
             node_props_hashed.append(hashed)
             distinct_props.update(hashed)
         if len(distinct_props) > MAX_DISTINCT_PROPERTIES:
@@ -175,24 +204,32 @@ class GraphInput:
                     node_props[idx] = [prop] if not isinstance(prop, (list, tuple, set)) else list(prop)  # type: ignore[arg-type]
         return cls.create(node_count=n, edges=edges, node_properties=node_props)
 
+    def _edge_sort_key(self, e: tuple[int, int, object]) -> tuple[int, int, str]:
+        return (e[0], e[1], f"{type(e[2]).__name__}:{str(e[2])}")
+
     def digest(self) -> str:
         payload = {
             "schema": self.schema,
             "node_count": self.node_count,
-            "edges": sorted(self.edges),
+            "edges": sorted(self.edges, key=self._edge_sort_key),
             "node_properties": [sorted(p) for p in self.node_properties],
-            "edge_types": sorted(str(t) for t in self.edge_types),
+            "edge_types": sorted(self.edge_types, key=lambda x: f"{type(x).__name__}:{str(x)}"),
         }
         enc = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return "sha256:" + hashlib.sha256(enc).hexdigest()
 
     def to_dict(self) -> dict[str, object]:
+        # Decode canonical raw for external representation, sorted via typed key
+        def _decode_sorted(s: frozenset[str]) -> list[object]:
+            decoded = [_decode_canonical_string(x) for x in s]
+            return sorted(decoded, key=lambda v: (type(v).__name__, str(v)))
+
         return {
             "schema": self.schema,
             "node_count": self.node_count,
             "edges": [list(e) for e in self.edges],
-            "node_properties": [sorted(p) for p in self.node_properties_raw],
-            "edge_types": sorted(self.edge_types, key=lambda x: str(x)),
+            "node_properties": [_decode_sorted(p) for p in self.node_properties_raw],
+            "edge_types": sorted(self.edge_types, key=lambda x: f"{type(x).__name__}:{str(x)}"),
         }
 
 

@@ -568,6 +568,116 @@ void describe_port(ptmrt_port_description& port,
     return true;
 }
 
+[[nodiscard]] bool graph_manifest_matches(std::string_view manifest,
+                                          std::uint32_t depth,
+                                          std::uint32_t clauses,
+                                          std::uint32_t hv_dim,
+                                          std::uint32_t edge_type_count,
+                                          std::uint32_t conformance_count) {
+    auto parsed = ptm::runtime_detail::JsonParser(manifest).parse();
+    if (!parsed) return false;
+    auto* root = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*parsed);
+    if (!root) return false;
+    if (!json_string_field_equals(*root, "artifact_schema", "ptm.model.v1")) return false;
+    if (!json_string_field_equals(*root, "artifact_kind", "graph_tm_v1")) return false;
+    if (!json_string_field_equals(*root, "container_digest", "sha256-trailer-v1")) return false;
+    auto* model_value = ptm::runtime_detail::member(*root, "model");
+    auto* model = model_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*model_value) : nullptr;
+    if (!model) return false;
+    if (!json_int_field_equals(*model, "depth", depth)) return false;
+    if (!json_int_field_equals(*model, "clauses", clauses)) return false;
+    if (!json_int_field_equals(*model, "hv_dim", hv_dim)) return false;
+    if (!json_string_field_equals(*model, "payload_kind", "graph_tm_v1")) return false;
+    if (!json_int_field_equals(*model, "payload_version", graph_tm_payload_version)) return false;
+    auto* graph_value = ptm::runtime_detail::member(*root, "graph");
+    auto* graph = graph_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*graph_value) : nullptr;
+    if (!graph) return false;
+    if (!json_int_field_equals(*graph, "depth", depth)) return false;
+    if (!json_int_field_equals(*graph, "clauses", clauses)) return false;
+    if (!json_int_field_equals(*graph, "hv_dim", hv_dim)) return false;
+    if (!json_int_field_equals(*graph, "edge_type_count", edge_type_count)) return false;
+    auto* components_value = ptm::runtime_detail::member(*graph, "components");
+    auto* components = components_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*components_value) : nullptr;
+    if (!components || components->size() != clauses) return false;
+    for (auto& comp_val : *components) {
+        auto* comp_obj = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(comp_val);
+        if (!comp_obj) return false;
+        auto* layers_value = ptm::runtime_detail::member(*comp_obj, "components");
+        auto* layers = layers_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*layers_value) : nullptr;
+        if (!layers || layers->size() != depth) return false;
+        // minimal per-layer check: each layer is object with required keys
+        for (auto& layer_val : *layers) {
+            auto* layer_obj = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(layer_val);
+            if (!layer_obj) return false;
+            // require layer field and at least literals/negated (deeper validation in Python)
+            if (!ptm::runtime_detail::member(*layer_obj, "layer")) return false;
+        }
+    }
+    auto* weights_value = ptm::runtime_detail::member(*graph, "weights");
+    auto* weights = weights_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*weights_value) : nullptr;
+    if (!weights || weights->size() != clauses) return false;
+    for (auto& w_val : *weights) {
+        auto* arr = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(w_val);
+        if (!arr || arr->size() != 2) return false;
+        for (auto& elem : *arr) {
+            if (!ptm::runtime_detail::as<std::int64_t>(elem)) return false;
+        }
+    }
+    auto* ports_value = ptm::runtime_detail::member(*root, "ports");
+    auto* ports = ports_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*ports_value) : nullptr;
+    if (!ports || ports->size() != 2) return false;
+    auto* inputs_value = ptm::runtime_detail::member(*ports, "inputs");
+    auto* outputs_value = ptm::runtime_detail::member(*ports, "outputs");
+    auto* inputs = inputs_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*inputs_value) : nullptr;
+    auto* outputs = outputs_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*outputs_value) : nullptr;
+    if (!inputs || inputs->size() != 1) return false;
+    if (!outputs || outputs->size() != 1) return false;
+    if (!port_matches((*inputs)[0], "json", std::nullopt, "graph", {})) return false;
+    if (!port_matches((*outputs)[0], "uint32", std::nullopt, "prediction", {})) return false;
+    auto* task_value = ptm::runtime_detail::member(*root, "task");
+    auto* task = task_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*task_value) : nullptr;
+    if (!task || !json_string_field_equals(*task, "kind", "graph_classification")) return false;
+    auto* labels_value = ptm::runtime_detail::member(*task, "labels");
+    auto* labels = labels_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*labels_value) : nullptr;
+    if (!labels || labels->size() != 2) return false;
+    auto* l0 = ptm::runtime_detail::as<std::string>((*labels)[0]);
+    auto* l1 = ptm::runtime_detail::as<std::string>((*labels)[1]);
+    if (!l0 || l0->empty() || !l1 || l1->empty() || *l0 == *l1) return false;
+    auto* validation_value = ptm::runtime_detail::member(*root, "validation");
+    auto* validation = validation_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*validation_value) : nullptr;
+    if (!validation) return false;
+    if (!json_int_field_equals(*validation, "conformance_case_count", conformance_count)) return false;
+    if (!json_int_field_equals(*validation, "conformance_example_count", conformance_count)) return false;
+    auto* sig_value = ptm::runtime_detail::member(*validation, "signature");
+    if (!sig_value || !ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*sig_value)) return false;
+    auto* title_value = ptm::runtime_detail::member(*root, "title");
+    auto* title = title_value ? ptm::runtime_detail::as<std::string>(*title_value) : nullptr;
+    if (!title || title->empty()) return false;
+    auto* producer_value = ptm::runtime_detail::member(*root, "producer");
+    auto* producer = producer_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*producer_value) : nullptr;
+    if (!producer) return false;
+    auto* pname = ptm::runtime_detail::member(*producer, "name");
+    auto* pver = ptm::runtime_detail::member(*producer, "version");
+    auto* pname_s = pname ? ptm::runtime_detail::as<std::string>(*pname) : nullptr;
+    auto* pver_s = pver ? ptm::runtime_detail::as<std::string>(*pver) : nullptr;
+    if (!pname_s || pname_s->empty() || !pver_s || pver_s->empty()) return false;
+    auto* research_value = ptm::runtime_detail::member(*root, "research");
+    auto* research = research_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*research_value) : nullptr;
+    if (!research) return false;
+    // minimal research checks
+    for (auto key : {"intended_use", "license", "limitations"}) {
+        auto* v = ptm::runtime_detail::member(*research, std::string(key));
+        if (!v || !ptm::runtime_detail::as<std::string>(*v)) return false;
+    }
+    for (auto key : {"authors", "citations"}) {
+        auto* v = ptm::runtime_detail::member(*research, std::string(key));
+        auto* arr = v ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*v) : nullptr;
+        if (!arr) return false;
+        for (auto& e : *arr) if (!ptm::runtime_detail::as<std::string>(e)) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 struct ptmrt_model {
@@ -774,6 +884,10 @@ namespace {
 }
 
 [[nodiscard]] ptmrt_status verify_model(const ptmrt_model& model) {
+    if (model.description.model_kind == graph_tm_model_kind) {
+        // Native graph inference not yet implemented — inspect/load only
+        return PTMRT_STATUS_UNSUPPORTED_MODEL;
+    }
     if (model.description.model_kind == masked_threshold_model_kind) {
         const auto& expected = model.pa_conformance;
         std::vector<std::uint64_t> slots(model.pa_slot_count, 0);
@@ -1224,8 +1338,7 @@ namespace {
         if (g_edge_types != 16) {
             return PTMRT_STATUS_INVALID_FORMAT;
         }
-        // manifest must claim graph_tm_v1
-        if (manifest.find("\"graph_tm_v1\"") == std::string::npos) {
+        if (!graph_manifest_matches(manifest, g_depth, g_clauses, g_hv_dim, g_edge_types, g_conformance)) {
             return PTMRT_STATUS_INVALID_FORMAT;
         }
         // Validate payload size: header + weights*(8) + sum(conformance entries)
@@ -1620,6 +1733,9 @@ ptmrt_status ptmrt_model_run(const ptmrt_model* model,
                              std::uint32_t output_count) {
     if (model == nullptr || inputs == nullptr || outputs == nullptr) {
         return PTMRT_STATUS_NULL_POINTER;
+    }
+    if (model->description.model_kind == graph_tm_model_kind) {
+        return PTMRT_STATUS_UNSUPPORTED_MODEL;
     }
     if (model->description.model_kind == masked_threshold_model_kind) {
         if (input_count != 2 || output_count != 4) {

@@ -29,6 +29,16 @@ def _aid(d: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(_canon(d).encode("utf-8")).hexdigest()
 
 
+def _strict_01(value: object) -> int:
+    if type(value) is not int or value not in (0, 1):
+        raise ValueError("binary value must be strict int 0 or 1")
+    return int(value)
+
+
+def _typed_equal(a: object, b: object) -> bool:
+    return type(a) is type(b) and a == b
+
+
 # ---- Multi-class ----
 
 
@@ -69,13 +79,17 @@ class MultiClassAdapter:
         value = record.get(self.source_field)
         prefix = self.output_prefix or f"{self.source_field}__mc"
         out = dict(record)
+        # check all output fields for collision before writing
+        for idx in range(len(self.classes)):
+            for field in (f"{prefix}_{idx}", f"{prefix}_is_{idx}"):
+                if field in out:
+                    raise ValueError(f"output collision: {field}")
+        for meta in (f"{prefix}__label", f"{prefix}__class_count"):
+            if meta in out:
+                raise ValueError(f"output collision: {meta}")
         for idx, cls_val in enumerate(self.classes):
-            field = f"{prefix}_{idx}"
-            if field in out:
-                raise ValueError(f"output collision: {field}")
-            out[field] = 1 if value == cls_val else 0
-            # also typed indicator for categorical equality downstream
-            out[f"{prefix}_is_{idx}"] = value == cls_val
+            out[f"{prefix}_{idx}"] = 1 if _typed_equal(value, cls_val) else 0
+            out[f"{prefix}_is_{idx}"] = _typed_equal(value, cls_val)
         out[f"{prefix}__label"] = value
         out[f"{prefix}__class_count"] = len(self.classes)
         return out
@@ -86,7 +100,8 @@ class MultiClassAdapter:
         best_idx = 0
         best = -1
         for idx in range(len(self.classes)):
-            v = int(binary_predictions.get(f"{prefix}_{idx}", 0))
+            raw = binary_predictions.get(f"{prefix}_{idx}", 0)
+            v = _strict_01(raw)
             if v > best:
                 best = v
                 best_idx = idx
@@ -197,8 +212,16 @@ class PatchAdapter:
         pid = 0
         for pr in range(0, self.rows - self.kernel_rows + 1, self.stride_rows):
             for pc in range(0, self.cols - self.kernel_cols + 1, self.stride_cols):
+                # check for silent overwrite — require patch output fields not already in record
+                for kr in range(self.kernel_rows):
+                    for kc in range(self.kernel_cols):
+                        fname = f"{self.output_prefix}_{kr}_{kc}"
+                        if fname in record:
+                            raise ValueError(f"output collision: {fname}")
+                for meta in (f"{self.output_prefix}__id", f"{self.output_prefix}__row", f"{self.output_prefix}__col"):
+                    if meta in record:
+                        raise ValueError(f"output collision: {meta}")
                 patch: dict[str, Any] = dict(record)
-                # remove original flat fields to avoid collision? keep but prefix patch fields distinct
                 for kr in range(self.kernel_rows):
                     for kc in range(self.kernel_cols):
                         patch[f"{self.output_prefix}_{kr}_{kc}"] = matrix[pr + kr][pc + kc]
@@ -306,10 +329,12 @@ class RegressionAdapter:
     def inverse(self, band_predictions: Mapping[str, int]) -> float:
         """Decode thermometer votes to scalar: midpoints between thresholds."""
         prefix = self.output_prefix or f"{self.source_field}__band"
-        # count leading ones (thermometer property)
+        # count leading ones (thermometer property) — strict 0/1
         ones = 0
         for idx in range(len(self.thresholds)):
-            if int(band_predictions.get(f"{prefix}_{idx}", 0)) == 1:
+            raw = band_predictions.get(f"{prefix}_{idx}", 0)
+            v = _strict_01(raw)
+            if v == 1:
                 ones += 1
             else:
                 break

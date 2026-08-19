@@ -124,7 +124,7 @@ jobs:
         run: ctest --test-dir out/ci-sanitize -C RelWithDebInfo --output-on-failure
       - name: Install sanitized PTM
         run: cmake --install out/ci-sanitize --config RelWithDebInfo --prefix "${{ runner.temp }}/ptm-sanitize-install"
-      - name: Fuzz ptmrt open memory (smoke)
+      - name: Mutation smoke (ASan/UBSan) — mutated artifacts must be rejected
         run: |
           python -c "
           import subprocess, json, struct, hashlib, tempfile, os
@@ -132,7 +132,7 @@ jobs:
           from prolog_tsetlin.reference import ScalarBinaryTsetlinMachine
           from prolog_tsetlin.model_artifact import export_packed_tm
           tm = ScalarBinaryTsetlinMachine(number_of_clauses=2, number_of_features=2, threshold=2)
-          art = export_packed_tm(tm.snapshot(), name='fuzz-smoke', path=None)
+          art = export_packed_tm(tm.snapshot(), name='mutation-smoke', path=None)
           data = bytearray(art.serialized)
           for offset in [64, 100, 200]:
               if offset < len(data):
@@ -141,8 +141,17 @@ jobs:
                   data[offset] ^= 0x01
           print('fuzz artifacts written')
           "
-          for f in /tmp/fuzz_*.ptm; do out/ci-sanitize/ptmrt verify \"$f\" || true; done
-          echo 'sanitizer fuzz smoke done'
+          set -e
+          for f in /tmp/fuzz_*.ptm; do
+            echo "checking $f"
+            if out/ci-sanitize/ptmrt verify "$f"; then
+              echo "ERROR: mutated artifact should not verify: $f" >&2
+              exit 1
+            else
+              echo "mutated correctly rejected: $f"
+            fi
+          done
+          echo 'mutation smoke done — sanitizers clean, rejections as expected'
 
   distribution:
     name: Distribution and documentation

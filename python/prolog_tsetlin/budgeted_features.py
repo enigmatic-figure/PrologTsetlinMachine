@@ -155,7 +155,9 @@ class BudgetedFeatureStore:
         rec = self._records.get(literal_id)
         if rec is None:
             raise KeyError(f"unknown literal_id {literal_id}")
-        if not isinstance(utility, (int, float)) or not (utility == utility):  # NaN check
+        import math
+
+        if not isinstance(utility, (int, float)) or not math.isfinite(float(utility)):
             raise ValueError("utility must be finite number")
         object.__setattr__(rec, "utility", float(utility))  # type: ignore[attr-defined]
 
@@ -248,7 +250,7 @@ class BudgetedFeatureStore:
             raise ValueError("fields invalid")
         if not isinstance(literals_raw, list):
             raise ValueError("literals invalid")
-        if len(literals_raw) > budget and len(literals_raw) > MAX_BUDGET:
+        if len(literals_raw) > budget or len(literals_raw) > MAX_BUDGET:
             raise ValueError("store exceeds budget ceiling")
         # rebuild schema
         fds = []
@@ -318,7 +320,9 @@ class BudgetedFeatureStore:
                 utility=float(entry.get("utility", 0.0)),
                 creation_order=int(entry.get("creation_order", 0)),
             )
-            if rec.use_count < 0 or rec.utility != rec.utility:
+            import math
+
+            if rec.use_count < 0 or not math.isfinite(rec.utility):
                 raise ValueError("use_count/utility invalid")
             if len(_canonical(entry).encode("utf-8")) > MAX_LITERAL_BYTES:
                 raise ValueError("literal entry oversized")
@@ -352,7 +356,8 @@ class BudgetedFeatureStore:
                 f.write(encoded)
                 f.flush()
                 os.fsync(f.fileno())
-            # fsync directory on POSIX
+            os.replace(tmp, str(p))
+            # fsync directory on POSIX after replace for crash-durable publication
             try:
                 dfd = os.open(str(p.parent), os.O_DIRECTORY)
                 try:
@@ -361,7 +366,6 @@ class BudgetedFeatureStore:
                     os.close(dfd)
             except OSError:
                 pass
-            os.replace(tmp, str(p))
         finally:
             try:
                 os.unlink(tmp)
