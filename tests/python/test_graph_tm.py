@@ -120,9 +120,10 @@ def test_graph_tm_edge_type_sensitivity_and_hops():
     from prolog_tsetlin.graph.types import canonical_edge_type
 
     c0_empty = DeepClauseComponent(layer=0, literals=frozenset(), negated=frozenset())
+    c1_empty = DeepClauseComponent(layer=1, literals=frozenset(), negated=frozenset())
     c1_msg = DeepClauseComponent(layer=1, literals=frozenset(["M:0:0"]), negated=frozenset())
     # Sender at j=0 always true (empty clause) so it sends M:0:0; receiver at j=1 requires M:0:0
-    sender = DeepClause((c0_empty, c0_empty))
+    sender = DeepClause((c0_empty, c1_empty))
     receiver = DeepClause((c0_empty, c1_msg))
     g_chain = GraphInput.create(node_count=3, edges=[(0, 1, 0), (1, 2, 0)], node_properties={0: ["A"]})
     gtm = GraphTsetlinMachine(depth=2, clauses=2, seed=0)
@@ -145,12 +146,15 @@ def test_graph_tm_edge_type_sensitivity_and_hops():
     g_isolated = GraphInput.create(node_count=1, node_properties={0: ["A"]})
     assert gtm.predict(g_isolated) == 0
     # True 3-hop oracle: 4 nodes 0->1->2->3, depth 4 chain, removing any edge breaks prediction
-    c_empty = DeepClauseComponent(layer=0, literals=frozenset(), negated=frozenset())
+    c0 = DeepClauseComponent(layer=0, literals=frozenset(), negated=frozenset())
+    c1 = DeepClauseComponent(layer=1, literals=frozenset(), negated=frozenset())
+    c2 = DeepClauseComponent(layer=2, literals=frozenset(), negated=frozenset())
+    c3 = DeepClauseComponent(layer=3, literals=frozenset(), negated=frozenset())
     # depth 4 chain: clause0 sender, clause1 needs M:0:0 at layer1, clause2 needs M:1:1 at layer2, clause3 needs M:2:2 at layer3 votes
-    sender4 = DeepClause((c_empty, c_empty, c_empty, c_empty))
-    mid1 = DeepClause((c_empty, DeepClauseComponent(layer=1, literals=frozenset(["M:0:0"]), negated=frozenset()), c_empty, c_empty))
-    mid2 = DeepClause((c_empty, c_empty, DeepClauseComponent(layer=2, literals=frozenset(["M:1:1"]), negated=frozenset()), c_empty))
-    receiver4 = DeepClause((c_empty, c_empty, c_empty, DeepClauseComponent(layer=3, literals=frozenset(["M:2:2"]), negated=frozenset())))
+    sender4 = DeepClause((c0, c1, c2, c3))
+    mid1 = DeepClause((c0, DeepClauseComponent(layer=1, literals=frozenset(["M:0:0"]), negated=frozenset()), c2, c3))
+    mid2 = DeepClause((c0, c1, DeepClauseComponent(layer=2, literals=frozenset(["M:1:1"]), negated=frozenset()), c3))
+    receiver4 = DeepClause((c0, c1, c2, DeepClauseComponent(layer=3, literals=frozenset(["M:2:2"]), negated=frozenset())))
     g_chain_3 = GraphInput.create(node_count=4, edges=[(0, 1, 0), (1, 2, 0), (2, 3, 0)], node_properties={0: ["A"]})
     gtm4 = GraphTsetlinMachine(depth=4, clauses=4, seed=0)
     gtm4._components = [sender4, mid1, mid2, receiver4]
@@ -171,8 +175,8 @@ def test_graph_tm_edge_type_sensitivity_and_hops():
     assert g_int.digest() != g_str.digest()
     assert g_int.edge_types != g_str.edge_types
     # Bound messages must be distinct
-    c_int_bound = DeepClause((c_empty, DeepClauseComponent(layer=1, literals=frozenset([f"M:0:0⊗{canonical_edge_type(1)}"]), negated=frozenset())))
-    c_str_bound = DeepClause((c_empty, DeepClauseComponent(layer=1, literals=frozenset([f"M:0:0⊗{canonical_edge_type('1')}"]), negated=frozenset())))
+    c_int_bound = DeepClause((c0_empty, DeepClauseComponent(layer=1, literals=frozenset([f"M:0:0⊗{canonical_edge_type(1)}"]), negated=frozenset())))
+    c_str_bound = DeepClause((c0_empty, DeepClauseComponent(layer=1, literals=frozenset([f"M:0:0⊗{canonical_edge_type('1')}"]), negated=frozenset())))
     gtm_int = GraphTsetlinMachine(depth=2, clauses=2, seed=0)
     gtm_int._components = [sender, c_int_bound]
     gtm_int._weights = [[0, 0], [1, 1]]

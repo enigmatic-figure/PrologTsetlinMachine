@@ -27,9 +27,11 @@ try:  # optional graph extra; validated lazily so core stays importable without 
     from .graph.cotm import CoalescedTsetlinMachine as ClauseCoTM  # noqa: F401
     from .graph.deep_clause import DeepClause, DeepClauseComponent
     from .graph.graph_tm import GraphTsetlinMachine
-    from .graph.types import GraphInput
+    from .graph.types import GraphInput, MAX_GRAPH_CLAUSES, MAX_GRAPH_DEPTH
 except Exception:  # pragma: no cover
     ClauseCoTM = DeepClause = DeepClauseComponent = GraphTsetlinMachine = GraphInput = None  # type: ignore[assignment]
+    MAX_GRAPH_CLAUSES = 1024  # type: ignore[assignment]
+    MAX_GRAPH_DEPTH = 8  # type: ignore[assignment]
 
 
 MODEL_ARTIFACT_SCHEMA = "ptm.model.v1"
@@ -920,7 +922,7 @@ class GraphTMInferenceArtifact:
         ) = _GRAPH_TM_HEADER.unpack_from(payload, 0)
         if payload_version != GRAPH_TM_PAYLOAD_VERSION or reserved != 0 or flags != 0:
             raise ModelArtifactError("graph-TM payload has unsupported flags")
-        if not 1 <= depth <= 8 or not 1 <= clauses <= 8192 or hv_dim not in (256, 512, 1024, 2048, 4096, 8192):
+        if not 1 <= depth <= MAX_GRAPH_DEPTH or not 1 <= clauses <= MAX_GRAPH_CLAUSES or hv_dim not in (256, 512, 1024, 2048, 4096, 8192):
             raise ModelArtifactError("graph-TM payload describes an unsupported configuration")
         if not 1 <= conformance_count <= 256:
             raise ModelArtifactError("graph-TM conformance length is invalid")
@@ -953,15 +955,64 @@ class GraphTMInferenceArtifact:
             offset += graph_len
             try:
                 graph_dict = json.loads(graph_bytes.decode("utf-8"))
-                # GraphInput serialises via to_dict() with node_properties raw; reconstruct via create
-                node_count = int(graph_dict.get("node_count", 0))
+                if not isinstance(graph_dict, dict):
+                    raise ModelArtifactError("graph-TM graph payload is not an object")
+                # Strict ptm.graph.v1 grammar — no coercion
+                raw_node_count = graph_dict.get("node_count")
+                if type(raw_node_count) is not int:
+                    raise ModelArtifactError("graph-TM node_count must be strict int")
+                node_count = raw_node_count
+                raw_schema = graph_dict.get("schema")
+                if raw_schema != "ptm.graph.v1":
+                    raise ModelArtifactError("graph-TM schema must be ptm.graph.v1")
+                # Validate exact expected keys/types before construction
+                if not isinstance(graph_dict.get("edges"), list):
+                    raise ModelArtifactError("graph-TM edges must be list")
+                if not isinstance(graph_dict.get("node_properties"), list):
+                    raise ModelArtifactError("graph-TM node_properties must be list")
+                if not isinstance(graph_dict.get("edge_types"), list):
+                    raise ModelArtifactError("graph-TM edge_types must be list")
                 edges = graph_dict.get("edges") or []
                 node_props_raw = graph_dict.get("node_properties") or []
+                # Validate edges are [int,int, int|str] with strict types; GraphInput.create will enforce bounds but we pre-check strictness
+                for e in edges:
+                    if not isinstance(e, (list, tuple)) or len(e) != 3:
+                        raise ModelArtifactError("graph-TM edge must be 3-tuple")
+                    s, d, et = e
+                    if type(s) is not int or type(d) is not int:
+                        raise ModelArtifactError("graph-TM edge endpoints must be strict int")
+                    if not (isinstance(et, int) and type(et) is int) and not isinstance(et, str):
+                        raise ModelArtifactError("graph-TM edge_type must be int or str")
+                    if isinstance(et, bool):
+                        raise ModelArtifactError("graph-TM edge_type bool not allowed")
                 props: dict[int, list[object]] = {}
                 for idx, plist in enumerate(node_props_raw):
+                    if not isinstance(plist, list):
+                        raise ModelArtifactError("graph-TM node_properties entry must be list")
                     if plist:
+                        # Validate each property scalar strictness at trust boundary
+                        for p in plist:
+                            if isinstance(p, bool):
+                                continue
+                            if isinstance(p, int) and type(p) is int:
+                                if not -(1 << 53) <= p <= (1 << 53):
+                                    raise ModelArtifactError("graph-TM integer property out of 53-bit range")
+                                continue
+                            if isinstance(p, float):
+                                import math as _math
+
+                                if not _math.isfinite(p):
+                                    raise ModelArtifactError("graph-TM float property must be finite")
+                                continue
+                            if isinstance(p, str):
+                                if not p or len(p) > 256 or any(ord(c) < 0x20 for c in p):
+                                    raise ModelArtifactError("graph-TM string property invalid")
+                                continue
+                            raise ModelArtifactError("graph-TM property must be str, int, bool, or finite float")
                         props[idx] = list(plist)  # type: ignore[assignment]
                 graph = GraphInput.create(node_count=node_count, edges=[tuple(e) for e in edges], node_properties=props)  # type: ignore[arg-type]
+            except ModelArtifactError:
+                raise
             except Exception as error:
                 raise ModelArtifactError("graph-TM graph payload is invalid") from error
             conformance_graphs.append(graph)
@@ -1623,7 +1674,7 @@ def export_graph_tm(
     depth = int(getattr(gtm, "depth"))
     clauses = int(getattr(gtm, "clauses"))
     hv_dim = int(getattr(gtm, "hv_dim"))
-    if not 1 <= depth <= 8 or not 1 <= clauses <= 8192 or hv_dim not in (256, 512, 1024, 2048, 4096, 8192):
+    if not 1 <= depth <= MAX_GRAPH_DEPTH or not 1 <= clauses <= MAX_GRAPH_CLAUSES or hv_dim not in (256, 512, 1024, 2048, 4096, 8192):
         raise ValueError("graph-TM configuration is out of bounds")
     # Build components list from internal _components/_weights
     raw_components = []

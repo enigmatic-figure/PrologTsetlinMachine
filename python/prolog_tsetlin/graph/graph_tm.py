@@ -25,7 +25,12 @@ import random
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from .types import GraphInput, GraphValidationError
+from .types import (
+    GraphInput,
+    GraphValidationError,
+    MAX_GRAPH_CLAUSES,
+    MAX_GRAPH_DEPTH,
+)
 from .deep_clause import DeepClause, DeepClauseComponent
 from .hypervector import bundle, bind
 from .encoding import HypervectorEncoder
@@ -33,8 +38,8 @@ from .encoding import HypervectorEncoder
 # For now, DeepClauseComponent evaluation is set-based (present symbols).
 # GraphTM evaluation mirrors paper: per-node per-clause per-layer.
 
-MAX_DEPTH = 8
-MAX_CLAUSES = 1024
+MAX_DEPTH = MAX_GRAPH_DEPTH
+MAX_CLAUSES = MAX_GRAPH_CLAUSES
 
 
 @dataclass

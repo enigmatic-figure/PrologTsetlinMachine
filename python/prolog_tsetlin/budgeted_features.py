@@ -147,8 +147,8 @@ class BudgetedFeatureStore:
         rec = self._records.get(literal_id)
         if rec is None:
             raise KeyError(f"unknown literal_id {literal_id}")
-        if not isinstance(count, int) or count < 1:
-            raise ValueError("count must be positive int")
+        if type(count) is not int or count < 1:
+            raise ValueError("count must be positive strict int (bool not allowed)")
         object.__setattr__(rec, "use_count", rec.use_count + count)  # type: ignore[attr-defined]
 
     def set_utility(self, literal_id: int, utility: float) -> None:
@@ -157,8 +157,8 @@ class BudgetedFeatureStore:
             raise KeyError(f"unknown literal_id {literal_id}")
         import math
 
-        if not isinstance(utility, (int, float)) or not math.isfinite(float(utility)):
-            raise ValueError("utility must be finite number")
+        if isinstance(utility, bool) or not isinstance(utility, (int, float)) or not math.isfinite(float(utility)):
+            raise ValueError("utility must be finite number (bool not allowed)")
         object.__setattr__(rec, "utility", float(utility))  # type: ignore[attr-defined]
 
     def _enforce(self, exclude_id: int | None = None) -> list[int]:

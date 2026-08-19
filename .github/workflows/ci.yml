@@ -136,7 +136,17 @@ jobs:
           import subprocess, json, struct, hashlib, tempfile, os
           from pathlib import Path
           from prolog_tsetlin.reference import ScalarBinaryTsetlinMachine
-          from prolog_tsetlin.model_artifact import export_packed_tm
+          from prolog_tsetlin.model_artifact import export_packed_tm, export_graph_tm
+          from prolog_tsetlin.graph import GraphInput
+          from prolog_tsetlin.graph.graph_tm import GraphTsetlinMachine
+          import math
+
+          def rehash(data: bytearray) -> bytes:
+              content = bytes(data[:-32])
+              data[-32:] = hashlib.sha256(content).digest()
+              return bytes(data)
+
+          # 1) Integrity-only flips (no rehash) — must be integrity error
           tm = ScalarBinaryTsetlinMachine(number_of_clauses=2, number_of_features=2, threshold=2)
           art = export_packed_tm(tm.snapshot(), name='mutation-smoke', path=None)
           data = bytearray(art.serialized)
@@ -145,10 +155,83 @@ jobs:
                   data[offset] ^= 0x01
                   Path(tempfile.gettempdir()+f'/fuzz_{offset}.ptm').write_bytes(data)
                   data[offset] ^= 0x01
-          print('fuzz artifacts written')
+
+          # 2) Graph hostile but correctly rehashed — parser must reject as INVALID_FORMAT under ASan/UBSan
+          gtm = GraphTsetlinMachine(depth=2, clauses=2, hv_dim=256, seed=0)
+          g = GraphInput.create(node_count=2, edges=[(0,1,0)], node_properties={0:['A']})
+          g_art = export_graph_tm(gtm, [g], name='hostile-base')
+          base = bytearray(g_art.serialized)
+          # a) manifest/payload weight mismatch (flip weight byte then rehash)
+          def write_hostile(name, mutator):
+              data = bytearray(base)
+              mutator(data)
+              Path(tempfile.gettempdir()+f'/hostile_{name}.ptm').write_bytes(rehash(data))
+
+          def flip_weight(data):
+              manifest_size = struct.unpack_from('<Q', data, 24)[0]
+              payload_off = 64 + manifest_size
+              # header 32 then first weight at +32
+              data[payload_off + 32] ^= 0xFF
+
+          write_hostile('weight_mismatch', flip_weight)
+
+          def oversized_graph(data):
+              manifest_size = struct.unpack_from('<Q', data, 24)[0]
+              payload_off = 64 + manifest_size
+              # graph_len at payload_off+32+16 (header+weights) -> flip to max
+              off = payload_off + 32 + 16
+              struct.pack_into('<I', data, off, 1<<20)  # glen = 1MiB (over bound but still parse)
+
+          write_hostile('oversized_glen', oversized_graph)
+
+          def invalid_property_type(data):
+              manifest_size = struct.unpack_from('<Q', data, 24)[0]
+              payload_off = 64 + manifest_size
+              off = payload_off + 32 + 16
+              glen = struct.unpack_from('<I', data, off)[0]
+              gjson = json.loads(bytes(data[off+8:off+8+glen]).decode())
+              gjson['node_properties'][0][0] = float('inf')  # will be serialized as non-finite -> but we inject invalid JSON
+              # Instead inject an object type for property (invalid)
+              gjson['node_properties'][0][0] = {'bad': 'object'}
+              new = json.dumps(gjson, sort_keys=True, separators=(',', ':')).encode()
+              # Keep same glen slot if new shorter, pad; if longer, expand (simpler: just corrupt first byte to '{' + '\"bad\"')
+              data[off+8:off+8+len(new)] = new
+              # keep trailing bytes
+
+          write_hostile('invalid_prop', invalid_property_type)
+
+          def too_many_edge_types(data):
+              manifest_size = struct.unpack_from('<Q', data, 24)[0]
+              payload_off = 64 + manifest_size
+              off = payload_off + 32 + 16
+              glen = struct.unpack_from('<I', data, off)[0]
+              gjson = json.loads(bytes(data[off+8:off+8+glen]).decode())
+              # Add 17 distinct edge types
+              gjson['edges'] = [[0,1,i] for i in range(17)]
+              gjson['edge_types'] = list(range(17))
+              gjson['node_count'] = 2
+              new = json.dumps(gjson, sort_keys=True, separators=(',', ':')).encode()
+              if len(new) <= glen:
+                  data[off+8:off+8+len(new)] = new
+                  # zero rest
+                  for i in range(len(new), glen):
+                      data[off+8+i] = 32  # space
+              else:
+                  # extend payload: splice new len
+                  new_data = data[:off] + struct.pack('<II', len(new), 1) + new + data[off+8+glen:]
+                  data[:] = new_data
+                  # fix payload size in header
+                  manifest_size2 = struct.unpack_from('<Q', data, 24)[0]
+                  payload_size = len(data) - 64 - manifest_size2 - 32
+                  struct.pack_into('<Q', data, 32, payload_size)
+
+          write_hostile('many_edge_types', too_many_edge_types)
+
+          print('hostile rehashed artifacts written')
           "
           set -e
-          for f in /tmp/fuzz_*.ptm; do
+          for f in /tmp/fuzz_*.ptm /tmp/hostile_*.ptm; do
+            [ -e "$f" ] || continue
             echo "checking $f"
             rc=0
             out/ci-sanitize/ptmrt verify "$f" || rc=$?
@@ -162,7 +245,7 @@ jobs:
               exit 1
             fi
           done
-          echo 'mutation smoke done — sanitizers clean, rejections as expected'
+          echo 'mutation smoke done — sanitizers clean, rejections as expected (parser exercised)'
 
   distribution:
     name: Distribution and documentation

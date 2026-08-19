@@ -88,6 +88,17 @@ class DeepClause:
     components: tuple[DeepClauseComponent, ...]
     # For interpretation, store clause index weight etc outside.
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.components, tuple):
+            raise ValueError("components must be tuple")
+        if not 1 <= len(self.components) <= 8:
+            raise ValueError("depth must be 1..8")
+        for idx, comp in enumerate(self.components):
+            if not isinstance(comp, DeepClauseComponent):
+                raise ValueError("component must be DeepClauseComponent")
+            if comp.layer != idx:
+                raise ValueError(f"component layer {comp.layer} must equal index {idx}")
+
     def depth(self) -> int:
         return len(self.components)
 
@@ -104,7 +115,4 @@ class DeepClause:
         if not 1 <= len(raw) <= 8:
             raise ValueError("depth must be 1..8")
         comps = tuple(DeepClauseComponent.from_dict(c) for c in raw)  # type: ignore[index]
-        for idx, comp in enumerate(comps):
-            if comp.layer != idx:
-                raise ValueError(f"component layer {comp.layer} must equal index {idx}")
         return cls(comps)

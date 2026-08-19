@@ -41,6 +41,8 @@ constexpr std::uint32_t maximum_dimension = 1U << 20U;
 constexpr std::uint32_t maximum_conformance_cases = 16;
 constexpr std::uint32_t logic_program_capacity = 32;
 constexpr std::uint32_t logic_binding_count = 5;
+constexpr std::uint32_t maximum_graph_clauses = 1024U;
+constexpr std::uint32_t maximum_graph_depth = 8U;
 
 using Digest = std::array<std::uint8_t, digest_size>;
 
@@ -599,18 +601,67 @@ void describe_port(ptmrt_port_description& port,
     auto* components_value = ptm::runtime_detail::member(*graph, "components");
     auto* components = components_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*components_value) : nullptr;
     if (!components || components->size() != clauses) return false;
-    for (auto& comp_val : *components) {
-        auto* comp_obj = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(comp_val);
+    for (std::size_t comp_idx = 0; comp_idx < components->size(); ++comp_idx) {
+        auto* comp_obj = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>((*components)[comp_idx]);
         if (!comp_obj) return false;
+        // DeepClause must have exactly {"components": [...]}
+        if (comp_obj->size() != 1) return false;
         auto* layers_value = ptm::runtime_detail::member(*comp_obj, "components");
         auto* layers = layers_value ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*layers_value) : nullptr;
         if (!layers || layers->size() != depth) return false;
-        // minimal per-layer check: each layer is object with required keys
-        for (auto& layer_val : *layers) {
-            auto* layer_obj = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(layer_val);
+        if (layers->size() < 1 || layers->size() > 8) return false;
+        for (std::size_t layer_idx = 0; layer_idx < layers->size(); ++layer_idx) {
+            auto* layer_obj = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>((*layers)[layer_idx]);
             if (!layer_obj) return false;
-            // require layer field and at least literals/negated (deeper validation in Python)
-            if (!ptm::runtime_detail::member(*layer_obj, "layer")) return false;
+            // Exactly 3 keys: layer, literals, negated (negated may be missing? Python requires literals+negated)
+            auto* layer_val = ptm::runtime_detail::member(*layer_obj, "layer");
+            auto* lits_val = ptm::runtime_detail::member(*layer_obj, "literals");
+            auto* neg_val = ptm::runtime_detail::member(*layer_obj, "negated");
+            if (!layer_val || !lits_val) return false;
+            auto* layer_int = ptm::runtime_detail::as<std::int64_t>(*layer_val);
+            if (!layer_int || *layer_int != static_cast<std::int64_t>(layer_idx) || *layer_int < 0 || *layer_int >= 8) return false;
+            auto* lits_arr = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*lits_val);
+            if (!lits_arr || lits_arr->size() > 4096) return false;
+            auto* neg_arr = neg_val ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*neg_val) : nullptr;
+            if (neg_val && !neg_arr) return false;
+            std::size_t total_lits = lits_arr->size() + (neg_arr ? neg_arr->size() : 0);
+            if (total_lits > 4096) return false;
+            // Validate literal strings: 1..256, no control, no duplicates, disjoint
+            std::vector<std::string> all_lits;
+            all_lits.reserve(total_lits);
+            auto validate_literal_array = [&](const ptm::runtime_detail::JsonValue::Array* arr) -> bool {
+                if (!arr) return true;
+                std::vector<std::string> seen;
+                seen.reserve(arr->size());
+                for (auto& lv : *arr) {
+                    auto* s = ptm::runtime_detail::as<std::string>(lv);
+                    if (!s || s->empty() || s->size() > 256) return false;
+                    for (unsigned char ch : *s) if (ch < 0x20) return false;
+                    // duplicate check within this array
+                    for (auto& prev : seen) if (prev == *s) return false;
+                    seen.push_back(*s);
+                    all_lits.push_back(*s);
+                }
+                return true;
+            };
+            if (!validate_literal_array(lits_arr)) return false;
+            if (!validate_literal_array(neg_arr)) return false;
+            // disjoint between literals and negated
+            {
+                std::vector<std::string> pos;
+                for (auto& v : *lits_arr) pos.push_back(*ptm::runtime_detail::as<std::string>(v));
+                if (neg_arr) {
+                    for (auto& v : *neg_arr) {
+                        auto* s = ptm::runtime_detail::as<std::string>(v);
+                        for (auto& p : pos) if (p == *s) return false;
+                    }
+                }
+            }
+            // No extra keys
+            if (layer_obj->size() != (neg_val ? 3 : 2)) {
+                // allow exactly 2 or 3 keys
+                if (layer_obj->size() != 2 && layer_obj->size() != 3) return false;
+            }
         }
     }
     auto* weights_value = ptm::runtime_detail::member(*graph, "weights");
@@ -620,7 +671,8 @@ void describe_port(ptmrt_port_description& port,
         auto* arr = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(w_val);
         if (!arr || arr->size() != 2) return false;
         for (auto& elem : *arr) {
-            if (!ptm::runtime_detail::as<std::int64_t>(elem)) return false;
+            auto* iv = ptm::runtime_detail::as<std::int64_t>(elem);
+            if (!iv || *iv < -1000000 || *iv > 1000000) return false;
         }
     }
     auto* ports_value = ptm::runtime_detail::member(*root, "ports");
@@ -1326,7 +1378,7 @@ namespace {
         if (g_payload_version != graph_tm_payload_version || g_flags != 0 || g_reserved != 0) {
             return PTMRT_STATUS_INVALID_FORMAT;
         }
-        if (g_depth == 0 || g_depth > 8 || g_clauses == 0 || g_clauses > 8192) {
+        if (g_depth == 0 || g_depth > maximum_graph_depth || g_clauses == 0 || g_clauses > maximum_graph_clauses) {
             return PTMRT_STATUS_INVALID_FORMAT;
         }
         if (g_hv_dim != 256 && g_hv_dim != 512 && g_hv_dim != 1024 && g_hv_dim != 2048 && g_hv_dim != 4096 && g_hv_dim != 8192) {
@@ -1418,28 +1470,93 @@ namespace {
                     }
                     if (!et_valid) return PTMRT_STATUS_INVALID_FORMAT;
                 }
+                // Strict ptm.graph.v1 grammar: node_properties must be present with size node_count, schema must match
+                auto* schema_val = ptm::runtime_detail::member(*gobj, "schema");
+                auto* schema_str = schema_val ? ptm::runtime_detail::as<std::string>(*schema_val) : nullptr;
+                if (!schema_str || *schema_str != "ptm.graph.v1") return PTMRT_STATUS_INVALID_FORMAT;
+                // Validate extra unexpected keys? Require exactly expected keys: schema, node_count, edges, node_properties, edge_types
+                // For forward compat, allow extra but require required keys
                 auto* nprops_val = ptm::runtime_detail::member(*gobj, "node_properties");
-                if (nprops_val) {
-                    auto* nprops_arr = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*nprops_val);
-                    if (!nprops_arr) return PTMRT_STATUS_INVALID_FORMAT;
-                    if (nprops_arr->size() != node_count && nprops_arr->size() != 0) {
-                        // Python allows omission; but if present, must align
+                if (!nprops_val) return PTMRT_STATUS_INVALID_FORMAT;
+                auto* nprops_arr = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*nprops_val);
+                if (!nprops_arr || nprops_arr->size() != node_count) return PTMRT_STATUS_INVALID_FORMAT;
+                // Helper to validate property scalar (Python: str 1..256 no control, bool, 53-bit int, finite float)
+                auto is_valid_property = [](const ptm::runtime_detail::JsonValue& v) -> bool {
+                    if (auto* s = ptm::runtime_detail::as<std::string>(v)) {
+                        if (s->empty() || s->size() > 256) return false;
+                        for (unsigned char ch : *s) if (ch < 0x20) return false;
+                        return true;
                     }
-                    std::size_t distinct = 0;
-                    for (auto& plist_val : *nprops_arr) {
-                        auto* plist = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(plist_val);
-                        if (!plist) return PTMRT_STATUS_INVALID_FORMAT;
-                        if (plist->size() > 256) return PTMRT_STATUS_INVALID_FORMAT;
-                        distinct += plist->size();
-                        if (distinct > 4096) return PTMRT_STATUS_INVALID_FORMAT;
+                    if (ptm::runtime_detail::as<bool>(v)) return true;
+                    if (auto* i = ptm::runtime_detail::as<std::int64_t>(v)) {
+                        constexpr std::int64_t limit = 1LL << 53;
+                        if (*i < -limit || *i > limit) return false;
+                        return true;
+                    }
+                    if (auto* d = ptm::runtime_detail::as<double>(v)) {
+                        return std::isfinite(*d);
+                    }
+                    return false;
+                };
+                // Distinct counts: properties and edge types
+                std::vector<std::string> distinct_props;
+                distinct_props.reserve(4096);
+                std::vector<std::string> distinct_edge_types;
+                distinct_edge_types.reserve(16);
+                auto canonical_prop = [](const ptm::runtime_detail::JsonValue& v) -> std::string {
+                    if (auto* s = ptm::runtime_detail::as<std::string>(v)) return "str:" + *s;
+                    if (auto* b = ptm::runtime_detail::as<bool>(v)) return std::string("bool:") + (*b ? "True" : "False");
+                    if (auto* i = ptm::runtime_detail::as<std::int64_t>(v)) return "int:" + std::to_string(*i);
+                    if (auto* d = ptm::runtime_detail::as<double>(v)) {
+                        char buf[64];
+                        auto res = std::to_chars(buf, buf+64, *d, std::chars_format::general);
+                        if (res.ec == std::errc{}) return std::string("float:") + std::string(buf, res.ptr);
+                        return "float:" + std::to_string(*d);
+                    }
+                    return "unknown";
+                };
+                auto canonical_edge = [](const ptm::runtime_detail::JsonValue& v) -> std::string {
+                    if (auto* i = ptm::runtime_detail::as<std::int64_t>(v)) return "int:" + std::to_string(*i);
+                    if (auto* s = ptm::runtime_detail::as<std::string>(v)) return "str:" + *s;
+                    return "invalid";
+                };
+                // Also validate edges distinct count
+                for (auto& e_val : *edges_arr) {
+                    auto* e_arr = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(e_val);
+                    auto* et = &((*e_arr)[2]);
+                    std::string ce = canonical_edge(*et);
+                    bool found = false;
+                    for (auto& x : distinct_edge_types) if (x == ce) found = true;
+                    if (!found) {
+                        if (distinct_edge_types.size() >= 16) return PTMRT_STATUS_INVALID_FORMAT;
+                        distinct_edge_types.push_back(ce);
                     }
                 }
-                // Also ensure schema is present and correct
-                auto* schema_val = ptm::runtime_detail::member(*gobj, "schema");
-                if (schema_val) {
-                    if (auto* s = ptm::runtime_detail::as<std::string>(*schema_val)) {
-                        if (*s != "ptm.graph.v1") return PTMRT_STATUS_INVALID_FORMAT;
+                for (auto& plist_val : *nprops_arr) {
+                    auto* plist = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(plist_val);
+                    if (!plist) return PTMRT_STATUS_INVALID_FORMAT;
+                    if (plist->size() > 256) return PTMRT_STATUS_INVALID_FORMAT;
+                    // Check duplicates within node via typed canonical
+                    std::vector<std::string> seen_in_node;
+                    for (auto& pv : *plist) {
+                        if (!is_valid_property(pv)) return PTMRT_STATUS_INVALID_FORMAT;
+                        std::string cp = canonical_prop(pv);
+                        for (auto& s : seen_in_node) if (s == cp) return PTMRT_STATUS_INVALID_FORMAT;
+                        seen_in_node.push_back(cp);
+                        bool already = false;
+                        for (auto& d : distinct_props) if (d == cp) already = true;
+                        if (!already) {
+                            if (distinct_props.size() >= 4096) return PTMRT_STATUS_INVALID_FORMAT;
+                            distinct_props.push_back(cp);
+                        }
                     }
+                }
+                // Validate edge_types field mirrors distinct_edge_types if present
+                if (auto* etypes_val = ptm::runtime_detail::member(*gobj, "edge_types")) {
+                    auto* etypes_arr = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*etypes_val);
+                    if (!etypes_arr) return PTMRT_STATUS_INVALID_FORMAT;
+                    // edge_types should be sorted distinct canonical (size == distinct)
+                    if (etypes_arr->size() != distinct_edge_types.size()) return PTMRT_STATUS_INVALID_FORMAT;
                 }
             }
             offset += 8U + static_cast<std::size_t>(glen);
