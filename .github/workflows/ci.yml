@@ -108,6 +108,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
       - name: Configure PTM with sanitizers
         run: >-
           cmake -S . -B out/ci-sanitize
@@ -124,6 +128,8 @@ jobs:
         run: ctest --test-dir out/ci-sanitize -C RelWithDebInfo --output-on-failure
       - name: Install sanitized PTM
         run: cmake --install out/ci-sanitize --config RelWithDebInfo --prefix "${{ runner.temp }}/ptm-sanitize-install"
+      - name: Install Python package for mutation smoke
+        run: python -m pip install -e .
       - name: Mutation smoke (ASan/UBSan) — mutated artifacts must be rejected
         run: |
           python -c "
@@ -144,11 +150,16 @@ jobs:
           set -e
           for f in /tmp/fuzz_*.ptm; do
             echo "checking $f"
-            if out/ci-sanitize/ptmrt verify "$f"; then
+            rc=0
+            out/ci-sanitize/ptmrt verify "$f" || rc=$?
+            if [ $rc -eq 2 ]; then
+              echo "mutated correctly rejected (exit 2): $f"
+            elif [ $rc -eq 0 ]; then
               echo "ERROR: mutated artifact should not verify: $f" >&2
               exit 1
             else
-              echo "mutated correctly rejected: $f"
+              echo "ERROR: unexpected exit $rc (expected 2) for $f — sanitizer abort or wrong rejection" >&2
+              exit 1
             fi
           done
           echo 'mutation smoke done — sanitizers clean, rejections as expected'

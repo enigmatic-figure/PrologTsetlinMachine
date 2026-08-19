@@ -51,6 +51,28 @@ def _canonical_property_string(value: object) -> str:
     return f"{type_name}:{repr_str}"
 
 
+def canonical_graph_scalar(value: object) -> str:
+    """One canonical identity for graph scalars: int:1 ≠ str:1 ≠ bool:True ≠ float:1.0."""
+    type_name, repr_str = _typed_canonical_key(value)
+    return f"{type_name}:{repr_str}"
+
+
+def canonical_edge_type(value: object) -> str:
+    """Typed canonical edge type — int:1 versus str:1 are distinct."""
+    # Edge types are restricted to int 0..15 or short str; reuse typed key for unambiguity
+    if isinstance(value, bool):
+        raise GraphValidationError("edge_type bool not allowed")
+    if isinstance(value, int):
+        if not 0 <= value < MAX_EDGE_TYPES:
+            raise GraphValidationError("int edge_type must be 0..15")
+        return f"int:{value}"
+    if isinstance(value, str):
+        if not value or len(value) > 64 or any(ord(c) < 0x20 for c in value):
+            raise GraphValidationError("str edge_type must be 1..64 printable chars")
+        return f"str:{value}"
+    raise GraphValidationError("edge_type must be int 0..15 or short str")
+
+
 def _decode_canonical_string(s: str) -> object:
     if ":" not in s:
         return s
@@ -183,7 +205,25 @@ class GraphInput:
         cls, rows: int, cols: int, cell_properties: list[list[object]] | None = None
     ) -> "GraphInput":
         """Helper: grid graph for images (CIFAR-style)."""
+        # Validate dimensions before any allocation — prevents billion×billion DoS
+        if not isinstance(rows, int) or isinstance(rows, bool) or rows <= 0:
+            raise GraphValidationError("rows must be positive int")
+        if not isinstance(cols, int) or isinstance(cols, bool) or cols <= 0:
+            raise GraphValidationError("cols must be positive int")
+        if rows > MAX_NODES or cols > MAX_NODES:
+            raise GraphValidationError(f"rows/cols must be 1..{MAX_NODES}")
         n = rows * cols
+        if n < 1 or n > MAX_NODES:
+            raise GraphValidationError(f"rows*cols must be 1..{MAX_NODES}")
+        # Pre-compute edge count without loops: horizontal 2*rows*(cols-1) + vertical 2*(rows-1)*cols
+        horiz = 2 * rows * (cols - 1) if cols > 1 else 0
+        vert = 2 * (rows - 1) * cols if rows > 1 else 0
+        edge_count = horiz + vert
+        if edge_count > MAX_EDGES:
+            raise GraphValidationError(f"grid edge count {edge_count} exceeds {MAX_EDGES}")
+        if cell_properties is not None:
+            if len(cell_properties) != rows or any(len(r) != cols for r in cell_properties):
+                raise GraphValidationError("cell_properties shape mismatch")
         edges: list[tuple[int, int, object]] = []
         # edge types: 0=right,1=left,2=down,3=up
         for r in range(rows):
@@ -205,7 +245,7 @@ class GraphInput:
         return cls.create(node_count=n, edges=edges, node_properties=node_props)
 
     def _edge_sort_key(self, e: tuple[int, int, object]) -> tuple[int, int, str]:
-        return (e[0], e[1], f"{type(e[2]).__name__}:{str(e[2])}")
+        return (e[0], e[1], canonical_edge_type(e[2]))
 
     def digest(self) -> str:
         payload = {
@@ -213,7 +253,7 @@ class GraphInput:
             "node_count": self.node_count,
             "edges": sorted(self.edges, key=self._edge_sort_key),
             "node_properties": [sorted(p) for p in self.node_properties],
-            "edge_types": sorted(self.edge_types, key=lambda x: f"{type(x).__name__}:{str(x)}"),
+            "edge_types": sorted(self.edge_types, key=lambda x: canonical_edge_type(x)),
         }
         enc = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return "sha256:" + hashlib.sha256(enc).hexdigest()
@@ -229,7 +269,7 @@ class GraphInput:
             "node_count": self.node_count,
             "edges": [list(e) for e in self.edges],
             "node_properties": [_decode_sorted(p) for p in self.node_properties_raw],
-            "edge_types": sorted(self.edge_types, key=lambda x: f"{type(x).__name__}:{str(x)}"),
+            "edge_types": sorted(self.edge_types, key=lambda x: canonical_edge_type(x)),
         }
 
 

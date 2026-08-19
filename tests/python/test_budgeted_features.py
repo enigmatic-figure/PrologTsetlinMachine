@@ -115,3 +115,23 @@ def test_budgeted_json_not_canonical_rejected() -> None:
     bad["budget"] = "2"  # wrong type
     with pytest.raises(ValueError):
         BudgetedFeatureStore.from_dict(bad)  # type: ignore[arg-type]
+
+
+def test_budgeted_infinite_utility_rejected_and_oversized_literals():
+    store = BudgetedFeatureStore(_schema(), budget=5)
+    d = store.catalog.numeric_ge("score", 1)
+    with pytest.raises(ValueError):
+        store.set_utility(d.literal_id, float("inf"))
+    with pytest.raises(ValueError):
+        store.set_utility(d.literal_id, float("nan"))
+    # oversized literal via from_dict: literal entry oversized should be rejected
+    bad = store.to_dict()
+    # inject an entry with huge parameters (oversized literal)
+    huge_str = "x" * 9000
+    bad["literals"][0]["parameters"] = {"threshold": huge_str}
+    # store_id must be recomputed to pass that check, but oversize check is after
+    import hashlib, json as _json
+    canonical = _json.dumps({k: v for k, v in bad.items() if k != "store_id"}, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    bad["store_id"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    with pytest.raises(ValueError):
+        BudgetedFeatureStore.from_dict(bad)

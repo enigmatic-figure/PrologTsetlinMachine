@@ -19,6 +19,7 @@ ADAPTER_SCHEMA = "ptm.adapters.v1"
 MAX_CLASSES = 256
 MAX_PATCHES = 4096
 MAX_BANDS = 256
+MAX_PATCH_CELLS = 1 << 20  # ~1M — prevents billion×billion allocation before bounds catch
 
 
 def _canon(v: Any) -> str:
@@ -175,6 +176,13 @@ class PatchAdapter:
             raise ValueError("kernel larger than matrix")
         if self.schema != ADAPTER_SCHEMA:
             raise ValueError("unsupported schema")
+        # Bound total input cells before any allocation — billion×billion with kernel billion×billion has patch_count 1 but would OOM
+        input_cells = self.rows * self.cols
+        if input_cells > MAX_PATCH_CELLS:
+            raise ValueError(f"rows*cols={input_cells} exceeds {MAX_PATCH_CELLS}")
+        kernel_cells = self.kernel_rows * self.kernel_cols
+        if kernel_cells > MAX_PATCH_CELLS:
+            raise ValueError(f"kernel cells {kernel_cells} exceeds {MAX_PATCH_CELLS}")
         if self.patch_count() > MAX_PATCHES:
             raise ValueError(f"patch count exceeds {MAX_PATCHES}")
 
@@ -317,10 +325,16 @@ class RegressionAdapter:
             raise ValueError("regression source must be finite")
         prefix = self.output_prefix or f"{self.source_field}__band"
         out = dict(record)
-        for idx, thr in enumerate(self.thresholds):
+        # Collision-check band fields AND metadata fields before any write
+        for idx in range(len(self.thresholds)):
             field = f"{prefix}_{idx}"
             if field in out:
                 raise ValueError(f"output collision {field}")
+        for meta in (f"{prefix}__count", f"{prefix}__value"):
+            if meta in out:
+                raise ValueError(f"output collision {meta}")
+        for idx, thr in enumerate(self.thresholds):
+            field = f"{prefix}_{idx}"
             out[field] = 1 if fv >= float(thr) else 0
         out[f"{prefix}__count"] = len(self.thresholds)
         out[f"{prefix}__value"] = fv
@@ -329,15 +343,21 @@ class RegressionAdapter:
     def inverse(self, band_predictions: Mapping[str, int]) -> float:
         """Decode thermometer votes to scalar: midpoints between thresholds."""
         prefix = self.output_prefix or f"{self.source_field}__band"
-        # count leading ones (thermometer property) — strict 0/1
-        ones = 0
+        # Validate every band is strict 0/1 and thermometer is monotone 1*0* — reject 1,0,garbage or 1,0,1
+        values: list[int] = []
         for idx in range(len(self.thresholds)):
             raw = band_predictions.get(f"{prefix}_{idx}", 0)
             v = _strict_01(raw)
-            if v == 1:
-                ones += 1
-            else:
-                break
+            values.append(v)
+        # Must be leading ones then zeros
+        try:
+            first_zero = values.index(0)
+        except ValueError:
+            first_zero = len(values)
+        # After first zero, no further 1 allowed
+        if any(values[i] == 1 for i in range(first_zero + 1, len(values))):
+            raise ValueError("thermometer predictions must be monotone 1*0* (not 1,0,1)")
+        ones = first_zero if 0 in values else len(values)
         if ones == 0:
             return float(self.thresholds[0]) - 1.0  # below lowest
         if ones == len(self.thresholds):

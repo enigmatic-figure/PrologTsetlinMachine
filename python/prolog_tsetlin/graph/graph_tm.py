@@ -124,10 +124,12 @@ class GraphTsetlinMachine:
                 for j in range(self.clauses):
                     for q in range(n):
                         if layer_truth[d][j][q]:
-                            # send M^d_j bound with edge type to each neighbor
+                            # send M^d_j bound with edge type to each neighbor — typed edge identity
                             for dst, etype in adj[q]:
-                                # bound message string representation
-                                msg = f"M:{d}:{j}⊗{etype}"
+                                from .types import canonical_edge_type
+
+                                # bound message uses typed edge: int:1 vs str:1 distinct
+                                msg = f"M:{d}:{j}⊗{canonical_edge_type(etype)}"
                                 # also plain message for matching without edge type
                                 inboxes[d + 1][dst].add(f"M:{d}:{j}")
                                 inboxes[d + 1][dst].add(msg)
@@ -171,12 +173,23 @@ class GraphTsetlinMachine:
         """
         if len(graphs) != len(labels):
             raise ValueError("graphs/labels length mismatch")
+        if type(epochs) is not int or epochs <= 0 or epochs > 10000:
+            raise ValueError("epochs must be int 1..10000")
+        for y in labels:
+            if type(y) is not int or y not in (0, 1):
+                raise ValueError("labels must be strict int 0 or 1")
+        for g in graphs:
+            if not isinstance(g, GraphInput):
+                raise ValueError("graphs must be GraphInput")
         for _ in range(epochs):
             for g, y in zip(graphs, labels):
                 pred = self.predict(g)
                 # Heuristic scaffold: not full TA feedback
                 if pred != y:
                     for j in range(self.clauses):
+                        # bounds check: _weights[j][y] is authoritative via payload; clamp like Python validation -1e6..1e6
+                        if not -1_000_000 <= self._weights[j][y] < 1_000_000:
+                            raise ValueError("weight out of range during fit")
                         self._weights[j][y] += 1
                         if g.node_count > 0 and self._rng.random() < 0.1:
                             node = self._rng.randrange(g.node_count)

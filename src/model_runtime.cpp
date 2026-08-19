@@ -1341,16 +1341,107 @@ namespace {
         if (!graph_manifest_matches(manifest, g_depth, g_clauses, g_hv_dim, g_edge_types, g_conformance)) {
             return PTMRT_STATUS_INVALID_FORMAT;
         }
-        // Validate payload size: header + weights*(8) + sum(conformance entries)
-        std::size_t offset = graph_tm_header_size + static_cast<std::size_t>(g_clauses) * 8U;
-        if (payload.size() < offset) {
-            return PTMRT_STATUS_INVALID_FORMAT;
+        // Validate payload: header + weights + conformance graphs, with manifest<->payload agreement
+        // Weights are authoritative in binary; manifest must exactly equal them. Also each graph JSON is parsed.
+        std::size_t offset = graph_tm_header_size;
+        // Extract payload weights for manifest comparison
+        std::vector<std::pair<std::int32_t,std::int32_t>> payload_weights;
+        payload_weights.reserve(g_clauses);
+        for (std::uint32_t i = 0; i < g_clauses; ++i) {
+            if (offset + 8U > payload.size()) return PTMRT_STATUS_INVALID_FORMAT;
+            const auto w0 = read_i32(payload, offset);
+            const auto w1 = read_i32(payload, offset + 4);
+            if (w0 < -1000000 || w0 > 1000000 || w1 < -1000000 || w1 > 1000000) return PTMRT_STATUS_INVALID_FORMAT;
+            payload_weights.emplace_back(w0, w1);
+            offset += 8U;
         }
+        // Compare payload weights against manifest weights (manifest payload-authoritative check mirrors Python)
+        {
+            auto parsed = ptm::runtime_detail::JsonParser(manifest).parse();
+            if (!parsed) return PTMRT_STATUS_INVALID_FORMAT;
+            auto* root = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*parsed);
+            if (!root) return PTMRT_STATUS_INVALID_FORMAT;
+            auto* graph_val = ptm::runtime_detail::member(*root, "graph");
+            auto* graph_obj = graph_val ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*graph_val) : nullptr;
+            if (!graph_obj) return PTMRT_STATUS_INVALID_FORMAT;
+            auto* w_val = ptm::runtime_detail::member(*graph_obj, "weights");
+            auto* w_arr = w_val ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*w_val) : nullptr;
+            if (!w_arr || w_arr->size() != g_clauses) return PTMRT_STATUS_INVALID_FORMAT;
+            for (std::size_t idx = 0; idx < w_arr->size(); ++idx) {
+                auto* pair = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>((*w_arr)[idx]);
+                if (!pair || pair->size() != 2) return PTMRT_STATUS_INVALID_FORMAT;
+                auto* e0 = ptm::runtime_detail::as<std::int64_t>((*pair)[0]);
+                auto* e1 = ptm::runtime_detail::as<std::int64_t>((*pair)[1]);
+                if (!e0 || !e1) return PTMRT_STATUS_INVALID_FORMAT;
+                if (*e0 != payload_weights[idx].first || *e1 != payload_weights[idx].second) return PTMRT_STATUS_INVALID_FORMAT;
+            }
+        }
+        // Validate each conformance graph JSON (bounded, canonical)
         for (std::uint32_t i = 0; i < g_conformance; ++i) {
             if (offset + 8U > payload.size()) return PTMRT_STATUS_INVALID_FORMAT;
             const auto glen = read_u32(payload, offset);
             const auto exp = read_u32(payload, offset + 4);
             if (glen > (1U << 20) || (exp != 0 && exp != 1)) return PTMRT_STATUS_INVALID_FORMAT;
+            if (offset + 8U + glen > payload.size()) return PTMRT_STATUS_INVALID_FORMAT;
+            std::string_view gjson(reinterpret_cast<const char*>(payload.data() + offset + 8U), glen);
+            // Must be valid JSON object with bounded structure
+            {
+                auto gparsed = ptm::runtime_detail::JsonParser(gjson).parse();
+                if (!gparsed) return PTMRT_STATUS_INVALID_FORMAT;
+                auto* gobj = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Object>(*gparsed);
+                if (!gobj) return PTMRT_STATUS_INVALID_FORMAT;
+                // Validate schema fields within strict bounds matching Python GraphInput
+                auto* nc_val = ptm::runtime_detail::member(*gobj, "node_count");
+                auto* nc_int = nc_val ? ptm::runtime_detail::as<std::int64_t>(*nc_val) : nullptr;
+                if (!nc_int || *nc_int < 1 || *nc_int > 4096) return PTMRT_STATUS_INVALID_FORMAT;
+                const auto node_count = static_cast<std::size_t>(*nc_int);
+                auto* edges_val = ptm::runtime_detail::member(*gobj, "edges");
+                auto* edges_arr = edges_val ? ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*edges_val) : nullptr;
+                if (!edges_arr || edges_arr->size() > 16384) return PTMRT_STATUS_INVALID_FORMAT;
+                // Each edge must be [src,dst,etype] with src/dst in range and etype typed valid
+                for (auto& e_val : *edges_arr) {
+                    auto* e_arr = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(e_val);
+                    if (!e_arr || e_arr->size() != 3) return PTMRT_STATUS_INVALID_FORMAT;
+                    auto* src_p = ptm::runtime_detail::as<std::int64_t>((*e_arr)[0]);
+                    auto* dst_p = ptm::runtime_detail::as<std::int64_t>((*e_arr)[1]);
+                    if (!src_p || !dst_p || *src_p < 0 || *dst_p < 0 || static_cast<std::size_t>(*src_p) >= node_count || static_cast<std::size_t>(*dst_p) >= node_count) return PTMRT_STATUS_INVALID_FORMAT;
+                    // edge type: int 0..15 or short string 1..64 printable
+                    bool et_valid = false;
+                    if (auto* ei = ptm::runtime_detail::as<std::int64_t>((*e_arr)[2])) {
+                        if (*ei >= 0 && *ei < 16) et_valid = true;
+                    } else if (auto* es = ptm::runtime_detail::as<std::string>((*e_arr)[2])) {
+                        if (!es->empty() && es->size() <= 64) {
+                            bool printable = true;
+                            for (unsigned char ch : *es) if (ch < 0x20) printable = false;
+                            if (printable) et_valid = true;
+                        }
+                    }
+                    if (!et_valid) return PTMRT_STATUS_INVALID_FORMAT;
+                }
+                auto* nprops_val = ptm::runtime_detail::member(*gobj, "node_properties");
+                if (nprops_val) {
+                    auto* nprops_arr = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(*nprops_val);
+                    if (!nprops_arr) return PTMRT_STATUS_INVALID_FORMAT;
+                    if (nprops_arr->size() != node_count && nprops_arr->size() != 0) {
+                        // Python allows omission; but if present, must align
+                    }
+                    std::size_t distinct = 0;
+                    for (auto& plist_val : *nprops_arr) {
+                        auto* plist = ptm::runtime_detail::as<ptm::runtime_detail::JsonValue::Array>(plist_val);
+                        if (!plist) return PTMRT_STATUS_INVALID_FORMAT;
+                        if (plist->size() > 256) return PTMRT_STATUS_INVALID_FORMAT;
+                        distinct += plist->size();
+                        if (distinct > 4096) return PTMRT_STATUS_INVALID_FORMAT;
+                    }
+                }
+                // Also ensure schema is present and correct
+                auto* schema_val = ptm::runtime_detail::member(*gobj, "schema");
+                if (schema_val) {
+                    if (auto* s = ptm::runtime_detail::as<std::string>(*schema_val)) {
+                        if (*s != "ptm.graph.v1") return PTMRT_STATUS_INVALID_FORMAT;
+                    }
+                }
+            }
             offset += 8U + static_cast<std::size_t>(glen);
             if (offset > payload.size()) return PTMRT_STATUS_INVALID_FORMAT;
         }

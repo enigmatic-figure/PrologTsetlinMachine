@@ -95,3 +95,52 @@ def test_patch_and_multiclass_iter_adapt() -> None:
     rg = RegressionAdapter(source_field="v", thresholds=(0.0, 5.0))
     rows2 = list(rg.iter_adapt([{"v": 2}, {"v": 7}]))
     assert rows2[0]["v__band_0"] == 1 and rows2[0]["v__band_1"] == 0
+
+
+def test_multiclass_typed_equality_and_strict_inverse():
+    # 1 vs True are distinct typed classes; inverse must be strict 0/1 and typed
+    mc = MultiClassAdapter(source_field="label", classes=(1, True, "1"))
+    # Typed equality: 1 != True != "1"
+    assert mc.adapt({"label": 1})["label__mc_0"] == 1
+    assert mc.adapt({"label": 1})["label__mc_1"] == 0
+    assert mc.adapt({"label": True})["label__mc_1"] == 1
+    assert mc.adapt({"label": True})["label__mc_0"] == 0
+    assert mc.adapt({"label": "1"})["label__mc_2"] == 1
+    # strict inverse rejects non-0/1 or non-int
+    with pytest.raises(ValueError):
+        mc.inverse({"label__mc_0": True})  # bool not strict int
+    with pytest.raises(ValueError):
+        mc.inverse({"label__mc_0": 2})
+    with pytest.raises(ValueError):
+        mc.inverse({"label__mc_0": "1"})
+
+
+def test_patch_output_collision_and_cell_bound():
+    # output collision must be caught before patch generation
+    pa = PatchAdapter(field_prefix="pix", rows=2, cols=2, kernel_rows=1, kernel_cols=1)
+    base = {f"pix_{i:04d}": i for i in range(4)}
+    base["patch_0_0"] = 99
+    with pytest.raises(ValueError):
+        list(pa.iter_patches(base))
+    # billion×billion must fail at construction, not allocation
+    with pytest.raises(ValueError):
+        PatchAdapter(field_prefix="pix", rows=1_000_000_000, cols=1_000_000_000, kernel_rows=1_000_000_000, kernel_cols=1_000_000_000)
+    with pytest.raises(ValueError):
+        PatchAdapter(field_prefix="pix", rows=2048, cols=2048, kernel_rows=1, kernel_cols=1)
+
+
+def test_regression_collision_and_monotone_inverse():
+    rg = RegressionAdapter(source_field="y", thresholds=(0.0, 10.0, 20.0))
+    # collision on metadata fields __count / __value must be rejected
+    with pytest.raises(ValueError):
+        rg.adapt({"y": 5, "y__band__count": 1})
+    with pytest.raises(ValueError):
+        rg.adapt({"y": 5, "y__band__value": 1})
+    # non-monotone 1,0,1 must be rejected
+    with pytest.raises(ValueError):
+        rg.inverse({"y__band_0": 1, "y__band_1": 0, "y__band_2": 1})
+    # garbage after first zero (e.g., 2) must be rejected, not silently ignored
+    with pytest.raises(ValueError):
+        rg.inverse({"y__band_0": 1, "y__band_1": 0, "y__band_2": 2})
+    with pytest.raises(ValueError):
+        rg.inverse({"y__band_0": 1, "y__band_1": True})  # bool not strict

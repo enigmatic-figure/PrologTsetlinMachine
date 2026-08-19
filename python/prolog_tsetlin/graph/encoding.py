@@ -42,7 +42,9 @@ class HypervectorEncoder:
         return self._hv_for("M", f"{layer}:{clause_index}")
 
     def edge_type_hv(self, edge_type: object) -> Hypervector:
-        return self._hv_for("T", str(edge_type))
+        from .types import canonical_edge_type
+
+        return self._hv_for("T", canonical_edge_type(edge_type))
 
     def node_hv(self, property_ids: frozenset[str]) -> Hypervector:
         if not property_ids:
