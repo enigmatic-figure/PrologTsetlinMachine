@@ -56,6 +56,8 @@ using Model = std::unique_ptr<ptmrt_model, ModelCloser>;
             return "logic_program32_v1";
         case PTMRT_MODEL_MASKED_THRESHOLD_V1:
             return "masked_threshold_v1";
+        case PTMRT_MODEL_GRAPH_TM_V1:
+            return "graph_tm_v1";
         default:
             return "unknown";
     }
@@ -97,6 +99,10 @@ void inspect(const char* path) {
         std::cout << "slots=" << description.slot_count << '\n'
                   << "minimum_true=" << description.minimum_true << '\n'
                   << "selected_slots=" << description.selected_count << '\n';
+    } else if (description.model_kind == PTMRT_MODEL_GRAPH_TM_V1) {
+        std::cout << "depth=" << description.graph_depth << '\n'
+                  << "clauses=" << description.graph_clauses << '\n'
+                  << "hv_dim=" << description.graph_hv_dim << '\n';
     }
     for (std::uint32_t index = 0; index < description.input_count; ++index) {
         const auto& port = description.inputs[index];

@@ -23,25 +23,37 @@ from .pa import FixedBitBlock, MaskedThresholdKernel
 from .preprocessing import PreprocessingContract
 from .reference import SNAPSHOT_SCHEMA_VERSION, TMSnapshot
 
+try:  # optional graph extra; validated lazily so core stays importable without it
+    from .graph.cotm import CoalescedTsetlinMachine as ClauseCoTM  # noqa: F401
+    from .graph.deep_clause import DeepClause, DeepClauseComponent
+    from .graph.graph_tm import GraphTsetlinMachine
+    from .graph.types import GraphInput
+except Exception:  # pragma: no cover
+    ClauseCoTM = DeepClause = DeepClauseComponent = GraphTsetlinMachine = GraphInput = None  # type: ignore[assignment]
+
 
 MODEL_ARTIFACT_SCHEMA = "ptm.model.v1"
 PACKED_TM_PAYLOAD_KIND = "packed_tm_binary_v1"
 LOGIC_PROGRAM_PAYLOAD_KIND = "logic_program32_v1"
 MASKED_THRESHOLD_PAYLOAD_KIND = "masked_threshold_v1"
+GRAPH_TM_PAYLOAD_KIND = "graph_tm_v1"
 CONTAINER_VERSION = 1
 PACKED_TM_PAYLOAD_VERSION = 1
 LOGIC_PROGRAM_PAYLOAD_VERSION = 1
 MASKED_THRESHOLD_PAYLOAD_VERSION = 1
+GRAPH_TM_PAYLOAD_VERSION = 1
 
 _MAGIC = b"PTMODEL\0"
 _MODEL_KIND_PACKED_TM_BINARY = 1
 _MODEL_KIND_LOGIC_PROGRAM32 = 2
 _MODEL_KIND_MASKED_THRESHOLD = 3
+_MODEL_KIND_GRAPH_TM = 4
 _CONTAINER_HEADER = struct.Struct("<8sIIIIQQ24s")
 _PACKED_TM_HEADER = struct.Struct("<IIIIiIII")
 _LOGIC_PROGRAM_HEADER = struct.Struct("<IIIIIIII")
 _LOGIC_INSTRUCTION = struct.Struct("<IBBH")
 _MASKED_THRESHOLD_HEADER = struct.Struct("<IIIIIIII")
+_GRAPH_TM_HEADER = struct.Struct("<IIIIIIII")
 _DIGEST_SIZE = 32
 _MAX_ARTIFACT_BYTES = 256 << 20
 _MAX_MANIFEST_BYTES = 16 << 20
@@ -838,10 +850,165 @@ class MaskedThresholdInferenceArtifact:
         return artifact
 
 
+@dataclass(frozen=True, slots=True)
+class GraphTMInferenceArtifact:
+    artifact_id: str
+    manifest: Mapping[str, Any]
+    graph_depth: int
+    graph_clauses: int
+    graph_hv_dim: int
+    components: tuple[Any, ...]  # DeepClause, typed as Any to avoid import cycle
+    weights: tuple[tuple[int, int], ...]
+    conformance_graphs: tuple[Any, ...]  # GraphInput
+    expected_labels: tuple[int, ...]
+    serialized: bytes
+
+    def write(self, path: str | Path) -> None:
+        with open(path, "wb") as handle:
+            handle.write(self.serialized)
+
+    def verify_conformance(self) -> bool:
+        if GraphTsetlinMachine is None or GraphInput is None:
+            return False
+        try:
+            gtm = GraphTsetlinMachine(
+                depth=self.graph_depth,
+                clauses=self.graph_clauses,
+                hv_dim=self.graph_hv_dim,
+            )
+            gtm._components = list(self.components)  # type: ignore[attr-defined]
+            gtm._weights = [list(w) for w in self.weights]  # type: ignore[attr-defined]
+            for graph, expected in zip(self.conformance_graphs, self.expected_labels):
+                pred = int(gtm.predict(graph))
+                if pred != int(expected):
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def predict(self, graph: Any) -> int:
+        if GraphTsetlinMachine is None:
+            raise ModelArtifactError("graph extra not available")
+        gtm = GraphTsetlinMachine(
+            depth=self.graph_depth,
+            clauses=self.graph_clauses,
+            hv_dim=self.graph_hv_dim,
+        )
+        gtm._components = list(self.components)  # type: ignore[attr-defined]
+        gtm._weights = [list(w) for w in self.weights]  # type: ignore[attr-defined]
+        return int(gtm.predict(graph))
+
+    @classmethod
+    def from_bytes(cls, data: bytes | bytearray | memoryview) -> "GraphTMInferenceArtifact":
+        decoded = _decode_model_container(
+            bytes(data),
+            expected_model_kind=_MODEL_KIND_GRAPH_TM,
+            expected_artifact_kind=GRAPH_TM_PAYLOAD_KIND,
+        )
+        payload = decoded.payload
+        if len(payload) < _GRAPH_TM_HEADER.size:
+            raise ModelArtifactError("graph-TM payload is truncated")
+        (
+            payload_version,
+            depth,
+            clauses,
+            hv_dim,
+            edge_type_count,
+            conformance_count,
+            flags,
+            reserved,
+        ) = _GRAPH_TM_HEADER.unpack_from(payload, 0)
+        if payload_version != GRAPH_TM_PAYLOAD_VERSION or reserved != 0 or flags != 0:
+            raise ModelArtifactError("graph-TM payload has unsupported flags")
+        if not 1 <= depth <= 8 or not 1 <= clauses <= 8192 or hv_dim not in (256, 512, 1024, 2048, 4096, 8192):
+            raise ModelArtifactError("graph-TM payload describes an unsupported configuration")
+        if conformance_count > 256:
+            raise ModelArtifactError("graph-TM conformance length is excessive")
+        offset = _GRAPH_TM_HEADER.size
+        # weights: clauses * 2 int32
+        weight_bytes = clauses * 2 * 4
+        if len(payload) < offset + weight_bytes:
+            raise ModelArtifactError("graph-TM payload is truncated at weights")
+        weights: list[tuple[int, int]] = []
+        for idx in range(clauses):
+            w0, w1 = struct.unpack_from("<ii", payload, offset + idx * 8)
+            if not -1_000_000 <= w0 <= 1_000_000 or not -1_000_000 <= w1 <= 1_000_000:
+                raise ModelArtifactError("graph-TM weight is out of range")
+            weights.append((int(w0), int(w1)))
+        offset += weight_bytes
+        conformance_graphs: list[Any] = []
+        expected_labels: list[int] = []
+        for _ in range(conformance_count):
+            if len(payload) < offset + 8:
+                raise ModelArtifactError("graph-TM payload is truncated at conformance graph")
+            graph_len, expected = struct.unpack_from("<II", payload, offset)
+            offset += 8
+            if graph_len > 1 << 20 or expected not in (0, 1):
+                raise ModelArtifactError("graph-TM conformance entry is invalid")
+            if len(payload) < offset + graph_len:
+                raise ModelArtifactError("graph-TM payload is truncated at graph bytes")
+            graph_bytes = bytes(payload[offset : offset + graph_len])
+            offset += graph_len
+            try:
+                graph_dict = json.loads(graph_bytes.decode("utf-8"))
+                # GraphInput serialises via to_dict() with node_properties raw; reconstruct via create
+                node_count = int(graph_dict.get("node_count", 0))
+                edges = graph_dict.get("edges") or []
+                node_props_raw = graph_dict.get("node_properties") or []
+                props: dict[int, list[object]] = {}
+                for idx, plist in enumerate(node_props_raw):
+                    if plist:
+                        props[idx] = list(plist)  # type: ignore[assignment]
+                graph = GraphInput.create(node_count=node_count, edges=[tuple(e) for e in edges], node_properties=props)  # type: ignore[arg-type]
+            except Exception as error:
+                raise ModelArtifactError("graph-TM graph payload is invalid") from error
+            conformance_graphs.append(graph)
+            expected_labels.append(int(expected))
+        if offset != len(payload):
+            raise ModelArtifactError("graph-TM payload has trailing bytes")
+        # Validate manifest against payload
+        _validate_graph_tm_manifest(
+            decoded.manifest,
+            depth,
+            clauses,
+            hv_dim,
+            tuple(weights),
+            tuple(conformance_graphs),
+            tuple(expected_labels),
+        )
+        # Reconstruct components from manifest graph.components (DeepClause.from_dict)
+        raw_components = decoded.manifest.get("graph", {}).get("components", []) if isinstance(decoded.manifest.get("graph"), dict) else []
+        components: list[Any] = []
+        if DeepClause is not None:
+            for raw in raw_components:
+                try:
+                    components.append(DeepClause.from_dict(raw))  # type: ignore[union-attr]
+                except Exception as error:
+                    raise ModelArtifactError("graph-TM component is invalid") from error
+        else:
+            components = list(raw_components)
+        artifact = cls(
+            decoded.artifact_id,
+            decoded.manifest,
+            depth,
+            clauses,
+            hv_dim,
+            tuple(components),
+            tuple(weights),
+            tuple(conformance_graphs),
+            tuple(expected_labels),
+            decoded.serialized,
+        )
+        if not artifact.verify_conformance():
+            raise ModelArtifactError("graph-TM conformance graphs do not match")
+        return artifact
+
+
 InferenceArtifact = (
     PackedTMInferenceArtifact
     | LogicProgramInferenceArtifact
     | MaskedThresholdInferenceArtifact
+    | GraphTMInferenceArtifact
 )
 
 
@@ -858,6 +1025,8 @@ def load_model_artifact_from_bytes(
         return LogicProgramInferenceArtifact.from_bytes(serialized)
     if model_kind == _MODEL_KIND_MASKED_THRESHOLD:
         return MaskedThresholdInferenceArtifact.from_bytes(serialized)
+    if model_kind == _MODEL_KIND_GRAPH_TM:
+        return GraphTMInferenceArtifact.from_bytes(serialized)
     raise ModelArtifactError("unsupported model artifact kind")
 
 
@@ -1418,6 +1587,128 @@ def export_masked_threshold(
         _MODEL_KIND_MASKED_THRESHOLD, manifest, payload
     )
     artifact = MaskedThresholdInferenceArtifact.from_bytes(serialized)
+    if path is not None:
+        artifact.write(path)
+    return artifact
+
+
+def export_graph_tm(
+    gtm: Any,
+    conformance_graphs: Sequence[Any],
+    *,
+    name: str,
+    path: str | Path | None = None,
+    description: str = "",
+    authors: Sequence[str] = (),
+    license: str = "unspecified",
+    citations: Sequence[str] = (),
+    intended_use: str = "research",
+    limitations: str = "research prototype",
+    output_labels: Sequence[str] = ("false", "true"),
+) -> GraphTMInferenceArtifact:
+    """Package a GraphTM for static inference (graph_tm_v1)."""
+    if GraphTsetlinMachine is None or GraphInput is None or DeepClause is None:
+        raise ModelArtifactError("graph extra not available")
+    if not isinstance(gtm, GraphTsetlinMachine):
+        raise ValueError("gtm must be a GraphTsetlinMachine")
+    # GraphTsetlinMachine has no explicit trained flag; consider fit() having been called if any clause mutated or weights differ from init
+    if not name:
+        raise ValueError("model artifact name cannot be empty")
+    labels = tuple(str(v) for v in output_labels)
+    if len(labels) != 2 or any(not v for v in labels) or labels[0] == labels[1]:
+        raise ValueError("graph-TM artifacts require two distinct nonempty labels")
+    depth = int(getattr(gtm, "depth"))
+    clauses = int(getattr(gtm, "clauses"))
+    hv_dim = int(getattr(gtm, "hv_dim"))
+    if not 1 <= depth <= 8 or not 1 <= clauses <= 8192 or hv_dim not in (256, 512, 1024, 2048, 4096, 8192):
+        raise ValueError("graph-TM configuration is out of bounds")
+    # Build components list from internal _components/_weights
+    raw_components = []
+    weights: list[tuple[int, int]] = []
+    internal_components = getattr(gtm, "_components", None)
+    internal_weights = getattr(gtm, "_weights", None)
+    if internal_components is None or internal_weights is None:
+        raise ValueError("GraphTM is missing internal components/weights")
+    for idx, clause in enumerate(internal_components):
+        if not isinstance(clause, DeepClause):
+            raise ValueError(f"clause {idx} is not a DeepClause")
+        raw_components.append(clause.to_dict())
+        w = internal_weights[idx] if idx < len(internal_weights) else (1, 1)
+        weights.append((int(w[0]), int(w[1])))
+    # Validate conformance graphs via oracle
+    if len(conformance_graphs) == 0 or len(conformance_graphs) > 256:
+        raise ValueError("conformance_graphs must have 1..256 entries")
+    expected_labels: list[int] = []
+    graph_bytes_list: list[bytes] = []
+    for graph in conformance_graphs:
+        if not isinstance(graph, GraphInput):
+            raise ValueError("conformance_graphs must be GraphInput instances")
+        pred = int(gtm.predict(graph))
+        if pred not in (0, 1):
+            raise ValueError("GraphTM prediction must be 0 or 1")
+        expected_labels.append(pred)
+        graph_bytes_list.append(json.dumps(graph.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    # Build manifest
+    manifest: dict[str, Any] = {
+        "artifact_kind": GRAPH_TM_PAYLOAD_KIND,
+        "artifact_schema": MODEL_ARTIFACT_SCHEMA,
+        "container_digest": "sha256-trailer-v1",
+        "graph": {
+            "clauses": clauses,
+            "components": raw_components,
+            "depth": depth,
+            "edge_type_count": 16,
+            "hv_dim": hv_dim,
+            "weights": [list(w) for w in weights],
+        },
+        "model": {
+            "clauses": clauses,
+            "depth": depth,
+            "hv_dim": hv_dim,
+            "payload_kind": GRAPH_TM_PAYLOAD_KIND,
+            "payload_version": GRAPH_TM_PAYLOAD_VERSION,
+        },
+        "ports": {
+            "inputs": [{"dtype": "json", "name": "graph", "shape": []}],
+            "outputs": [{"dtype": "uint32", "name": "prediction", "shape": []}],
+        },
+        "producer": {"name": "prolog-tsetlin-machine", "version": __version__},
+        "research": {
+            "authors": [str(v) for v in authors],
+            "citations": [str(v) for v in citations],
+            "intended_use": intended_use,
+            "license": license,
+            "limitations": limitations,
+        },
+        "task": {"kind": "graph_classification", "labels": list(labels)},
+        "title": name,
+        "description": description,
+        "validation": {
+            "conformance_case_count": len(conformance_graphs),
+            "conformance_example_count": len(conformance_graphs),
+            "signature": {"graph_conformance": True},
+        },
+    }
+    # Build payload
+    payload = bytearray(
+        _GRAPH_TM_HEADER.pack(
+            GRAPH_TM_PAYLOAD_VERSION,
+            depth,
+            clauses,
+            hv_dim,
+            16,
+            len(conformance_graphs),
+            0,
+            0,
+        )
+    )
+    for w0, w1 in weights:
+        payload.extend(struct.pack("<ii", int(w0), int(w1)))
+    for graph_bytes, expected in zip(graph_bytes_list, expected_labels):
+        payload.extend(struct.pack("<II", len(graph_bytes), int(expected)))
+        payload.extend(graph_bytes)
+    serialized = _encode_model_container(_MODEL_KIND_GRAPH_TM, manifest, payload)
+    artifact = GraphTMInferenceArtifact.from_bytes(serialized)
     if path is not None:
         artifact.write(path)
     return artifact
@@ -2087,6 +2378,90 @@ def _evaluate_masked_threshold_packed(
         tuple(matched_words),
         tuple(missing_words),
     )
+
+
+def _validate_graph_tm_manifest(
+    manifest: Mapping[str, Any],
+    depth: int,
+    clauses: int,
+    hv_dim: int,
+    weights: tuple[tuple[int, int], ...],
+    conformance_graphs: tuple[Any, ...],
+    expected_labels: tuple[int, ...],
+) -> None:
+    if manifest.get("container_digest") != "sha256-trailer-v1":
+        raise ModelArtifactError("unsupported model artifact digest contract")
+    model = manifest.get("model")
+    if not isinstance(model, dict) or (
+        model.get("depth") != depth
+        or model.get("clauses") != clauses
+        or model.get("hv_dim") != hv_dim
+        or model.get("payload_kind") != GRAPH_TM_PAYLOAD_KIND
+        or model.get("payload_version") != GRAPH_TM_PAYLOAD_VERSION
+    ):
+        raise ModelArtifactError("manifest and graph-TM semantics disagree")
+    graph = manifest.get("graph")
+    if not isinstance(graph, dict):
+        raise ModelArtifactError("model artifact lacks its graph contract")
+    if (
+        graph.get("depth") != depth
+        or graph.get("clauses") != clauses
+        or graph.get("hv_dim") != hv_dim
+        or graph.get("edge_type_count") != 16
+        or not isinstance(graph.get("components"), list)
+        or len(graph["components"]) != clauses
+        or not isinstance(graph.get("weights"), list)
+        or len(graph["weights"]) != clauses
+    ):
+        raise ModelArtifactError("graph contract is invalid")
+    for w in graph["weights"]:
+        if not isinstance(w, list) or len(w) != 2 or any(not isinstance(v, int) for v in w):
+            raise ModelArtifactError("graph weight contract is invalid")
+    for raw in graph["components"]:
+        if not isinstance(raw, dict):
+            raise ModelArtifactError("graph component contract is invalid")
+        layers = raw.get("components")
+        # DeepClause serialises as {"components": [...]}  (not "layers")
+        if not isinstance(layers, list) or len(layers) != depth:
+            raise ModelArtifactError("graph component depth is invalid")
+        # DeepClause.from_dict will do deeper validation on load; here just check shape
+    expected_ports = {
+        "inputs": [{"dtype": "json", "name": "graph", "shape": []}],
+        "outputs": [{"dtype": "uint32", "name": "prediction", "shape": []}],
+    }
+    if manifest.get("ports") != expected_ports:
+        raise ModelArtifactError("manifest port contract disagrees with the payload")
+    task = manifest.get("task")
+    labels = task.get("labels") if isinstance(task, dict) else None
+    if (
+        not isinstance(task, dict)
+        or task.get("kind") != "graph_classification"
+        or not isinstance(labels, list)
+        or len(labels) != 2
+        or any(not isinstance(v, str) or not v for v in labels)
+        or labels[0] == labels[1]
+    ):
+        raise ModelArtifactError("graph task contract is invalid")
+    validation = manifest.get("validation")
+    if (
+        not isinstance(validation, dict)
+        or validation.get("conformance_case_count") != len(conformance_graphs)
+        or validation.get("conformance_example_count") != len(conformance_graphs)
+        or not isinstance(validation.get("signature"), dict)
+    ):
+        raise ModelArtifactError("manifest validation contract is invalid")
+    producer = manifest.get("producer")
+    research = manifest.get("research")
+    if (
+        not isinstance(manifest.get("title"), str)
+        or not manifest["title"]
+        or not isinstance(producer, dict)
+        or any(not isinstance(producer.get(key), str) or not producer[key] for key in ("name", "version"))
+        or not isinstance(research, dict)
+        or any(not isinstance(research.get(key), str) for key in ("intended_use", "license", "limitations"))
+        or any(not isinstance(research.get(key), list) or any(not isinstance(v, str) for v in research[key]) for key in ("authors", "citations"))
+    ):
+        raise ModelArtifactError("model artifact metadata contract is invalid")
 
 
 def _validate_mask_tails(

@@ -23,13 +23,16 @@ constexpr std::uint32_t container_version = 1;
 constexpr std::uint32_t packed_tm_model_kind = 1;
 constexpr std::uint32_t logic_program_model_kind = 2;
 constexpr std::uint32_t masked_threshold_model_kind = 3;
+constexpr std::uint32_t graph_tm_model_kind = 4;
 constexpr std::uint32_t packed_tm_payload_version = 1;
 constexpr std::uint32_t logic_program_payload_version = 1;
 constexpr std::uint32_t masked_threshold_payload_version = 1;
+constexpr std::uint32_t graph_tm_payload_version = 1;
 constexpr std::size_t container_header_size = 64;
 constexpr std::size_t packed_tm_header_size = 32;
 constexpr std::size_t logic_program_header_size = 32;
 constexpr std::size_t masked_threshold_header_size = 32;
+constexpr std::size_t graph_tm_header_size = 32;
 constexpr std::size_t logic_instruction_size = 8;
 constexpr std::size_t digest_size = 32;
 constexpr std::size_t maximum_artifact_size = 256U * 1024U * 1024U;
@@ -1141,7 +1144,7 @@ namespace {
         return PTMRT_STATUS_UNSUPPORTED_VERSION;
     }
     if (kind != packed_tm_model_kind && kind != logic_program_model_kind &&
-        kind != masked_threshold_model_kind) {
+        kind != masked_threshold_model_kind && kind != graph_tm_model_kind) {
         return PTMRT_STATUS_UNSUPPORTED_MODEL;
     }
     if (flags != 0 || std::any_of(bytes.begin() + 40, bytes.begin() + 64,
@@ -1192,6 +1195,73 @@ namespace {
     if (kind == masked_threshold_model_kind) {
         return parse_pa_payload(payload, std::move(manifest), calculated,
                                 version, kind, result);
+    }
+    if (kind == graph_tm_model_kind) {
+        // Minimal graph_tm_v1 validation: header + weights + conformance blobs + manifest kind
+        if (payload.size() < graph_tm_header_size) {
+            return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        const auto g_payload_version = read_u32(payload, 0);
+        const auto g_depth = read_u32(payload, 4);
+        const auto g_clauses = read_u32(payload, 8);
+        const auto g_hv_dim = read_u32(payload, 12);
+        const auto g_edge_types = read_u32(payload, 16);
+        const auto g_conformance = read_u32(payload, 20);
+        const auto g_flags = read_u32(payload, 24);
+        const auto g_reserved = read_u32(payload, 28);
+        if (g_payload_version != graph_tm_payload_version || g_flags != 0 || g_reserved != 0) {
+            return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        if (g_depth == 0 || g_depth > 8 || g_clauses == 0 || g_clauses > 8192) {
+            return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        if (g_hv_dim != 256 && g_hv_dim != 512 && g_hv_dim != 1024 && g_hv_dim != 2048 && g_hv_dim != 4096 && g_hv_dim != 8192) {
+            return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        if (g_conformance == 0 || g_conformance > 256) {
+            return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        if (g_edge_types != 16) {
+            return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        // manifest must claim graph_tm_v1
+        if (manifest.find("\"graph_tm_v1\"") == std::string::npos) {
+            return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        // Validate payload size: header + weights*(8) + sum(conformance entries)
+        std::size_t offset = graph_tm_header_size + static_cast<std::size_t>(g_clauses) * 8U;
+        if (payload.size() < offset) {
+            return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        for (std::uint32_t i = 0; i < g_conformance; ++i) {
+            if (offset + 8U > payload.size()) return PTMRT_STATUS_INVALID_FORMAT;
+            const auto glen = read_u32(payload, offset);
+            const auto exp = read_u32(payload, offset + 4);
+            if (glen > (1U << 20) || (exp != 0 && exp != 1)) return PTMRT_STATUS_INVALID_FORMAT;
+            offset += 8U + static_cast<std::size_t>(glen);
+            if (offset > payload.size()) return PTMRT_STATUS_INVALID_FORMAT;
+        }
+        if (offset != payload.size()) return PTMRT_STATUS_INVALID_FORMAT;
+        auto model = std::make_unique<ptmrt_model>();
+        model->manifest = std::move(manifest);
+        auto& d = model->description;
+        d = {};
+        const auto id = digest_id(calculated);
+        copy_text(d.artifact_id, sizeof(d.artifact_id), id);
+        copy_text(d.artifact_schema, sizeof(d.artifact_schema), "ptm.model.v1");
+        d.container_version = version;
+        d.model_kind = kind;
+        d.payload_version = g_payload_version;
+        d.input_count = 1;
+        d.output_count = 1;
+        d.conformance_case_count = g_conformance;
+        d.graph_depth = g_depth;
+        d.graph_clauses = g_clauses;
+        d.graph_hv_dim = g_hv_dim;
+        describe_port(d.inputs[0], "graph", "json", PTMRT_PORT_INPUT, PTMRT_DTYPE_UINT32, 0);
+        describe_port(d.outputs[0], "prediction", "", PTMRT_PORT_OUTPUT, PTMRT_DTYPE_UINT32, 0);
+        result = std::move(model);
+        return PTMRT_STATUS_OK;
     }
     const auto payload_version = read_u32(payload, 0);
     const auto clauses = read_u32(payload, 4);

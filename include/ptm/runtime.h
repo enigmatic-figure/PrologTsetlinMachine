@@ -49,7 +49,8 @@ typedef enum ptmrt_port_direction {
 typedef enum ptmrt_model_kind {
     PTMRT_MODEL_PACKED_TM_BINARY_V1 = 1,
     PTMRT_MODEL_LOGIC_PROGRAM32_V1 = 2,
-    PTMRT_MODEL_MASKED_THRESHOLD_V1 = 3
+    PTMRT_MODEL_MASKED_THRESHOLD_V1 = 3,
+    PTMRT_MODEL_GRAPH_TM_V1 = 4
 } ptmrt_model_kind;
 
 typedef enum ptmrt_record_value_kind {
@@ -97,6 +98,9 @@ typedef struct ptmrt_model_description {
     uint32_t slot_count;
     uint32_t minimum_true;
     uint32_t selected_count;
+    uint32_t graph_depth;
+    uint32_t graph_clauses;
+    uint32_t graph_hv_dim;
     ptmrt_port_description inputs[PTMRT_MAX_PORTS];
     ptmrt_port_description outputs[PTMRT_MAX_PORTS];
 } ptmrt_model_description;
