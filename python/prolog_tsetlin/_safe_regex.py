@@ -5,6 +5,24 @@ from __future__ import annotations
 import re
 
 
+def _parser_module() -> object:
+    """Return the regex parser module for this interpreter.
+
+    ``re._parser`` exists on Python 3.11+; on 3.10 the same implementation
+    lives as the top-level ``sre_parse`` module.
+    """
+
+    parser = getattr(re, "_parser", None)
+    if parser is not None:
+        return parser
+    import sre_parse  # type: ignore[import-not-found]
+
+    return sre_parse
+
+
+_PARSER = _parser_module()
+
+
 def compile_safe(pattern: str, flags: int = 0) -> re.Pattern[str]:
     """Compile *pattern* after excluding backtracking-amplifying constructs.
 
@@ -14,27 +32,27 @@ def compile_safe(pattern: str, flags: int = 0) -> re.Pattern[str]:
     """
 
     try:
-        parsed = re._parser.parse(pattern, flags)  # type: ignore[attr-defined]
+        parsed = _PARSER.parse(pattern, flags)  # type: ignore[union-attr]
     except re.error:
         raise
 
     repeat_ops = {  # type: ignore[attr-defined]
-        re._parser.MAX_REPEAT,
-        re._parser.MIN_REPEAT,
+        _PARSER.MAX_REPEAT,  # type: ignore[union-attr]
+        _PARSER.MIN_REPEAT,  # type: ignore[union-attr]
     }
     unsupported = {
-        re._parser.ASSERT,  # type: ignore[attr-defined]
-        re._parser.ASSERT_NOT,  # type: ignore[attr-defined]
-        re._parser.GROUPREF,  # type: ignore[attr-defined]
-        re._parser.GROUPREF_EXISTS,  # type: ignore[attr-defined]
+        _PARSER.ASSERT,  # type: ignore[union-attr]
+        _PARSER.ASSERT_NOT,  # type: ignore[union-attr]
+        _PARSER.GROUPREF,  # type: ignore[union-attr]
+        _PARSER.GROUPREF_EXISTS,  # type: ignore[union-attr]
     }
     simple = {
-        re._parser.LITERAL,  # type: ignore[attr-defined]
-        re._parser.NOT_LITERAL,  # type: ignore[attr-defined]
-        re._parser.ANY,  # type: ignore[attr-defined]
-        re._parser.IN,  # type: ignore[attr-defined]
-        re._parser.AT,  # type: ignore[attr-defined]
-        re._parser.CATEGORY,  # type: ignore[attr-defined]
+        _PARSER.LITERAL,  # type: ignore[union-attr]
+        _PARSER.NOT_LITERAL,  # type: ignore[union-attr]
+        _PARSER.ANY,  # type: ignore[union-attr]
+        _PARSER.IN,  # type: ignore[union-attr]
+        _PARSER.AT,  # type: ignore[union-attr]
+        _PARSER.CATEGORY,  # type: ignore[union-attr]
     }
 
     def visit(nodes: object, *, repeated: bool = False) -> None:
@@ -48,9 +66,9 @@ def compile_safe(pattern: str, flags: int = 0) -> re.Pattern[str]:
                     raise ValueError("nested quantifiers are unsupported")
                 _minimum, _maximum, child = argument
                 visit(child, repeated=True)
-            elif operation is re._parser.SUBPATTERN:  # type: ignore[attr-defined]
+            elif operation is _PARSER.SUBPATTERN:  # type: ignore[union-attr]
                 visit(argument[-1], repeated=repeated)
-            elif operation is re._parser.BRANCH:  # type: ignore[attr-defined]
+            elif operation is _PARSER.BRANCH:  # type: ignore[union-attr]
                 if repeated:
                     raise ValueError("quantified alternation is unsupported")
                 for branch in argument[1]:
