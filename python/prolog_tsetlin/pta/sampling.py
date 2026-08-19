@@ -25,17 +25,24 @@ def fns_mask_from_confusable(
 
     Output is bounded `class_count ≤256` → mask fits in Python int (or 256-bit).
     Example: confusable(0,1), confusable(0,2) → mask[0]=0b110
+    Validates strict int class indices (bool rejected, non-int rejected).
     """
-    if not 2 <= class_count <= 256:
-        raise ValueError("class_count 2..256")
+    if type(class_count) is not int or not 2 <= class_count <= 256:
+        raise ValueError("class_count must be int 2..256")
     masks: dict[int, int] = {c: 0 for c in range(class_count)}
-    for a, b in confusable_pairs:
+    for item in confusable_pairs:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise ValueError("confusable pair must be (int,int)")
+        a, b = item
+        if type(a) is not int or type(b) is not int:
+            raise ValueError("confusable pair classes must be strict ints (bool rejected)")
+        if isinstance(a, bool) or isinstance(b, bool):
+            raise ValueError("bool is not valid class index")
         if not (0 <= a < class_count and 0 <= b < class_count):
             raise ValueError("confusable pair out of range")
         if a == b:
             continue
         masks[a] |= 1 << b
-        # Symmetric confusability is common but not required; caller may add directed.
     return masks
 
 
@@ -47,6 +54,7 @@ def fns_mask_from_counterexamples(
 ) -> tuple[int, dict[int, int]]:
     """Derive confusable pairs from counterexamples where pred ≠ label.
 
+    Reference oracle: strict int validation (bool rejected), out-of-domain (>255) → ValueError, not clamped silently.
     Returns (class_count, masks). Deterministic, bounded.
     """
     pairs: set[tuple[int, int]] = set()
@@ -54,8 +62,15 @@ def fns_mask_from_counterexamples(
     for ex in examples:
         true = ex.get(class_field)
         pred = ex.get(pred_field)
-        if not isinstance(true, int) or not isinstance(pred, int):
+        # Strict int check — bool counts as not int
+        if type(true) is not int or type(pred) is not int:
             continue
+        if isinstance(true, bool) or isinstance(pred, bool):
+            continue
+        if not 0 <= true <= 255 or not 0 <= pred <= 255:
+            raise ValueError(f"class index out of 0..255: true={true}, pred={pred}")
+        if not 0 <= true < 256 or not 0 <= pred < 256:
+            raise ValueError("class out of range")
         classes.add(true)
         classes.add(pred)
         if true != pred:
@@ -63,8 +78,10 @@ def fns_mask_from_counterexamples(
     if not classes:
         return 0, {}
     class_count = max(classes) + 1
-    # Clamp to 256
-    class_count = min(256, max(2, class_count))
+    if class_count < 2:
+        class_count = 2
+    if class_count > 256:
+        raise ValueError("class_count would exceed 256 — out-of-domain class as invalid problem")
     return class_count, fns_mask_from_confusable(class_count, list(pairs))
 
 

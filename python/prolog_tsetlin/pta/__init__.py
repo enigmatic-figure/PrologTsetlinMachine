@@ -1,21 +1,24 @@
 from .proposal import PTAEscalationProposal, PTAInsight
-from .lowering import lowerable, check_example
+from .lowering import lowerable, lower_exact, syntactically_bounded, check_example
 from .ontology import PROLOG_ONTOLOGY
 from .input import InputPTA, LiteralProposal
 from .deescalation import DeescalationPTA
 from .escalation import EscalationPTA
-from .sparse import SparseClauseBank, lower_to_sparse
+from .sparse import SparseClauseBank, lower_to_sparse, to_sparse_exact, propose_sparse_morphology
 from .sampling import fns_mask_from_confusable, fns_mask_from_counterexamples, multigranularity_schedule
 from .regression import find_residual_regions, residual_to_proposal
 from .convolutional import invent_spatial_templates, template_to_proposal as spatial_to_proposal
 from .graph_pta import hypothesize_graph_relation, hypothesis_to_proposal as graph_hypothesis_to_proposal
 from .sequence import discover_sequence_patterns, pattern_to_proposal as seq_to_proposal
 from .composite import discover_specialist_gates, gate_to_proposal, smallest_specialist_subset
+from .session import PTAReasoningSession
 
 __all__ = [
     "PTAEscalationProposal",
     "PTAInsight",
     "lowerable",
+    "lower_exact",
+    "syntactically_bounded",
     "check_example",
     "PROLOG_ONTOLOGY",
     "InputPTA",
@@ -24,6 +27,8 @@ __all__ = [
     "EscalationPTA",
     "SparseClauseBank",
     "lower_to_sparse",
+    "to_sparse_exact",
+    "propose_sparse_morphology",
     "fns_mask_from_confusable",
     "fns_mask_from_counterexamples",
     "multigranularity_schedule",
@@ -38,4 +43,5 @@ __all__ = [
     "discover_specialist_gates",
     "gate_to_proposal",
     "smallest_specialist_subset",
+    "PTAReasoningSession",
 ]

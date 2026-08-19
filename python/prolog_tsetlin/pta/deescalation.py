@@ -39,16 +39,17 @@ class PruningInsight:
 
 
 class DeescalationPTA:
-    """Reasons over clause/literal redundancy and proposes simplifications.
+    """Type-III-inspired de-escalation — reasons over clause/literal redundancy.
 
     Observed inputs are literal batches and clause reports:
       feature_relation(L1, subsumes, L2)
       clause_support(Clause, Example)
       thresholds_equivalent(T1, T2)
 
-    This implementation is deterministic and bounded; it does not run Prolog
-    internally but exposes the same ontology so a future Prolog backend can
-    replace the heuristics without changing the gate.
+    Reference oracle for Prolog Type-III mechanism: identifies context-specific
+    independence via observed-column equivalence/subsumption plus utility-based
+    stability heuristics. Future Prolog backend will replace heuristics with
+    exact CS-IA Type III feedback via pta_deescalation.pl.
     """
 
     def __init__(self, pta_id: str = "de-escalation:prune") -> None:

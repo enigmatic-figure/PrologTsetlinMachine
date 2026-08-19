@@ -233,7 +233,7 @@ class LiteralCatalog:
     def literals(self) -> tuple[LiteralDescriptor, ...]:
         return tuple(self._literals)
 
-    def _register(
+    def _describe(
         self,
         field_name: str,
         transform: TransformKind,
@@ -254,7 +254,7 @@ class LiteralCatalog:
             },
             "null_policy": null_policy.value,
         }
-        descriptor = LiteralDescriptor(
+        return LiteralDescriptor(
             literal_id=_stable_u64(payload),
             source_field_id=field.source_field_id,
             source_field=field.name,
@@ -262,6 +262,15 @@ class LiteralCatalog:
             parameters=frozen_parameters,
             null_policy=null_policy,
         )
+
+    def _register(
+        self,
+        field_name: str,
+        transform: TransformKind,
+        parameters: Mapping[str, Any],
+        null_policy: NullPolicy,
+    ) -> LiteralDescriptor:
+        descriptor = self._describe(field_name, transform, parameters, null_policy)
         existing = self._by_id.get(descriptor.literal_id)
         if existing is not None:
             if existing != descriptor:
@@ -270,6 +279,56 @@ class LiteralCatalog:
         self._by_id[descriptor.literal_id] = descriptor
         self._literals.append(descriptor)
         return descriptor
+
+    def preview(
+        self,
+        field_name: str,
+        transform: TransformKind,
+        parameters: Mapping[str, Any],
+        null_policy: NullPolicy = NullPolicy.FALSE,
+    ) -> LiteralDescriptor:
+        """Compute descriptor and stable literal_id without mutating catalog."""
+        return self._describe(field_name, transform, parameters, null_policy)
+
+    def preview_numeric_ge(
+        self,
+        field_name: str,
+        threshold: int | float,
+        *,
+        null_policy: NullPolicy = NullPolicy.FALSE,
+    ) -> LiteralDescriptor:
+        self._require_kind(field_name, FieldKind.NUMBER)
+        return self._describe(field_name, TransformKind.NUMERIC_GE, {"threshold": threshold}, null_policy)
+
+    def preview_numeric_between(
+        self,
+        field_name: str,
+        lower: int | float,
+        upper: int | float,
+        *,
+        inclusive_lower: bool = True,
+        inclusive_upper: bool = True,
+        null_policy: NullPolicy = NullPolicy.FALSE,
+    ) -> LiteralDescriptor:
+        self._require_kind(field_name, FieldKind.NUMBER)
+        if lower > upper:
+            raise ValueError("lower bound cannot exceed upper bound")
+        return self._describe(
+            field_name,
+            TransformKind.NUMERIC_BETWEEN,
+            {"lower": lower, "upper": upper, "inclusive_lower": inclusive_lower, "inclusive_upper": inclusive_upper},
+            null_policy,
+        )
+
+    def preview_category_eq(
+        self,
+        field_name: str,
+        value: str | int | bool,
+        *,
+        null_policy: NullPolicy = NullPolicy.FALSE,
+    ) -> LiteralDescriptor:
+        self._require_kind(field_name, FieldKind.CATEGORY, FieldKind.BOOLEAN)
+        return self._describe(field_name, TransformKind.CATEGORY_EQ, {"value": value}, null_policy)
 
     def numeric_ge(
         self,

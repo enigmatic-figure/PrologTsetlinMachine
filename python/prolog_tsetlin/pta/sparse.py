@@ -1,13 +1,16 @@
-"""Sparse lowering — de-escalation knowledge → SparseClauseBank/ClauseIndex.
+"""Sparse lowering — exact representation vs model morphology.
 
 De-escalation PTAs compute:
   unused literals, permanently excluded, duplicate/subsumed clauses,
   functionally equivalent clauses, zero-weight outputs, unreferenced features.
 
-This module lowers that knowledge into the native sparse representation that
-C++/CUDA executes without knowing Prolog helped derive it.
-
-Native execution stays `clause banks • sparse clauses • patch evaluation`.
+Two distinct operations:
+  Exact representation lowering:
+    dense included-literal mask → sparse list of SAME included literals
+    all clauses/weights/polarities retained, structurally exact
+  Model morphology:
+    remove/change literals or clauses → new behavioral model
+    requires PTA proposal → oracle/shadow validation → child artifact lineage
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from ..representation import LiteralCatalog
 from .deescalation import DeescalationPTA
+from .proposal import PTAEscalationProposal, PTAInsight
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +53,20 @@ class SparseClauseBank:
         }
 
 
+def to_sparse_exact(
+    clause_literals: Mapping[int, frozenset[int]],
+) -> SparseClauseBank:
+    """Exact representation lowering: dense mask → sparse list, SAME semantics.
+
+    Retains all clauses, all literal_ids, all weights/polarities.
+    Structurally exact; no literals or clauses removed.
+    """
+    clauses = tuple(SparseClause(cid, tuple(sorted(s))) for cid, s in sorted(clause_literals.items()))
+    all_lits = tuple(sorted({lid for c in clauses for lid in c.literal_ids}))
+    index = {c.clause_id: idx for idx, c in enumerate(clauses)}
+    return SparseClauseBank(clauses, all_lits, index)
+
+
 def lower_to_sparse(
     catalog: LiteralCatalog,
     clause_literals: Mapping[int, frozenset[int]],
@@ -56,20 +74,38 @@ def lower_to_sparse(
     *,
     pta: DeescalationPTA | None = None,
 ) -> SparseClauseBank:
-    """Lower via de-escalation insights to sparse bank.
+    """Deprecated: previously conflated exact lowering with morphology.
 
-    Deterministic, bounded. Removes:
-      - duplicate clauses (identical literal sets)
-      - subsumed clauses (Si ⊂ Sj)
-      - literals that are thresholds_equivalent (keep smallest threshold)
-      - literals never true on observed rows (unused)
+    This wrapper now calls exact lowering only. Behavior-changing morphology
+    (removing unused, dedup, subsumption) must go through morphology.py
+    and produce a PTA proposal for oracle/shadow validation.
+    """
+    return to_sparse_exact(clause_literals)
+
+
+def propose_sparse_morphology(
+    catalog: LiteralCatalog,
+    clause_literals: Mapping[int, frozenset[int]],
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    pta: DeescalationPTA | None = None,
+) -> tuple[SparseClauseBank, PTAEscalationProposal | None]:
+    """Model morphology: propose removing redundancy, requires new artifact.
+
+    Uses DeescalationPTA to find:
+      - duplicate clauses (identical sets) → 2 identical clauses contribute 2 votes, not 1
+      - subsumed clauses → independent vote, different polarity/weight
+      - thresholds_equivalent on observed rows ≠ logically equivalent over domain
+      - never-true literal removal can make clause fire
+
+    Returns (exact_bank, morphology_proposal). morphology_proposal is a
+    PTAEscalationProposal describing the removals; caller must validate via
+    oracle/shadow and publish as child artifact with restoration lineage.
+    If no redundancy found, morphology_proposal is None.
     """
     pta = pta or DeescalationPTA()
-    # 1. Find redundant literals (thresholds_equivalent → keep one per equivalence class)
     all_lids = sorted({lid for s in clause_literals.values() for lid in s})
     redundant = pta.find_redundant_literals(catalog, all_lids, rows)
-    # Build equivalence classes for thresholds_equivalent
-    to_remove: set[int] = set()
     from collections import defaultdict
 
     equiv: dict[int, set[int]] = defaultdict(set)
@@ -78,13 +114,12 @@ def lower_to_sparse(
             a, b = ins.evidence[0], ins.evidence[1]  # type: ignore[index]
             equiv[a].add(b)
             equiv[b].add(a)
-    # For each equivalence class, keep smallest literal_id (deterministic)
+    to_remove: set[int] = set()
     visited: set[int] = set()
     for lid in all_lids:
         if lid in visited:
             continue
         cls = {lid} | equiv.get(lid, set())
-        # expand closure
         stack = list(cls)
         closure = set(cls)
         while stack:
@@ -101,7 +136,6 @@ def lower_to_sparse(
                 visited.add(other)
         visited.add(lid)
 
-    # Also remove permanently unused literals (column all False)
     descs = {d.literal_id: d for d in catalog.literals}
     for lid in all_lids:
         if lid in to_remove:
@@ -113,12 +147,10 @@ def lower_to_sparse(
         if not any(col):
             to_remove.add(lid)
 
-    # 2. Build sparse clause literal sets minus removed
     sparse_map: dict[int, frozenset[int]] = {}
     for cid, lids in clause_literals.items():
         sparse_map[cid] = frozenset(l for l in lids if l not in to_remove)
 
-    # 3. Remove duplicate clauses (identical sparse sets)
     seen: dict[frozenset[int], int] = {}
     deduped: dict[int, frozenset[int]] = {}
     for cid in sorted(sparse_map):
@@ -126,9 +158,7 @@ def lower_to_sparse(
         if s not in seen:
             seen[s] = cid
             deduped[cid] = s
-        # else duplicate → skip (subsumed)
 
-    # 4. Remove subsumed clauses (Si ⊂ Sj) — keep minimal
     cids = sorted(deduped)
     subsumed: set[int] = set()
     for i in cids:
@@ -137,13 +167,28 @@ def lower_to_sparse(
                 continue
             si, sj = deduped[i], deduped[j]
             if si and si.issubset(sj) and si != sj:
-                # i subsumes j is not correct; j is more specific, keep i
-                # Actually Si ⊂ Sj means Sj is subsumed by Si (Si weaker) → Sj redundant
                 subsumed.add(j)
 
     final = {cid: s for cid, s in deduped.items() if cid not in subsumed}
-    # Build bank
+    # If no change, no morphology proposal needed
+    if not to_remove and len(final) == len(clause_literals):
+        exact = to_sparse_exact(clause_literals)
+        return exact, None
+
     clauses = tuple(SparseClause(cid, tuple(sorted(s))) for cid, s in sorted(final.items()))
     all_lits = tuple(sorted({lid for c in clauses for lid in c.literal_ids}))
     index = {c.clause_id: idx for idx, c in enumerate(clauses)}
-    return SparseClauseBank(clauses, all_lits, index)
+    morphed = SparseClauseBank(clauses, all_lits, index)
+    # Build morphology proposal for trust boundary
+    proposal = PTAEscalationProposal(
+        proposal_id=f"morphology:sparse:{len(to_remove)}-removed:{len(clause_literals)-len(final)}-dedup",
+        source_pta_ids=(pta.pta_id,),
+        supporting_insights=tuple(redundant),
+        counterexamples_addressed=(),
+        required_literals=(),
+        native_target="threshold",  # morphology proposal delegates to threshold logic for now
+        structure={"removed_literals": sorted(to_remove), "removed_clauses": len(clause_literals)-len(final), "morphed_clauses": morphed.to_proposal_structure()},
+        resource_bounds={"literal_count": max(1, len(all_lits))},
+    )
+    exact = to_sparse_exact(clause_literals)
+    return exact, proposal

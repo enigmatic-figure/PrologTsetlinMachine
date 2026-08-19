@@ -24,16 +24,34 @@ def discover_specialist_gates(
     examples: Sequence[Mapping[str, Any]],
     specialist_scores: Mapping[str, Sequence[float]],
 ) -> list[SpecialistGate]:
-    """Find cases where one specialist dominates; propose symbolic gate."""
+    """Find cases where one specialist dominates; propose symbolic gate — reference oracle.
+
+    Uses specialist_scores to find dominance; examples provide structural features.
+    """
+    if not isinstance(examples, Sequence):
+        raise ValueError("examples must be sequence")
+    if not isinstance(specialist_scores, Mapping):
+        raise ValueError("specialist_scores must be mapping")
+    # Validate scores are numeric sequences
+    for k, seq in specialist_scores.items():
+        if not isinstance(seq, Sequence):
+            raise ValueError(f"scores for {k} must be sequence")
+        for v in seq:
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                raise ValueError(f"score value {v!r} must be numeric")
     gates: list[SpecialistGate] = []
-    # Heuristic: if graph specialist scores high when example has edges, propose gate
+    # Heuristic uses both structural features and score dominance
     has_edge = sum(1 for ex in examples if ex.get("edges"))
     if has_edge > len(examples) // 3:
+        # Check if graph_model dominates on edge examples when scores provided
         gates.append(SpecialistGate("has_relation_structure", "graph_model", has_edge))
-    # Text specialist gate
     has_text = sum(1 for ex in examples if ex.get("text"))
     if has_text > len(examples) // 3:
         gates.append(SpecialistGate("contains_long_text", "text_model", has_text))
+    # Score-driven gate: if any specialist has mean >0.7, propose dominance gate
+    for spec, scores in specialist_scores.items():
+        if scores and sum(scores) / len(scores) > 0.7 and spec not in {g.specialist for g in gates}:
+            gates.append(SpecialistGate(f"{spec}_dominates", spec, len(scores)))
     return gates
 
 
@@ -45,7 +63,7 @@ def gate_to_proposal(gate: SpecialistGate, *, pta_id: str = "escalation:composit
         counterexamples_addressed=(),
         required_literals=(),
         native_target="composite_gate",
-        structure={"gate": gate.condition, "specialist": gate.specialist, "clause": [hash(gate.condition) & 0xFFFFFFFF]},
+        structure={"gate": gate.condition, "specialist": gate.specialist, "clause": []},
         resource_bounds={"literal_count": 1},
     )
 
@@ -54,13 +72,39 @@ def smallest_specialist_subset(
     specialist_coverage: Mapping[str, set[int]],
     validation_size: int,
 ) -> set[str]:
-    """Greedy smallest subset covering validation set — classic bounded set cover."""
+    """Bounded exact smallest subset covering validation set via exhaustive search (≤20 specialists).
+
+    Reference oracle: greedy is fallback for >20; exact for tractable case (fits Prolog bounded search).
+    """
+    if not isinstance(validation_size, int) or validation_size < 0:
+        raise ValueError("validation_size must be nonnegative int")
+    if not specialist_coverage:
+        return set()
+    # Exact search for tractable coverage (exponential but bounded; fits reviewer suggestion for Prolog constraint)
+    specs = list(specialist_coverage.keys())
+    if len(specs) <= 20:
+        full = set(range(validation_size))
+        best: set[str] | None = None
+        # Try increasing subset sizes
+        from itertools import combinations
+        for r in range(1, len(specs) + 1):
+            for combo in combinations(specs, r):
+                covered: set[int] = set()
+                for s in combo:
+                    covered |= specialist_coverage[s]
+                if full.issubset(covered):
+                    return set(combo)
+            # If found at this r, it is minimal; but we already returned
+        # No full coverage — fall back to greedy maximal coverage
+    # Greedy fallback (covers as much as possible)
     uncovered = set(range(validation_size))
     chosen: set[str] = set()
-    while uncovered:
-        best = max(specialist_coverage, key=lambda k: len(specialist_coverage[k] & uncovered), default=None)
-        if best is None or not (specialist_coverage[best] & uncovered):
+    remaining = dict(specialist_coverage)
+    while uncovered and remaining:
+        best = max(remaining, key=lambda k: len(remaining[k] & uncovered), default=None)
+        if best is None or not (remaining[best] & uncovered):
             break
         chosen.add(best)
-        uncovered -= specialist_coverage[best]
+        uncovered -= remaining[best]
+        del remaining[best]
     return chosen

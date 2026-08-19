@@ -50,9 +50,10 @@ class EscalationPTA:
         field: str,
         threshold: float,
     ) -> PTAEscalationProposal:
-        """Propose an exception clause for failing examples differing on field."""
-        # Heuristic: exception clause = existing clause ∧ new threshold literal
-        # Structure is symbolic; lowering will allocate literal 104 etc.
+        """Propose an exception clause for failing examples — reference oracle."""
+        import math
+        if not math.isfinite(threshold):
+            raise ValueError("threshold must be finite")
         return PTAEscalationProposal(
             proposal_id=f"{self.pta_id}:exception:{field}:{threshold:.6g}",
             source_pta_ids=(self.pta_id,),
@@ -60,8 +61,8 @@ class EscalationPTA:
             counterexamples_addressed=tuple(range(len(failing_examples))),
             required_literals=(f"numeric_ge:{field}:{threshold}",),
             native_target="binary_clause",
-            structure={"clause": [hash(field) & 0xFFFFFFFF, hash(str(threshold)) & 0xFFFFFFFF], "exception_for": list(existing_clause_support.keys())[:1]},
-            resource_bounds={"literal_count": 2, "clause_count": 1},
+            structure={"exception_for": list(existing_clause_support.keys())[:1], "clause": [], "field": field, "threshold": threshold, "descriptor": {"field": field, "threshold": threshold}},
+            resource_bounds={"literal_count": 1, "clause_count": 1},
         )
 
     def allocate_cotm_weights(

@@ -128,11 +128,15 @@ class InputPTA:
             self._seen_thresholds.add(key)
             # Also check categorical budgets via canonical duplicates are handled by LiteralCatalog dedup
             pid = f"{self.pta_id}:{field}:ge:{thr:.6g}"
-            # Check if literal already exists in catalog (dedup)
+            # Check if literal already exists in catalog (dedup) — preview without mutating
             try:
-                existing = self.catalog.numeric_ge(field, thr)
-                # If already in catalog, still propose but mark provenance as dedup
-                provenance = f"threshold {thr:.6g} between values where label flips (already in catalog {existing.literal_id})"
+                existing = self.catalog.preview_numeric_ge(field, thr)
+                # Check existence without registering
+                already = any(d.literal_id == existing.literal_id for d in self.catalog.literals)
+                if already:
+                    provenance = f"threshold {thr:.6g} between values where label flips (already in catalog {existing.literal_id})"
+                else:
+                    provenance = f"threshold {thr:.6g} between values where label flips"
             except Exception:
                 provenance = f"threshold {thr:.6g} between values where label flips"
             prop = LiteralProposal(
@@ -203,9 +207,9 @@ class InputPTA:
             if len(self._proposed) >= self.budget:
                 break
             pid = f"{self.pta_id}:{field}:between:{lo:.6g}-{hi:.6g}"
-            # dedup check via numeric_between catalog (tests lowerability)
+            # dedup check via preview without mutating
             try:
-                self.catalog.numeric_between(field, lo, hi)
+                self.catalog.preview_numeric_between(field, lo, hi, inclusive_lower=True, inclusive_upper=False)
             except Exception:
                 pass
             prop = LiteralProposal(
@@ -271,21 +275,36 @@ class InputPTA:
         self, literal_proposal: LiteralProposal, *, native_target: str = "binary_clause"
     ) -> PTAEscalationProposal:
         """Lower a literal proposal into a typed escalation proposal for the gate."""
-        # Ensure literal is materialized in catalog to get its stable ID for lowering
+        # Preview descriptor without mutating catalog — materialization happens at exact lowering time
         desc: LiteralDescriptor | None = None
         try:
             if literal_proposal.transform == "numeric_ge":
-                desc = self.catalog.numeric_ge(literal_proposal.field, float(literal_proposal.parameters["threshold"]))
+                desc = self.catalog.preview_numeric_ge(literal_proposal.field, float(literal_proposal.parameters["threshold"]))
             elif literal_proposal.transform == "numeric_between":
                 p = literal_proposal.parameters
-                desc = self.catalog.numeric_between(
-                    literal_proposal.field, float(p["lower"]), float(p["upper"])  # type: ignore[arg-type]
+                desc = self.catalog.preview_numeric_between(
+                    literal_proposal.field,
+                    float(p["lower"]),  # type: ignore[arg-type]
+                    float(p["upper"]),  # type: ignore[arg-type]
+                    inclusive_lower=bool(p.get("inclusive_lower", True)),
+                    inclusive_upper=bool(p.get("inclusive_upper", False)),
                 )
             elif literal_proposal.transform == "category_eq":
-                desc = self.catalog.category_eq(literal_proposal.field, literal_proposal.parameters["value"])
+                desc = self.catalog.preview_category_eq(literal_proposal.field, literal_proposal.parameters["value"])
+            elif literal_proposal.transform == "category_in":
+                # category_in not yet in preview; fallback to generic preview
+                desc = self.catalog.preview(literal_proposal.field, __import__("prolog_tsetlin.representation", fromlist=["TransformKind"]).TransformKind.CATEGORY_IN, {"values": literal_proposal.parameters["value"]})
         except Exception:
             desc = None
-        literal_id = desc.literal_id if desc is not None else 0
+        if desc is not None:
+            literal_id = desc.literal_id
+            # Store descriptor payload for exact lowering to materialize
+            req = (desc,)
+            clause = [literal_id]
+        else:
+            # No valid descriptor → proposal is not exactly lowerable; keep transform descriptor string
+            req = (f"{literal_proposal.transform}:{literal_proposal.field}:{literal_proposal.parameters}",)
+            clause = []
         return PTAEscalationProposal(
             proposal_id=literal_proposal.proposal_id,
             source_pta_ids=(self.pta_id,),
@@ -293,8 +312,8 @@ class InputPTA:
                 PTAInsight(self.pta_id, "interval" if literal_proposal.transform == "numeric_between" else "threshold", literal_proposal.field, (literal_proposal.parameters,)),
             ),
             counterexamples_addressed=(),
-            required_literals=(f"{literal_proposal.transform}:{literal_proposal.field}:{literal_proposal.parameters}",),
+            required_literals=req,  # type: ignore[arg-type]
             native_target=native_target,
-            structure={"clause": [literal_id] if literal_id else [hash(literal_proposal.proposal_id) & 0xFFFFFFFF], "field": literal_proposal.field},
-            resource_bounds={"literal_count": 1},
+            structure={"clause": clause, "field": literal_proposal.field, "descriptor": desc.canonical_payload() if desc is not None else None},
+            resource_bounds={"literal_count": 1 if clause else 0},
         )

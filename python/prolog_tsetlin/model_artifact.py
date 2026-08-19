@@ -974,6 +974,29 @@ class GraphTMInferenceArtifact:
                     raise ModelArtifactError("graph-TM edge_types must be list")
                 edges = graph_dict.get("edges") or []
                 node_props_raw = graph_dict.get("node_properties") or []
+                # Strict: node_properties length must equal node_count (native requires exact)
+                if len(node_props_raw) != node_count:
+                    raise ModelArtifactError(f"graph-TM node_properties length {len(node_props_raw)} != node_count {node_count}")
+                # Strict: edge_types values must match edge-derived set (native checks size and values)
+                raw_edge_types = graph_dict.get("edge_types") or []
+                # Build canonical edge-derived set
+                derived_types: set[str] = set()
+                for e in edges:
+                    et = e[2] if len(e) == 3 else None
+                    if isinstance(et, int) and type(et) is int:
+                        derived_types.add(f"int:{et}")
+                    elif isinstance(et, str):
+                        derived_types.add(f"str:{et}")
+                canonical_raw = set()
+                for et in raw_edge_types:
+                    if isinstance(et, int) and type(et) is int:
+                        canonical_raw.add(f"int:{et}")
+                    elif isinstance(et, str):
+                        canonical_raw.add(f"str:{et}")
+                    else:
+                        raise ModelArtifactError("graph-TM edge_types entry must be int or str")
+                if canonical_raw != derived_types:
+                    raise ModelArtifactError(f"graph-TM edge_types {sorted(canonical_raw)} != derived {sorted(derived_types)}")
                 # Validate edges are [int,int, int|str] with strict types; GraphInput.create will enforce bounds but we pre-check strictness
                 for e in edges:
                     if not isinstance(e, (list, tuple)) or len(e) != 3:

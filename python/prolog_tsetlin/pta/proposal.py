@@ -39,6 +39,28 @@ def _canon(v: Any) -> str:
     return json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _deep_canonicalize(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _deep_canonicalize(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_deep_canonicalize(v) for v in sorted(value, key=lambda x: _canon(x)) if not isinstance(value, (list, tuple)) or True] if isinstance(value, (set, frozenset)) else [_deep_canonicalize(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    # For dataclasses / tuples containing mixed types, canon via json
+    try:
+        json.dumps(value, sort_keys=True)
+        return value
+    except Exception:
+        return str(value)
+
+
+def _freeze_mapping(m: Mapping[str, Any]) -> Mapping[str, Any]:
+    from types import MappingProxyType
+    # Deep copy and freeze
+    frozen = {k: _deep_canonicalize(v) for k, v in m.items()}
+    return MappingProxyType(frozen)
+
+
 @dataclass(frozen=True, slots=True)
 class PTAInsight:
     source_pta: str
@@ -49,7 +71,12 @@ class PTAInsight:
 
 @dataclass(frozen=True, slots=True)
 class PTAEscalationProposal:
-    """Typed escalation proposal — see docs/pta-control-plane.md."""
+    """Typed escalation proposal — trust-boundary object, canonical and content-addressed.
+
+    Two identities:
+      semantic_id: native_target + exact literal descriptors/IDs + exact structure + weights/output_assignments + lowering schema
+      provenance_id: semantic_id + source PTAs + insights/evidence + counterexamples + validation_signature + support_trace
+    """
 
     proposal_id: str
     source_pta_ids: tuple[str, ...]
@@ -76,24 +103,59 @@ class PTAEscalationProposal:
             raise ValueError("unsupported lowering_version")
         # resource bounds must be positive ints within known ceilings
         for k, v in self.resource_bounds.items():
-            if not isinstance(v, int) or v <= 0:
+            if type(v) is not int or isinstance(v, bool) or v <= 0:
                 raise ValueError(f"resource_bounds[{k}] must be positive int")
         if self.resource_bounds.get("clause_count", 1) > MAX_CLAUSES:
             raise ValueError("clause_count exceeds MAX_CLAUSES")
         if self.resource_bounds.get("graph_depth", 1) > MAX_GRAPH_DEPTH:
             raise ValueError("graph_depth exceeds MAX_GRAPH_DEPTH")
+        # Deep-freeze mutable mappings to prevent post-construction mutation
+        object.__setattr__(self, "structure", _freeze_mapping(dict(self.structure)))
+        object.__setattr__(self, "resource_bounds", _freeze_mapping(dict(self.resource_bounds)))
+        object.__setattr__(self, "validation_signature", _freeze_mapping(dict(self.validation_signature)))
+        # Freeze required_literals strings are immutable; descriptors are frozen
 
-    def proposal_hash(self) -> str:
-        """Stable hash of the proposal content — for provenance."""
-        d = {
-            "proposal_id": self.proposal_id,
-            "source_pta_ids": list(self.source_pta_ids),
+    def _semantic_payload(self) -> dict[str, Any]:
+        lits = []
+        for lit in self.required_literals:
+            if hasattr(lit, "literal_id"):
+                lits.append(getattr(lit, "literal_id"))
+            else:
+                lits.append(str(lit))
+        return {
             "native_target": self.native_target,
+            "required_literals": sorted(lits, key=lambda x: str(x)),
             "structure": dict(self.structure),
+            "weights": list(self.weights) if self.weights is not None else None,
+            "output_assignments": [list(p) for p in self.output_assignments] if self.output_assignments is not None else None,
             "resource_bounds": dict(self.resource_bounds),
             "lowering_version": self.lowering_version,
         }
-        return "sha256:" + hashlib.sha256(_canon(d).encode()).hexdigest()
+
+    def _provenance_payload(self) -> dict[str, Any]:
+        d = self._semantic_payload()
+        d.update({
+            "proposal_id": self.proposal_id,
+            "source_pta_ids": sorted(self.source_pta_ids),
+            "supporting_insights": sorted([{"source_pta": i.source_pta, "kind": i.kind, "subject": i.subject, "evidence": list(i.evidence)} for i in self.supporting_insights], key=lambda x: _canon(x)),
+            "counterexamples_addressed": sorted(self.counterexamples_addressed),
+            "validation_signature": dict(self.validation_signature),
+            "support_trace": sorted(self.support_trace),
+        })
+        return d
+
+    def semantic_id(self) -> str:
+        """Content address of exact native semantics."""
+        return "sha256:" + hashlib.sha256(_canon(self._semantic_payload()).encode()).hexdigest()
+
+    def provenance_id(self) -> str:
+        """Content address of full provenance (semantic + evidence)."""
+        return "sha256:" + hashlib.sha256(_canon(self._provenance_payload()).encode()).hexdigest()
+
+    def proposal_hash(self) -> str:
+        """Stable hash of the proposal content — for provenance (now includes all fields)."""
+        # Backward compat: now covers required_literals, weights, insights, counterexamples, validation_signature, support_trace
+        return self.provenance_id()
 
     def to_dict(self) -> dict[str, Any]:
         return {
