@@ -110,3 +110,16 @@
   responsibility while preserving their tested behavior.
 - [x] Add property-based and hostile-input fuzzing at artifact and
   preprocessing boundaries.
+
+## Milestone 7: PTA reasoning/control plane — proposed
+
+> Design: `docs/pta-control-plane.md` — two-plane architecture where the three PTA classes (Input, De-escalation, Escalation) are the **control and reasoning layer around the native Tsetlin substrate**. Native clause banks/TA states/weights/bit-planes/SIMD/CUDA remain the fast executable plane; every deployable result crosses an exact lowering gate as a `PTAEscalationProposal`. Trust boundary preserved (bounded search → independent oracle → shadow audit → publish, with reopen), but Prolog is now free to use unification, CLP(FD), sets, DCGs, and richer hypothesis language during deliberation.
+
+- [x] Typed `PTAEscalationProposal` + shared ontology (`observation/4`, `insight/4`, `proposal/3`, `lowerable/2`) — `python/prolog_tsetlin/pta/`.
+- [x] Exact `lowerable()` checker (no approximation) — bounded literal/clause/graph-depth/patch-cells/weight ranges, unbounded recursion → `not lowerable`. Canonical example `temperature 71–76 ∧ mode=manual ∧ previous=B → 104∧105∧231∧388`.
+- [ ] Input-PTA learned Booleanization with provenance/retirement (adaptive thresholds/intervals, `x≥7.3`, `7.3≤x<9.8`), literal-budget copilots for continuous features (report § Input PTAs).
+- [ ] De-escalation Type III + reversible absorption (`literal_redundant`, `clause_subsumes`, `thresholds_equivalent`, `stable_inclusion` → candidate frozen → shadow audit → consolidated → drift → reopen).
+- [ ] Shared weighted clause bank / CoTM — PTA collective allocates `Clause×Output→Weight` via constraints, deduplicates `C7≡C19`, merges via Input literal invention; native `TA states + int matrix`.
+- [ ] Sparse/indexed lowering from de-escalation knowledge (`SparseClauseBank`/`ClauseIndex`).
+- [ ] Focused Negative Sampling and multigranularity as PTA-authored masks/policies (`confusable/2`, per-clause `s`).
+- [ ] Regression, CTM, Graph TM, sequence and composite TM with PTA-assisted structure invention (residual-directed, spatial templates, bounded ≤3-hop unrolling, DCG windows, specialist gates as bounded Logic programs).
