@@ -18,7 +18,7 @@ docs/bounded-search.md,manual,how-to,current,authoritative,yes,docs/manual/how-t
 docs/c-api.md,manual,reference,current,authoritative,yes,docs/manual/reference/c-api.md,move-compatible
 docs/class-ii-lifecycle.md,architecture,contract,current,authoritative,yes,docs/architecture/class-ii-lifecycle.md,move-compatible
 docs/class-ii-persistence.md,architecture,contract,current,authoritative,yes,docs/architecture/class-ii-persistence.md,move-compatible
-docs/compatibility.md,manual,reference,current,authoritative,yes,docs/manual/reference/compatibility.md,move-compatible
+docs/compatibility.md,releases,reference,current,authoritative,yes,docs/releases/compatibility.md,move-compatible
 docs/consumer-tutorial.md,manual,tutorial,mixed,transitional,yes,docs/manual/tutorials/,split
 docs/cuda-packed-tm.md,architecture,contract,mixed,transitional,yes,docs/architecture/cuda-packed-tm.md,split
 docs/dashboard.md,archive,record,historical,record,yes,docs/archive/dashboard.md,move-compatible

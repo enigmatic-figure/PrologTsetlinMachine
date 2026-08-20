@@ -44,7 +44,7 @@ gets a short installation hint rather than an import traceback.
 | Class I representation | inspect schemas, literals, encoded rows, typed facts, and provenance traces | Python API is ready; custom data ingestion is not a general product workflow yet |
 | Scalar TM oracle | configure, train, predict, inspect TA state, snapshot | synchronous and intended as the semantic oracle, so UI work must leave the event loop |
 | Native packed TM | show CPU capabilities, selected backend, clause outputs, feedback outputs, scores, and predictions | depends on a discoverable shared library; CUDA control is not exposed by the Python binding |
-| Feature templates | browse template registry and analyze TA clause configurations | bounded Prolog outputs now exist; a TUI search adapter is not yet implemented |
+| Feature templates | browse template registry and analyze TA clause configurations | bounded Prolog outputs and the TUI Search adapter are implemented; live registry browsing remains planned |
 | Logic dataset/AST | load, split, encode, report collisions/signatures, inspect AST and primitive graph | valuable but more advanced than the first-run path |
 | Prolog bridge | configure and run bounded monotone threshold search | GNU Prolog is optional and discovery can fail |
 | Class II logic/morphology | inspect fixed programs, behavior signatures, repairs, factoring, and merges | Python models artifacts, but the live native registry and persistence control plane lack a Python facade |

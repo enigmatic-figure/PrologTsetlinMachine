@@ -142,6 +142,12 @@ async def test_tui_navigation_and_help_remain_available_at_80x24() -> None:
         assert app.query_one("#workspace").current == "view-train"
         await pilot.press("3")
         assert app.query_one("#workspace").current == "view-clauses"
+        await pilot.press("5")
+        app.query_one("#search-kind", Select).value = SearchKind.REPAIR.value
+        await pilot.pause()
+        search_hint = app.query_one("#search-result", TextArea).text
+        assert "press F5" in search_hint
+        assert "press s" not in search_hint
         await pilot.press("question_mark")
         await pilot.pause()
         assert app.screen.query_one("#help-dialog") is not None

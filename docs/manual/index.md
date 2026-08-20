@@ -20,10 +20,12 @@ explanation.
 
 ## Reference
 
-- [Compatibility matrix](../compatibility.md)
 - [C ABI](../c-api.md)
 - [Deterministic preprocessing contract](../preprocessing-contract.md)
 - [Typed feature templates](../feature-templates.md)
+
+For supported version combinations, see the release-owned
+[compatibility matrix](../compatibility.md).
 
 ```{toctree}
 :hidden:
@@ -36,7 +38,6 @@ explanation.
 ../bounded-search
 ../model-export-runtime
 ../data-connectors
-../compatibility
 ../c-api
 ../preprocessing-contract
 ../feature-templates

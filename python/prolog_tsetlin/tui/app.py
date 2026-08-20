@@ -610,7 +610,7 @@ class PTMApp(App[None]):
             f"READY / {kind.value.upper()} DEMO LOADED"
         )
         self.query_one("#search-result", TextArea).text = (
-            "Edit the bounded request or press s to run it."
+            "Edit the bounded request or press F5 to run it."
         )
         self.query_one("#counterexamples", DataTable).clear()
         self.query_one("#search-export-button", Button).disabled = True

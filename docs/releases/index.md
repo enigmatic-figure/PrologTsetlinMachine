@@ -17,5 +17,6 @@ completed history, evidence-backed capability status, and future work.
 
 ../../CHANGELOG
 ../../UPGRADING
+../compatibility
 ../roadmap
 ```
