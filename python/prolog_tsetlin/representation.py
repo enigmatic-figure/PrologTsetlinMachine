@@ -270,7 +270,7 @@ class LiteralCatalog:
         parameters: Mapping[str, Any],
         null_policy: NullPolicy,
     ) -> LiteralDescriptor:
-        descriptor = self._describe(field_name, transform, parameters, null_policy)
+        descriptor = self.preview(field_name, transform, parameters, null_policy)
         existing = self._by_id.get(descriptor.literal_id)
         if existing is not None:
             if existing != descriptor:
@@ -287,8 +287,104 @@ class LiteralCatalog:
         parameters: Mapping[str, Any],
         null_policy: NullPolicy = NullPolicy.FALSE,
     ) -> LiteralDescriptor:
-        """Compute descriptor and stable literal_id without mutating catalog."""
-        return self._describe(field_name, transform, parameters, null_policy)
+        """Validate and describe a literal without mutating the catalog."""
+        if not isinstance(transform, TransformKind):
+            raise ValueError("transform is not part of the catalog schema")
+        if not isinstance(null_policy, NullPolicy):
+            raise ValueError("null_policy is not part of the catalog schema")
+        if not isinstance(parameters, Mapping):
+            raise TypeError("literal parameters must be a mapping")
+        if any(not isinstance(key, str) for key in parameters):
+            raise TypeError("literal parameter names must be strings")
+        keys = set(parameters)
+        if transform is TransformKind.NUMERIC_GE:
+            if keys != {"threshold"}:
+                raise ValueError("numeric_ge requires exactly threshold")
+            return self.preview_numeric_ge(
+                field_name, parameters["threshold"], null_policy=null_policy
+            )
+        if transform is TransformKind.NUMERIC_BETWEEN:
+            expected = {"lower", "upper", "inclusive_lower", "inclusive_upper"}
+            if keys != expected:
+                raise ValueError(
+                    "numeric_between requires lower, upper, inclusive_lower, and inclusive_upper"
+                )
+            return self.preview_numeric_between(
+                field_name,
+                parameters["lower"],
+                parameters["upper"],
+                inclusive_lower=parameters["inclusive_lower"],
+                inclusive_upper=parameters["inclusive_upper"],
+                null_policy=null_policy,
+            )
+        if transform is TransformKind.CATEGORY_EQ:
+            if keys != {"value"}:
+                raise ValueError("category_eq requires exactly value")
+            return self.preview_category_eq(
+                field_name, parameters["value"], null_policy=null_policy
+            )
+        if transform is TransformKind.CATEGORY_IN:
+            if keys != {"values"}:
+                raise ValueError("category_in requires exactly values")
+            return self.preview_category_in(
+                field_name, parameters["values"], null_policy=null_policy
+            )
+        if transform is TransformKind.IS_MISSING:
+            if keys:
+                raise ValueError("is_missing does not accept parameters")
+            if null_policy is not NullPolicy.FALSE:
+                raise ValueError("is_missing requires the false null policy")
+            return self.preview_is_missing(field_name)
+        if transform is TransformKind.TOKEN_CONTAINS:
+            if keys != {"token", "case_sensitive"}:
+                raise ValueError(
+                    "token_contains requires exactly token and case_sensitive"
+                )
+            return self.preview_token_contains(
+                field_name,
+                parameters["token"],
+                case_sensitive=parameters["case_sensitive"],
+                null_policy=null_policy,
+            )
+        raise AssertionError(f"unhandled transform: {transform}")
+
+    def validate_descriptor(self, descriptor: LiteralDescriptor) -> LiteralDescriptor:
+        """Return the canonical descriptor or reject an invalid external value."""
+        if not isinstance(descriptor, LiteralDescriptor):
+            raise TypeError("descriptor must be LiteralDescriptor")
+        if type(descriptor.literal_id) is not int:
+            raise ValueError("literal_id must be a strict integer")
+        if descriptor.catalog_version != TRANSFORM_CATALOG_VERSION:
+            raise ValueError("catalog_version mismatch")
+        try:
+            field = self.schema.field(descriptor.source_field)
+        except (KeyError, TypeError) as exc:
+            raise ValueError("descriptor field not in schema") from exc
+        if descriptor.source_field_id != field.source_field_id:
+            raise ValueError("descriptor source_field_id mismatch")
+        if not isinstance(descriptor.parameters, tuple):
+            raise ValueError("descriptor parameters must be canonical tuple pairs")
+        try:
+            names = [item[0] for item in descriptor.parameters]
+            if any(not isinstance(name, str) for name in names):
+                raise ValueError("descriptor parameter names must be strings")
+            if len(set(names)) != len(names):
+                raise ValueError("descriptor parameter names must be unique")
+            parameters = {
+                name: _thaw_parameter(value)
+                for name, value in descriptor.parameters
+            }
+        except (TypeError, ValueError, IndexError) as exc:
+            raise ValueError("descriptor parameters are malformed") from exc
+        canonical = self.preview(
+            descriptor.source_field,
+            descriptor.transform,
+            parameters,
+            descriptor.null_policy,
+        )
+        if canonical != descriptor:
+            raise ValueError("descriptor is not canonical")
+        return canonical
 
     def preview_numeric_ge(
         self,
@@ -298,6 +394,7 @@ class LiteralCatalog:
         null_policy: NullPolicy = NullPolicy.FALSE,
     ) -> LiteralDescriptor:
         self._require_kind(field_name, FieldKind.NUMBER)
+        self._require_finite_number(threshold, "threshold")
         return self._describe(field_name, TransformKind.NUMERIC_GE, {"threshold": threshold}, null_policy)
 
     def preview_numeric_between(
@@ -311,6 +408,10 @@ class LiteralCatalog:
         null_policy: NullPolicy = NullPolicy.FALSE,
     ) -> LiteralDescriptor:
         self._require_kind(field_name, FieldKind.NUMBER)
+        self._require_finite_number(lower, "lower")
+        self._require_finite_number(upper, "upper")
+        if type(inclusive_lower) is not bool or type(inclusive_upper) is not bool:
+            raise TypeError("numeric interval inclusivity flags must be booleans")
         if lower > upper:
             raise ValueError("lower bound cannot exceed upper bound")
         return self._describe(
@@ -328,7 +429,50 @@ class LiteralCatalog:
         null_policy: NullPolicy = NullPolicy.FALSE,
     ) -> LiteralDescriptor:
         self._require_kind(field_name, FieldKind.CATEGORY, FieldKind.BOOLEAN)
+        self._require_category_value(value)
         return self._describe(field_name, TransformKind.CATEGORY_EQ, {"value": value}, null_policy)
+
+    def preview_category_in(
+        self,
+        field_name: str,
+        values: Sequence[str | int | bool],
+        *,
+        null_policy: NullPolicy = NullPolicy.FALSE,
+    ) -> LiteralDescriptor:
+        self._require_kind(field_name, FieldKind.CATEGORY, FieldKind.BOOLEAN)
+        canonical_values = self._canonical_category_values(values)
+        return self._describe(
+            field_name,
+            TransformKind.CATEGORY_IN,
+            {"values": canonical_values},
+            null_policy,
+        )
+
+    def preview_is_missing(self, field_name: str) -> LiteralDescriptor:
+        self.schema.field(field_name)
+        return self._describe(
+            field_name, TransformKind.IS_MISSING, {}, NullPolicy.FALSE
+        )
+
+    def preview_token_contains(
+        self,
+        field_name: str,
+        token: str,
+        *,
+        case_sensitive: bool = False,
+        null_policy: NullPolicy = NullPolicy.FALSE,
+    ) -> LiteralDescriptor:
+        self._require_kind(field_name, FieldKind.TEXT)
+        if not isinstance(token, str) or not token or any(character.isspace() for character in token):
+            raise ValueError("token must be one non-whitespace token")
+        if type(case_sensitive) is not bool:
+            raise TypeError("case_sensitive must be a boolean")
+        return self._describe(
+            field_name,
+            TransformKind.TOKEN_CONTAINS,
+            {"token": token, "case_sensitive": case_sensitive},
+            null_policy,
+        )
 
     def numeric_ge(
         self,
@@ -337,7 +481,6 @@ class LiteralCatalog:
         *,
         null_policy: NullPolicy = NullPolicy.FALSE,
     ) -> LiteralDescriptor:
-        self._require_kind(field_name, FieldKind.NUMBER)
         return self._register(
             field_name, TransformKind.NUMERIC_GE, {"threshold": threshold}, null_policy
         )
@@ -352,9 +495,6 @@ class LiteralCatalog:
         inclusive_upper: bool = True,
         null_policy: NullPolicy = NullPolicy.FALSE,
     ) -> LiteralDescriptor:
-        self._require_kind(field_name, FieldKind.NUMBER)
-        if lower > upper:
-            raise ValueError("lower bound cannot exceed upper bound")
         return self._register(
             field_name,
             TransformKind.NUMERIC_BETWEEN,
@@ -374,7 +514,6 @@ class LiteralCatalog:
         *,
         null_policy: NullPolicy = NullPolicy.FALSE,
     ) -> LiteralDescriptor:
-        self._require_kind(field_name, FieldKind.CATEGORY, FieldKind.BOOLEAN)
         return self._register(
             field_name, TransformKind.CATEGORY_EQ, {"value": value}, null_policy
         )
@@ -386,22 +525,10 @@ class LiteralCatalog:
         *,
         null_policy: NullPolicy = NullPolicy.FALSE,
     ) -> LiteralDescriptor:
-        self._require_kind(field_name, FieldKind.CATEGORY, FieldKind.BOOLEAN)
-        if not values:
-            raise ValueError("category membership cannot be empty")
-        # Python considers ``True == 1``.  Literal equality is deliberately
-        # typed, so preserve both while still removing exact typed duplicates.
-        typed_values = {(type(value), value): value for value in values}
-        canonical_values = tuple(
-            sorted(
-                typed_values.values(),
-                key=lambda value: (type(value).__name__, str(value)),
-            )
-        )
         return self._register(
             field_name,
             TransformKind.CATEGORY_IN,
-            {"values": canonical_values},
+            {"values": values},
             null_policy,
         )
 
@@ -418,14 +545,45 @@ class LiteralCatalog:
         case_sensitive: bool = False,
         null_policy: NullPolicy = NullPolicy.FALSE,
     ) -> LiteralDescriptor:
-        self._require_kind(field_name, FieldKind.TEXT)
-        if not token or any(character.isspace() for character in token):
-            raise ValueError("token must be one non-whitespace token")
         return self._register(
             field_name,
             TransformKind.TOKEN_CONTAINS,
             {"token": token, "case_sensitive": case_sensitive},
             null_policy,
+        )
+
+    @staticmethod
+    def _require_finite_number(value: Any, name: str) -> None:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise TypeError(f"{name} must be a finite number")
+
+    @staticmethod
+    def _require_category_value(value: Any) -> None:
+        if not isinstance(value, (str, int, bool)):
+            raise TypeError("category values must be strings, integers, or booleans")
+
+    @classmethod
+    def _canonical_category_values(
+        cls, values: Sequence[str | int | bool]
+    ) -> tuple[str | int | bool, ...]:
+        if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+            raise TypeError("category membership must be a sequence of values")
+        if not values:
+            raise ValueError("category membership cannot be empty")
+        for value in values:
+            cls._require_category_value(value)
+        # Python considers ``True == 1``. Literal equality is deliberately
+        # typed, so preserve both while still removing exact typed duplicates.
+        typed_values = {(type(value), value): value for value in values}
+        return tuple(
+            sorted(
+                typed_values.values(),
+                key=lambda value: (type(value).__name__, str(value)),
+            )
         )
 
     def _require_kind(self, field_name: str, *allowed: FieldKind) -> None:

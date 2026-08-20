@@ -37,6 +37,84 @@ def test_pattern_only_logic_fails_exact():
     assert syntactically_bounded(prop)[0] is True
 
 
+def _logic_program_proposal(program: dict) -> PTAEscalationProposal:
+    return PTAEscalationProposal(
+        proposal_id="logic-program",
+        source_pta_ids=("pta:test",),
+        supporting_insights=(),
+        counterexamples_addressed=(),
+        required_literals=(),
+        native_target="logic_program",
+        structure={"program": program},
+        resource_bounds={"literal_count": 1},
+    )
+
+
+def test_canonical_logic_program_lowers_to_validated_native_object():
+    from prolog_tsetlin.logic_consolidation import (
+        FixedLogicInstruction,
+        FixedLogicOpcode,
+        LogicProgram32,
+    )
+
+    program = LogicProgram32(
+        (FixedLogicInstruction(FixedLogicOpcode.INPUT, argument=0),),
+        root_instruction=0,
+    )
+
+    result = lower_exact(_logic_program_proposal(program.to_dict()))
+
+    assert isinstance(result, LoweredCandidate)
+    assert result.native_kind == "logic_program32"
+    assert result.native_object == program
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        {"instructions": [{}]},
+        {
+            "schema_version": 1,
+            "program_kind": "logic_program_32",
+            "instruction_count": 1,
+            "root_instruction": 0,
+            "instructions": [
+                {"opcode": "input", "opcode_value": 99, "operand_mask": 0, "argument": 0}
+            ],
+        },
+        {
+            "schema_version": 1,
+            "program_kind": "logic_program_32",
+            "instruction_count": 1,
+            "root_instruction": 1,
+            "instructions": [
+                {"opcode": "input", "opcode_value": 1, "operand_mask": 0, "argument": 0}
+            ],
+        },
+        {
+            "schema_version": 1,
+            "program_kind": "logic_program_32",
+            "instruction_count": 1,
+            "root_instruction": 0,
+            "instructions": [
+                {"opcode": "input", "opcode_value": 1, "operand_mask": 1, "argument": 0}
+            ],
+        },
+        {
+            "schema_version": 1,
+            "program_kind": "logic_program_32",
+            "instruction_count": 1,
+            "root_instruction": 0,
+            "instructions": [
+                {"opcode": "input", "opcode_value": 1, "operand_mask": 0, "argument": 256}
+            ],
+        },
+    ],
+)
+def test_malformed_logic_program_never_crosses_exact_gate(program: dict):
+    assert isinstance(lower_exact(_logic_program_proposal(program)), NotRepresentable)
+
+
 def test_arbitrary_literal_ids_fail_without_catalog():
     # check_example magic IDs should not be exact without catalog
     from prolog_tsetlin.pta.lowering import check_example

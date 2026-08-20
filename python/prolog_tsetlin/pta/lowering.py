@@ -17,8 +17,7 @@ shallow preliminary check; lower_exact() is the gate.
 
 from __future__ import annotations
 
-import hashlib
-import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -142,6 +141,73 @@ def syntactically_bounded(proposal: PTAEscalationProposal) -> tuple[bool, str]:
     return False, f"unknown target {target}"
 
 
+def _decode_logic_program32(value: Any) -> Any | None:
+    """Decode the canonical mapping form into a validated LogicProgram32."""
+    from ..logic_consolidation import (
+        FixedLogicInstruction,
+        FixedLogicOpcode,
+        LogicProgram32,
+    )
+
+    if not isinstance(value, Mapping):
+        return None
+    expected_program_keys = {
+        "schema_version",
+        "program_kind",
+        "instruction_count",
+        "root_instruction",
+        "instructions",
+    }
+    if set(value) != expected_program_keys:
+        return None
+    schema_version = value["schema_version"]
+    instruction_count = value["instruction_count"]
+    root_instruction = value["root_instruction"]
+    raw_instructions = value["instructions"]
+    if (
+        type(schema_version) is not int
+        or value["program_kind"] != "logic_program_32"
+        or type(instruction_count) is not int
+        or type(root_instruction) is not int
+        or isinstance(raw_instructions, (str, bytes))
+        or not isinstance(raw_instructions, Sequence)
+        or instruction_count != len(raw_instructions)
+    ):
+        return None
+
+    decoded: list[FixedLogicInstruction] = []
+    expected_instruction_keys = {
+        "opcode",
+        "opcode_value",
+        "operand_mask",
+        "argument",
+    }
+    try:
+        for raw in raw_instructions:
+            if not isinstance(raw, Mapping) or set(raw) != expected_instruction_keys:
+                return None
+            opcode_value = raw["opcode_value"]
+            operand_mask = raw["operand_mask"]
+            argument = raw["argument"]
+            if (
+                type(opcode_value) is not int
+                or type(operand_mask) is not int
+                or type(argument) is not int
+            ):
+                return None
+            opcode = FixedLogicOpcode(opcode_value)
+            if raw["opcode"] != opcode.name.lower():
+                return None
+            decoded.append(FixedLogicInstruction(opcode, operand_mask, argument))
+        return LogicProgram32(
+            tuple(decoded),
+            root_instruction,
+            schema_version=schema_version,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def _construct_native(proposal: PTAEscalationProposal, *, catalog: Any | None = None) -> tuple[Any, str] | None:
     """Attempt to construct actual PTM representation for proposal.
 
@@ -239,20 +305,10 @@ def _construct_native(proposal: PTAEscalationProposal, *, catalog: Any | None = 
     if target == "logic_program":
         # Exact requires actual LogicProgram32, not just pattern/window
         if "program" in struct:
-            prog = struct["program"]
-            try:
-                from ..logic_consolidation import LogicProgram32, FixedLogicInstruction, FixedLogicOpcode
-
-                # Validate program dict has instructions
-                if not isinstance(prog, dict) or "instructions" not in prog:
-                    return None
-                if not 1 <= len(prog["instructions"]) <= 32:
-                    return None
-                # For test, construct a minimal LogicProgram32 if possible
-                # Use the dict directly as native object
-                return prog, "logic_program32"
-            except Exception:
+            program = _decode_logic_program32(struct["program"])
+            if program is None:
                 return None
+            return program, "logic_program32"
         # Pattern/window only is scaffold — not exact until compiled to LogicProgram32
         if "pattern" in struct or "window" in struct:
             return None

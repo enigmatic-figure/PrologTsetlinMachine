@@ -1,18 +1,48 @@
 """Tests for budgeted feature persistence and retirement."""
 
+import hashlib
+import io
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
 
-from prolog_tsetlin.representation import FeatureSchema, FieldKind
-from prolog_tsetlin.budgeted_features import BudgetedFeatureStore, BUDGETED_STORE_SCHEMA, MAX_BUDGET
+from prolog_tsetlin.representation import (
+    TRANSFORM_CATALOG_VERSION,
+    FeatureSchema,
+    FieldKind,
+    LiteralDescriptor,
+    NullPolicy,
+    TransformKind,
+)
+from prolog_tsetlin.budgeted_features import (
+    MAX_STORE_BYTES,
+    BudgetedFeatureStore,
+    MAX_BUDGET,
+)
 
 
 def _schema() -> FeatureSchema:
     return FeatureSchema.from_fields(score=FieldKind.NUMBER, city=FieldKind.CATEGORY, text=FieldKind.TEXT)
+
+
+def _stable_literal_id(source_field_id: int, transform: TransformKind, parameters: dict[str, object]) -> int:
+    payload = {
+        "catalog_version": TRANSFORM_CATALOG_VERSION,
+        "source_field_id": source_field_id,
+        "transform": transform.value,
+        "parameters": parameters,
+        "null_policy": NullPolicy.FALSE.value,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return int.from_bytes(hashlib.sha256(canonical.encode("utf-8")).digest()[:8], "big")
+
+
+def _rehash_store(document: dict[str, object]) -> None:
+    payload = {key: value for key, value in document.items() if key != "store_id"}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    document["store_id"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def test_budgeted_basic_add_and_enforce() -> None:
@@ -57,18 +87,17 @@ def test_budgeted_lowest_utility() -> None:
     assert c.literal_id in ids
 
 
-def test_budgeted_persist_and_load_canonical() -> None:
+def test_budgeted_persist_and_load_canonical(tmp_path: Path) -> None:
     store = BudgetedFeatureStore(_schema(), budget=3, policy="least_used")
     d1 = store.catalog.numeric_ge("score", 5)
     store.record_use(d1.literal_id, 2)
-    d2 = store.catalog.token_contains("text", "hello")
-    tmp = tempfile.mktemp(suffix=".json")
-    sid = store.persist(tmp)
+    store.catalog.token_contains("text", "hello")
+    path = tmp_path / "store.json"
+    sid = store.persist(path)
     assert sid.startswith("sha256:")
-    restored = BudgetedFeatureStore.load(tmp)
+    restored = BudgetedFeatureStore.load(path)
     assert restored.to_dict() == store.to_dict()
     assert restored.size == store.size
-    Path(tmp).unlink()
 
 
 def test_budgeted_persist_without_directory_fsync_support(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,6 +110,68 @@ def test_budgeted_persist_without_directory_fsync_support(tmp_path: Path, monkey
 
     assert store_id.startswith("sha256:")
     assert BudgetedFeatureStore.load(path).to_dict() == store.to_dict()
+
+
+def test_budgeted_load_uses_bounded_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_sizes: list[int] = []
+
+    class OversizedSource(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return b"x" * size
+
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda self, mode="r", *args, **kwargs: OversizedSource(),
+    )
+
+    with pytest.raises(ValueError, match="exceeds ceiling"):
+        BudgetedFeatureStore.load("hostile-store.json")
+
+    assert read_sizes == [MAX_STORE_BYTES + 1]
+
+
+def test_budgeted_persist_cleans_temp_after_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "store.json"
+    path.write_bytes(b"original")
+    store = BudgetedFeatureStore(_schema(), budget=3)
+    store.catalog.numeric_ge("score", 5)
+
+    def fail_replace(source: str, target: str) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        store.persist(path)
+
+    assert path.read_bytes() == b"original"
+    assert list(tmp_path.glob(".store.json.tmp.*")) == []
+
+
+def test_budgeted_persist_ignores_directory_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_open = os.open
+    monkeypatch.setattr(os, "O_DIRECTORY", 0, raising=False)
+
+    def fail_directory_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
+        if Path(path) == tmp_path:
+            raise OSError("directory fsync unsupported")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", fail_directory_open)
+    path = tmp_path / "store.json"
+    store = BudgetedFeatureStore(_schema(), budget=3)
+    store.catalog.numeric_ge("score", 5)
+
+    store.persist(path)
+
+    assert path.is_file()
+    assert list(tmp_path.glob(".store.json.tmp.*")) == []
 
 
 def test_budgeted_hostile_budget() -> None:
@@ -101,6 +192,40 @@ def test_budgeted_hostile_tampered_store_id() -> None:
         BudgetedFeatureStore.from_dict(d)
 
 
+def test_budgeted_rejects_invalid_external_descriptor() -> None:
+    schema = _schema()
+    field = schema.field("score")
+    parameters = {"token": "hello", "case_sensitive": False}
+    descriptor = LiteralDescriptor(
+        literal_id=_stable_literal_id(field.source_field_id, TransformKind.TOKEN_CONTAINS, parameters),
+        source_field_id=field.source_field_id,
+        source_field=field.name,
+        transform=TransformKind.TOKEN_CONTAINS,
+        parameters=(("case_sensitive", False), ("token", "hello")),
+        null_policy=NullPolicy.FALSE,
+    )
+
+    with pytest.raises(TypeError, match="must be one of: text"):
+        BudgetedFeatureStore(schema, budget=2).add_literal(descriptor)
+
+
+def test_budgeted_rejects_rehashed_semantically_invalid_store() -> None:
+    store = BudgetedFeatureStore(_schema(), budget=2)
+    store.catalog.numeric_ge("score", 1)
+    document = store.to_dict()
+    entry = document["literals"][0]
+    parameters = {"token": "hello", "case_sensitive": False}
+    entry["transform"] = TransformKind.TOKEN_CONTAINS.value
+    entry["parameters"] = parameters
+    entry["literal_id"] = _stable_literal_id(
+        entry["source_field_id"], TransformKind.TOKEN_CONTAINS, parameters
+    )
+    _rehash_store(document)
+
+    with pytest.raises(ValueError, match="literal entry invalid"):
+        BudgetedFeatureStore.from_dict(document)
+
+
 def test_budgeted_retire_least_useful() -> None:
     schema = FeatureSchema.from_fields(x=FieldKind.NUMBER)
     store = BudgetedFeatureStore(schema, budget=4, policy="least_used")
@@ -114,17 +239,10 @@ def test_budgeted_retire_least_useful() -> None:
     assert removed[0] not in {d.literal_id for d in store.literals}
 
 
-def test_budgeted_json_not_canonical_rejected() -> None:
+def test_budgeted_invalid_budget_type_rejected() -> None:
     store = BudgetedFeatureStore(_schema(), budget=2)
     store.catalog.numeric_ge("score", 1)
-    # write non-canonical (pretty) JSON
-    d = store.to_dict()
-    pretty = json.dumps(d, indent=2).encode("utf-8")
-    tmp = tempfile.mktemp(suffix=".json")
-    Path(tmp).write_bytes(pretty)
-    # load via from_dict still checks canonical store_id, but file was not written via persist
-    # Instead test that from_dict rejects not-canonical dict ordering
-    bad = dict(d)
+    bad = store.to_dict()
     bad["budget"] = "2"  # wrong type
     with pytest.raises(ValueError):
         BudgetedFeatureStore.from_dict(bad)  # type: ignore[arg-type]

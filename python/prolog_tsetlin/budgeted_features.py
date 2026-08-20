@@ -141,10 +141,7 @@ class BudgetedFeatureStore:
 
     def add_literal(self, descriptor: LiteralDescriptor) -> BudgetedLiteralRecord:
         """Add an existing descriptor under budget (idempotent)."""
-        if not isinstance(descriptor, LiteralDescriptor):
-            raise TypeError("descriptor must be LiteralDescriptor")
-        if descriptor.source_field not in {f.name for f in self.schema.fields}:
-            raise ValueError("descriptor field not in schema")
+        descriptor = self._catalog.validate_descriptor(descriptor)
         # ensure catalog knows it (re-register via private path is not needed;
         # just ensure store tracks it)
         rec = self._track(descriptor)
@@ -327,6 +324,7 @@ class BudgetedFeatureStore:
                     null_policy=null_policy,
                     catalog_version=TRANSFORM_CATALOG_VERSION,
                 )
+                desc = store._catalog.validate_descriptor(desc)
             except (KeyError, TypeError, ValueError) as e:
                 raise ValueError(f"literal entry invalid: {e}") from e
             rec = BudgetedLiteralRecord(
@@ -384,7 +382,8 @@ class BudgetedFeatureStore:
     @classmethod
     def load(cls, path: str | Path) -> "BudgetedFeatureStore":
         p = Path(path)
-        data = p.read_bytes()
+        with p.open("rb") as source:
+            data = source.read(MAX_STORE_BYTES + 1)
         if len(data) > MAX_STORE_BYTES:
             raise ValueError("store file exceeds ceiling")
         if not data:
