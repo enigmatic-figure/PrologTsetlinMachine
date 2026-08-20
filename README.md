@@ -29,9 +29,9 @@ python -m pip install ".[tui]"
 ptm tui --demo xor
 ```
 
-Press `t` to train the built-in XOR model. Use `1`-`4` to move between
-Overview, Train, Clauses, and Artifacts; `e` exports a completed run, `x`
-cancels training, and `?` opens contextual help. After export, press `l` to
+Press `t` to train the built-in XOR model. Use `1`-`5` to move between
+Overview, Train, Clauses, Artifacts, and Search; `e` exports a completed run,
+`x` cancels training, and `?` opens contextual help. After export, press `l` to
 load and verify the artifact, fill its generated raw-record form, and press `r`
 to run inference with a visible preprocessing trace.
 
@@ -120,8 +120,9 @@ The portable artifact is the deployment boundary: training state is frozen and
 lowered into an immutable, content-addressed `.ptm` file. Applications can use
 the Python loader or the independently versioned `ptmrt` runtime.
 
-For the detailed architecture and research records, see the
-[documentation index](docs/README.md). For background reading, use the linked
+For the user manual, developer guide, architecture contracts, RFCs, release
+records, benchmarks, and archive, start at the
+[documentation hub](docs/README.md). For background reading, use the linked
 [research references](docs/references.md); large paper copies are intentionally
 not stored in the repository.
 

@@ -36,3 +36,20 @@ WSL distribution name, compiler installation directory, or GNU Prolog path.
 
 Run `git diff --check` before submitting a change. Do not commit `.venv`, build
 trees, generated artifacts, local benchmark logs, or downloaded research PDFs.
+
+## Documentation changes
+
+The [documentation constitution](docs/_meta/constitution.md) defines factual
+ownership, document states, version policy, and the proposal-to-contract
+lifecycle. Classify every new Markdown page in
+[`docs/_meta/inventory.csv`](docs/_meta/inventory.csv), then run:
+
+```bash
+python scripts/check_docs.py
+python scripts/check_markdown_links.py
+python -m sphinx -W --keep-going -b html -c docs . out/docs/html
+```
+
+Install the documentation toolchain with `python -m pip install -e ".[docs]"`.
+Do not copy CLI syntax, API signatures, capability status, or benchmark results
+into a second authoritative source.

@@ -1,42 +1,34 @@
 # Documentation
 
-## Start here
+PTM has many documentation surfaces but only a few authoritative sources. The
+[documentation constitution](_meta/constitution.md) defines their ownership,
+status, versioning, and proposal-to-contract lifecycle. Existing page paths are
+being preserved during the migration.
+
+## Choose a domain
+
+| Need | Start here |
+| --- | --- |
+| Install, explore, run, or embed PTM | [Manual](manual/index.md) |
+| Contribute or extend PTM | [Developer documentation](developer/index.md) |
+| Review current contracts and accepted decisions | [Architecture](architecture/index.md) |
+| Evaluate proposed directions | [RFCs](rfcs/index.md) |
+| Upgrade or inspect release history | [Releases and migration](releases/index.md) |
+| Reproduce or interpret measurements | [Benchmarks and research](benchmarks/index.md) |
+| Consult superseded implementation records | [Archive](archive/index.md) |
+
+The [documentation inventory](_meta/inventory.md) classifies every current
+page and records its compatibility-preserving destination. The
+[migration plan](_meta/migration-plan.md) defines the bounded implementation
+checkpoints.
+
+## Immediate entry points
 
 - [Installation](../INSTALL.md)
 - [Clean consumer tutorial](consumer-tutorial.md)
+- [Terminal workbench](tui.md)
 - [Compatibility matrix](compatibility.md)
-- [Upgrade guide](../UPGRADING.md)
 - [Contributing](../CONTRIBUTING.md)
+- [Upgrade guide](../UPGRADING.md)
 - [Changelog](../CHANGELOG.md)
 - [Apache 2.0 license](../LICENSE)
-- [Roadmap](roadmap.md)
-
-## Product and runtime guides
-
-- [Terminal workbench](tui.md)
-- [Terminal workbench product plan](textual-tui-plan.md)
-- [Portable model export and runtime](model-export-runtime.md)
-- [Deterministic preprocessing](preprocessing-contract.md)
-- [Streaming data connectors and record transforms](data-connectors.md)
-- [Hostile-input testing and parser ceilings](hostile-input-testing.md)
-- [Bounded Prolog search](bounded-search.md)
-- [C ABI](c-api.md)
-- [Packed TM execution](packed-tm.md)
-- [CUDA packed TM execution](cuda-packed-tm.md)
-
-## Architecture and research records
-
-- [Architecture](architecture.md)
-- [Semantic contract](semantic-contract.md)
-- [Feature templates](feature-templates.md)
-- [Typed Logic AST](logic-ast.md)
-- [Logic compiler](logic-compiler.md)
-- [Logic dataset baseline](logic-dataset-baseline.md)
-- [Logic Class II consolidation](logic-class-ii-consolidation.md)
-- [Logic morphology](logic-morphology.md)
-- [Class II lifecycle](class-ii-lifecycle.md)
-- [Class II persistence](class-ii-persistence.md)
-- [Research references](references.md)
-
-The Dear PyGui dashboard and GPU handoff notes are retained as historical or
-specialist records. They are not the recommended onboarding path.

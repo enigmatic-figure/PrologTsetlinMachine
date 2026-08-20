@@ -39,7 +39,9 @@ best with Textual's color and keyboard support.
 | `r` | Run the typed record in the loaded artifact |
 | `F5` | Run the bounded Prolog request |
 | `F6` | Cancel an active Prolog search |
-| `c` | Toggle clause/prediction detail |
+| `o` | Open the Overview view |
+| `c` | Open the Clauses view |
+| `p` | Open the command palette |
 | `Ctrl+L` | Collapse or expand the event dock |
 | `?` | Open contextual help |
 | `q` | Quit |

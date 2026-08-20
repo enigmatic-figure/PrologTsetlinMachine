@@ -75,6 +75,28 @@ jobs:
           tests/python/test_data_connectors.py
           tests/python/test_record_transforms.py
 
+  documentation:
+    name: Documentation / Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install documentation toolchain
+        run: python -m pip install -e ".[docs]"
+      - name: Validate documentation metadata and links
+        run: |
+          python scripts/check_docs.py
+          python scripts/check_markdown_links.py
+      - name: Build HTML documentation with warnings as errors
+        run: python -m sphinx -W --keep-going -b html -c docs . out/docs/html
+
   prolog:
     name: GNU Prolog bounded search
     runs-on: ubuntu-latest
@@ -264,10 +286,8 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Check release metadata and links
-        run: |
-          python scripts/check_release_metadata.py
-          python scripts/check_markdown_links.py
+      - name: Check release metadata
+        run: python scripts/check_release_metadata.py
       - name: Build source and wheel distributions
         run: |
           python -m pip install build
