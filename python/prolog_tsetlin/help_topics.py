@@ -11,11 +11,25 @@ from types import MappingProxyType
 from typing import Iterable, Mapping
 
 
-class PTMHelpFormatter(
-    argparse.ArgumentDefaultsHelpFormatter,
-    argparse.RawDescriptionHelpFormatter,
-):
-    """Preserve authored paragraphs while exposing parser-owned defaults."""
+class PTMHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Preserve authored paragraphs and show only meaningful static defaults."""
+
+    def _get_help_string(self, action: argparse.Action) -> str | None:
+        help_text = action.help
+        if help_text is None:
+            return None
+        default = action.default
+        should_show_default = (
+            "%(default)" not in help_text
+            and default is not None
+            and default is not argparse.SUPPRESS
+            and default not in ("", [], (), {})
+            and not isinstance(default, bool)
+            and (action.option_strings or action.nargs in (argparse.OPTIONAL, argparse.ZERO_OR_MORE))
+        )
+        if should_show_default:
+            return f"{help_text} (default: %(default)s)"
+        return help_text
 
 
 @dataclass(frozen=True)
@@ -48,12 +62,17 @@ class TUIBindingSpec:
     """One Textual application binding and its user-facing meaning."""
 
     key: str
-    display_key: str
     action: str
     label: str
     description: str
     contexts: tuple[str, ...]
     show: bool = True
+
+    @property
+    def display_key(self) -> str:
+        """Derive presentation from the activation key."""
+
+        return display_key(self.key)
 
 
 _TOPICS = (
@@ -212,6 +231,16 @@ COMMAND_TOPICS: Mapping[str, str] = MappingProxyType(
     }
 )
 
+GROUP_TOPICS: Mapping[str, str] = MappingProxyType(
+    {
+        "artifact": "artifacts",
+        "search": "bounded-search",
+    }
+)
+PARSER_TOPICS: Mapping[str, str] = MappingProxyType(
+    {**GROUP_TOPICS, **COMMAND_TOPICS}
+)
+
 TUI_VIEWS = ("overview", "train", "clauses", "artifacts", "search")
 TUI_VIEW_TOPICS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
@@ -226,18 +255,17 @@ _ALL_VIEWS = TUI_VIEWS
 
 TUI_BINDINGS = (
     TUIBindingSpec(
-        "1", "1", "show_overview", "Overview", "Open Overview.", _ALL_VIEWS
+        "1", "show_overview", "Overview", "Open Overview.", _ALL_VIEWS
     ),
-    TUIBindingSpec("2", "2", "show_train", "Train", "Open Train.", _ALL_VIEWS),
+    TUIBindingSpec("2", "show_train", "Train", "Open Train.", _ALL_VIEWS),
     TUIBindingSpec(
-        "3", "3", "show_clauses", "Clauses", "Open Clauses.", _ALL_VIEWS
+        "3", "show_clauses", "Clauses", "Open Clauses.", _ALL_VIEWS
     ),
     TUIBindingSpec(
-        "4", "4", "show_artifacts", "Artifacts", "Open Artifacts.", _ALL_VIEWS
+        "4", "show_artifacts", "Artifacts", "Open Artifacts.", _ALL_VIEWS
     ),
-    TUIBindingSpec("5", "5", "show_search", "Search", "Open Search.", _ALL_VIEWS),
+    TUIBindingSpec("5", "show_search", "Search", "Open Search.", _ALL_VIEWS),
     TUIBindingSpec(
-        "t",
         "t",
         "train",
         "Train XOR",
@@ -246,14 +274,12 @@ TUI_BINDINGS = (
     ),
     TUIBindingSpec(
         "x",
-        "x",
         "cancel",
         "Cancel",
         "Cancel active training or search.",
         ("train", "clauses", "search"),
     ),
     TUIBindingSpec(
-        "e",
         "e",
         "export",
         "Export",
@@ -263,7 +289,6 @@ TUI_BINDINGS = (
     ),
     TUIBindingSpec(
         "l",
-        "l",
         "load_artifact",
         "Load artifact",
         "Load and verify the artifact path.",
@@ -271,7 +296,6 @@ TUI_BINDINGS = (
         False,
     ),
     TUIBindingSpec(
-        "r",
         "r",
         "run_record",
         "Run record",
@@ -281,7 +305,6 @@ TUI_BINDINGS = (
     ),
     TUIBindingSpec(
         "f5",
-        "F5",
         "search",
         "Run search",
         "Run the bounded search request.",
@@ -290,7 +313,6 @@ TUI_BINDINGS = (
     ),
     TUIBindingSpec(
         "f6",
-        "F6",
         "cancel_search",
         "Cancel search",
         "Cancel the active bounded search.",
@@ -298,13 +320,12 @@ TUI_BINDINGS = (
         False,
     ),
     TUIBindingSpec(
-        "o", "o", "show_overview", "Overview", "Open Overview.", _ALL_VIEWS, False
+        "o", "show_overview", "Overview", "Open Overview.", _ALL_VIEWS, False
     ),
     TUIBindingSpec(
-        "c", "c", "show_clauses", "Clauses", "Open Clauses.", _ALL_VIEWS, False
+        "c", "show_clauses", "Clauses", "Open Clauses.", _ALL_VIEWS, False
     ),
     TUIBindingSpec(
-        "p",
         "p",
         "command_palette",
         "Palette",
@@ -313,18 +334,33 @@ TUI_BINDINGS = (
         False,
     ),
     TUIBindingSpec(
-        "question_mark", "?", "help", "Help", "Open contextual help.", _ALL_VIEWS
+        "question_mark", "help", "Help", "Open contextual help.", _ALL_VIEWS
     ),
     TUIBindingSpec(
         "ctrl+l",
-        "Ctrl+L",
         "events",
         "Events",
         "Collapse or expand the event dock.",
         _ALL_VIEWS,
     ),
-    TUIBindingSpec("q", "q", "quit", "Quit", "Quit the workbench.", _ALL_VIEWS),
+    TUIBindingSpec("q", "quit", "Quit", "Quit the workbench.", _ALL_VIEWS),
 )
+
+
+_DISPLAY_KEY_OVERRIDES: Mapping[str, str] = MappingProxyType(
+    {
+        "question_mark": "?",
+        "ctrl+l": "Ctrl+L",
+    }
+)
+
+
+def display_key(key: str) -> str:
+    """Return the display spelling for one Textual activation key."""
+
+    if key.startswith("f") and key[1:].isdigit():
+        return key.upper()
+    return _DISPLAY_KEY_OVERRIDES.get(key, key)
 
 
 def topic(topic_id: str) -> HelpTopic:
@@ -446,17 +482,13 @@ def render_tui_help(view: str) -> tuple[str, str]:
 
     values = tuple(topic(topic_id) for topic_id in TUI_VIEW_TOPICS[view])
     bindings = bindings_for_view(view)
-    navigation = tuple(binding for binding in bindings if binding.key.isdigit())
-    controls = tuple(binding for binding in bindings if not binding.key.isdigit())
-    labels = ", ".join(binding.label for binding in navigation)
     lines = [
         *(value.summary for value in values),
         "",
         "KEYBOARD",
-        f"1-5  Switch views: {labels}",
     ]
     lines.extend(
-        f"{binding.display_key:<6}{binding.description}" for binding in controls
+        f"{binding.display_key:<6}{binding.description}" for binding in bindings
     )
     requirements = tuple(
         dict.fromkeys(

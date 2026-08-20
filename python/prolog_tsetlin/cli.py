@@ -12,6 +12,7 @@ from typing import Sequence
 from ._version import __version__
 from .artifact import PAArtifact
 from .help_topics import (
+    PARSER_TOPICS,
     TOPIC_ORDER,
     parser_topic_kwargs,
     render_topic,
@@ -326,6 +327,20 @@ def _help(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _topic_parser(
+    subparsers: argparse._SubParsersAction,
+    name: str,
+    command_path: str,
+    **kwargs: object,
+) -> argparse.ArgumentParser:
+    """Create a parser whose conceptual owner comes from the shared registry."""
+
+    topic_id = PARSER_TOPICS[command_path]
+    child = subparsers.add_parser(name, **kwargs, **parser_topic_kwargs(topic_id))
+    child.set_defaults(_help_topic=topic_id)
+    return child
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ptm",
@@ -340,10 +355,11 @@ def _parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {package_version}"
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    help_command = commands.add_parser(
+    help_command = _topic_parser(
+        commands,
+        "help",
         "help",
         help="list or explain conceptual help topics",
-        **parser_topic_kwargs("workbench"),
     )
     help_command.add_argument(
         "topic",
@@ -354,10 +370,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     help_command.set_defaults(handler=_help)
 
-    tui = commands.add_parser(
+    tui = _topic_parser(
+        commands,
+        "tui",
         "tui",
         help="launch the optional terminal workbench",
-        **parser_topic_kwargs("workbench"),
     )
     tui.add_argument(
         "--workspace",
@@ -369,18 +386,20 @@ def _parser() -> argparse.ArgumentParser:
     )
     tui.set_defaults(handler=_tui)
 
-    artifact = commands.add_parser(
+    artifact = _topic_parser(
+        commands,
+        "artifact",
         "artifact",
         help="inspect, verify, or run a portable .ptm artifact",
-        **parser_topic_kwargs("artifacts"),
     )
     artifact_commands = artifact.add_subparsers(
         dest="artifact_command", required=True
     )
-    artifact_inspect = artifact_commands.add_parser(
+    artifact_inspect = _topic_parser(
+        artifact_commands,
         "inspect",
+        "artifact inspect",
         help="validate and describe an artifact",
-        **parser_topic_kwargs("artifacts"),
     )
     artifact_inspect.add_argument("model", type=Path, help="portable .ptm artifact")
     artifact_inspect.add_argument(
@@ -391,10 +410,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     artifact_inspect.set_defaults(handler=_artifact_inspect)
 
-    artifact_verify = artifact_commands.add_parser(
+    artifact_verify = _topic_parser(
+        artifact_commands,
         "verify",
+        "artifact verify",
         help="check integrity, contracts, and conformance vectors",
-        **parser_topic_kwargs("artifacts"),
     )
     artifact_verify.add_argument("model", type=Path, help="portable .ptm artifact")
     artifact_verify.add_argument(
@@ -402,10 +422,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     artifact_verify.set_defaults(handler=_artifact_verify)
 
-    artifact_run = artifact_commands.add_parser(
+    artifact_run = _topic_parser(
+        artifact_commands,
         "run-record",
+        "artifact run-record",
         help="preprocess typed JSON records and run inference",
-        **parser_topic_kwargs("preprocessing"),
     )
     artifact_run.add_argument("model", type=Path, help="portable .ptm artifact")
     record_source = artifact_run.add_mutually_exclusive_group(required=True)
@@ -426,10 +447,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     artifact_run.set_defaults(handler=_artifact_run_record)
 
-    search = commands.add_parser(
+    search = _topic_parser(
+        commands,
+        "search",
         "search",
         help="run a resource-bounded GNU Prolog search",
-        **parser_topic_kwargs("bounded-search"),
     )
     search_commands = search.add_subparsers(dest="search_kind", required=True)
     search_help = {
@@ -440,10 +462,12 @@ def _parser() -> argparse.ArgumentParser:
         SearchKind.REPAIR: "repair a parent tree from counterexamples",
     }
     for kind, help_text in search_help.items():
-        search_command = search_commands.add_parser(
+        command_path = f"search {kind.value}"
+        search_command = _topic_parser(
+            search_commands,
             kind.value,
+            command_path,
             help=help_text,
-            **parser_topic_kwargs("bounded-search"),
         )
         search_command.add_argument(
             "request",
@@ -474,10 +498,11 @@ def _parser() -> argparse.ArgumentParser:
             search_command.add_argument("--name", help="exported artifact title")
         search_command.set_defaults(handler=_search)
 
-    export = commands.add_parser(
+    export = _topic_parser(
+        commands,
+        "export",
         "export",
         help="freeze a scalar TM snapshot JSON file into a .ptm artifact",
-        **parser_topic_kwargs("artifacts"),
     )
     export.add_argument("snapshot", help="scalar TM snapshot JSON file")
     export.add_argument("output", help="destination .ptm artifact")
@@ -506,10 +531,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     export.set_defaults(handler=_export)
 
-    export_logic = commands.add_parser(
+    export_logic = _topic_parser(
+        commands,
+        "export-logic",
         "export-logic",
         help="package a fixed LogicProgram32 JSON file into a .ptm artifact",
-        **parser_topic_kwargs("artifacts"),
     )
     export_logic.add_argument("program", help="fixed LogicProgram32 JSON file")
     export_logic.add_argument("output", help="destination .ptm artifact")
@@ -529,7 +555,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     export_logic.add_argument(
         "--binding-names",
-        help="comma-separated binding names (default: A,B,C,D,E)",
+        default="A,B,C,D,E",
+        help="comma-separated binding names",
     )
     export_logic.add_argument(
         "--binding-literal-ids", help="comma-separated integer literal IDs"
@@ -541,10 +568,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     export_logic.set_defaults(handler=_export_logic)
 
-    export_pa = commands.add_parser(
+    export_pa = _topic_parser(
+        commands,
+        "export-pa",
         "export-pa",
         help="package a validated Class II PA JSON artifact into a .ptm file",
-        **parser_topic_kwargs("artifacts"),
     )
     export_pa.add_argument("artifact", help="validated Class II PA JSON file")
     export_pa.add_argument("output", help="destination .ptm artifact")

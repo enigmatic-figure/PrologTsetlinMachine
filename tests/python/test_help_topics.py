@@ -12,10 +12,12 @@ from prolog_tsetlin.cli import _parser, main as cli_main
 from prolog_tsetlin.help_topics import (
     COMMAND_TOPICS,
     HELP_TOPICS,
+    PARSER_TOPICS,
     TOPIC_ORDER,
     TUI_BINDINGS,
     TUI_VIEWS,
     TUI_VIEW_TOPICS,
+    display_key,
     example_argv,
     render_manual_reference,
     render_tui_help,
@@ -43,9 +45,32 @@ def _leaf_commands(
     return paths
 
 
+def _parser_topics(
+    parser: argparse.ArgumentParser, prefix: tuple[str, ...] = ()
+) -> dict[str, str | None]:
+    topics: dict[str, str | None] = {}
+    subparsers = tuple(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    if not subparsers:
+        return topics
+    assert len(subparsers) == 1
+    for name, child in subparsers[0].choices.items():
+        path = (*prefix, name)
+        topics[" ".join(path)] = child.get_default("_help_topic")
+        topics.update(_parser_topics(child, path))
+    return topics
+
+
 def test_every_cli_leaf_has_exactly_one_topic() -> None:
     assert _leaf_commands(_parser()) == set(COMMAND_TOPICS)
     assert set(COMMAND_TOPICS.values()) <= set(HELP_TOPICS)
+
+
+def test_every_parser_uses_its_registered_topic() -> None:
+    assert _parser_topics(_parser()) == dict(PARSER_TOPICS)
 
 
 def test_topics_are_well_formed_and_manual_targets_exist() -> None:
@@ -113,10 +138,26 @@ def test_contextual_tui_help_uses_registered_controls() -> None:
             HELP_TOPICS[topic_id].title.upper() in title
             for topic_id in TUI_VIEW_TOPICS[view]
         )
-        assert "1-5" in body
-        for binding in TUI_BINDINGS:
-            if view in binding.contexts and not binding.key.isdigit():
-                assert binding.display_key in body
+        keyboard = body.split("KEYBOARD\n", 1)[1].split("\n\nREQUIREMENTS", 1)[0]
+        expected = "\n".join(
+            f"{binding.display_key:<6}{binding.description}"
+            for binding in TUI_BINDINGS
+            if view in binding.contexts
+        )
+        assert keyboard == expected
+
+
+def test_tui_display_keys_are_derived_from_activation_keys() -> None:
+    expected_overrides = {
+        "f5": "F5",
+        "f6": "F6",
+        "question_mark": "?",
+        "ctrl+l": "Ctrl+L",
+    }
+    for binding in TUI_BINDINGS:
+        expected = expected_overrides.get(binding.key, binding.key)
+        assert display_key(binding.key) == expected
+        assert binding.display_key == expected
 
 
 def test_generated_manual_reference_is_current() -> None:
@@ -145,3 +186,26 @@ def test_subcommand_help_links_to_shared_topic() -> None:
         cli_main(["artifact", "run-record", "--help"])
     assert stopped.value.code == 0
     assert "ptm help preprocessing" in stdout.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_default"),
+    (
+        (("tui", "--help"), "(default: xor)"),
+        (("export-logic", "--help"), "(default: A,B,C,D,E)"),
+        (("search", "threshold", "--help"), None),
+    ),
+)
+def test_subcommand_help_hides_internal_sentinel_defaults(
+    argv: tuple[str, ...], expected_default: str | None
+) -> None:
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout), pytest.raises(SystemExit) as stopped:
+        cli_main(argv)
+    assert stopped.value.code == 0
+    rendered = stdout.getvalue()
+    assert "(default: None)" not in rendered
+    assert "(default: [])" not in rendered
+    assert "(default: )" not in rendered
+    if expected_default is not None:
+        assert rendered.count(expected_default) == 1
