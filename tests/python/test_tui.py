@@ -151,6 +151,12 @@ async def test_tui_navigation_and_help_remain_available_at_80x24() -> None:
         await pilot.press("question_mark")
         await pilot.pause()
         assert app.screen.query_one("#help-dialog") is not None
+        assert "BOUNDED SYMBOLIC SEARCH" in str(
+            app.screen.query_one("#help-title").render()
+        )
+        help_copy = str(app.screen.query_one("#help-copy").render())
+        assert "F5" in help_copy
+        assert "GNU Prolog" in help_copy
         await pilot.press("escape")
 
 

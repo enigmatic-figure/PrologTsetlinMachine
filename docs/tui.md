@@ -19,32 +19,22 @@ best with Textual's color and keyboard support.
 
 ## First session
 
-1. Press `t` to train with the displayed configuration.
+Open contextual help in each view or keep the generated
+[help-topic and keyboard reference](manual/reference/help-topics.md) nearby.
+
+1. Start training with the displayed configuration.
 2. Watch epoch progress and accuracy in the event dock.
-3. Press `2` for predictions and `3` for clause state.
-4. Press `e` to export the completed model as a `.ptm` artifact.
-5. Press `4`, then `l`, to open and verify the exported artifact.
+3. Compare predictions with the learned clause state.
+4. Export the completed model as a `.ptm` artifact.
+5. Open and verify the exported artifact in the Artifacts view.
 6. Enter `true` or `false` for the generated `x0` and `x1` fields, then press
-   `r` to inspect preprocessing and run inference.
+   the Run record action to inspect preprocessing and run inference.
 
 ## Keyboard map
 
-| Key | Action |
-| --- | --- |
-| `1`-`5` | Switch workbench views |
-| `t` | Start training |
-| `x` | Cancel the active job |
-| `e` | Export the completed model |
-| `l` | Load and verify the artifact path |
-| `r` | Run the typed record in the loaded artifact |
-| `F5` | Run the bounded Prolog request |
-| `F6` | Cancel an active Prolog search |
-| `o` | Open the Overview view |
-| `c` | Open the Clauses view |
-| `p` | Open the command palette |
-| `Ctrl+L` | Collapse or expand the event dock |
-| `?` | Open contextual help |
-| `q` | Quit |
+The [generated workbench-control tables](manual/reference/help-topics.md) come
+from the same registry that constructs Textual's application bindings and
+contextual help. Update the registry rather than copying keys into this guide.
 
 Configuration changes are validated before a job starts. A completed result is
 marked stale when its source configuration changes, so it cannot be exported

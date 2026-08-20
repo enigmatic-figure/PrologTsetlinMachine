@@ -29,11 +29,11 @@ python -m pip install ".[tui]"
 ptm tui --demo xor
 ```
 
-Press `t` to train the built-in XOR model. Use `1`-`5` to move between
-Overview, Train, Clauses, Artifacts, and Search; `e` exports a completed run,
-`x` cancels training, and `?` opens contextual help. After export, press `l` to
-load and verify the artifact, fill its generated raw-record form, and press `r`
-to run inference with a visible preprocessing trace.
+The Overview screen and footer guide the built-in XOR journey through training,
+clause inspection, export, verification, and raw-record inference. Contextual
+help is available in every view; the generated
+[help-topic and keyboard reference](docs/manual/reference/help-topics.md) is the
+authoritative offline copy.
 
 For the dependency-free Python core instead:
 

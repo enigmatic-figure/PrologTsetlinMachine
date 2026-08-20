@@ -78,10 +78,10 @@ before building another frontend:
 
 ### 1. Curious first-time user
 
-Launch `ptm tui`, accept **Try XOR**, press `t` to train, watch epoch progress,
-see four predictions and accuracy, open a clause, then press `e` to export a
-verified artifact. Context help explains each parameter at the point of use.
-No paper or manual is prerequisite.
+Launch `ptm tui`, accept **Try XOR**, start training, watch epoch progress, see
+four predictions and accuracy, open a clause, then export a verified artifact.
+Context help explains each parameter at the point of use. No paper or manual is
+prerequisite.
 
 ### 2. Researcher iterating on a model
 
@@ -132,10 +132,11 @@ bindings), never duplicate its decoder semantics in presentation code.
   errors, and stale results.
 - **Content:** a screen composed of focusable panels; selection drives a detail
   drawer rather than proliferating modals.
-- **Event dock:** tail-like structured stream, collapsible with `ctrl+l`, with
-  severity/source filters and pause/follow behavior.
-- **Footer:** only currently valid bindings; `?` opens contextual help and `p`
-  opens the command palette.
+- **Event dock:** tail-like structured stream with collapse/expand,
+  severity/source filters, and pause/follow behavior.
+- **Footer:** only currently valid bindings, including contextual help and the
+  command palette. The generated [workbench-control tables](manual/reference/help-topics.md)
+  own the current keys.
 
 ### Screens
 

@@ -110,8 +110,10 @@ example before the service reports success.
 
 ## Terminal workbench
 
-Press `5` in `ptm tui` to open Search. Choose a search kind to load its bounded
-example, edit the JSON and deadline, then press `F5`. The status line shows the
-candidate ceiling before launch. Press `F6` to cancel. Repair results populate a
-counterexample table; portable tree/repair results can be exported and then
-opened in the Artifact workspace.
+Open Search in `ptm tui`, choose a search kind to load its bounded example, and
+edit the JSON and deadline before running it. The status line shows the
+candidate ceiling before launch. Repair results populate a counterexample table;
+portable tree/repair results can be exported and then opened in the Artifact
+workspace. The generated
+[workbench-control tables](manual/reference/help-topics.md) list the current run
+and cancel bindings.

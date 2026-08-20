@@ -34,6 +34,7 @@ docs/logic-compiler.md,architecture,contract,current,authoritative,yes,docs/arch
 docs/logic-dataset-baseline.md,benchmarks,benchmark-record,current,record,yes,docs/benchmarks/logic-dataset-baseline.md,move-compatible
 docs/logic-morphology.md,architecture,contract,current,authoritative,yes,docs/architecture/logic-morphology.md,move-compatible
 docs/manual/index.md,manual,landing,current,derived,yes,docs/manual/index.md,retain
+docs/manual/reference/help-topics.md,manual,reference,current,derived,yes,docs/manual/reference/help-topics.md,retain
 docs/model-export-runtime.md,manual,reference,mixed,transitional,yes,docs/manual/reference/model-export-runtime.md,split
 docs/packed-tm.md,architecture,contract,mixed,transitional,yes,docs/architecture/packed-tm.md,split
 docs/preprocessing-contract.md,manual,reference,current,authoritative,yes,docs/manual/reference/preprocessing.md,move-compatible

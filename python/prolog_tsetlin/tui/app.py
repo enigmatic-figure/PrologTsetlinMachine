@@ -30,6 +30,7 @@ from textual.widgets import (
     TextArea,
 )
 
+from ..help_topics import TUI_BINDINGS, binding_for_action, render_tui_help
 from ..prolog_bridge import (
     NoDecisionTreeSolution,
     NoFeatureTemplateSolution,
@@ -68,12 +69,26 @@ from ..services.training import (
 from .models import JobState, SessionState
 
 
+def _navigation_label(action: str) -> str:
+    binding = binding_for_action(action)
+    return f"{binding.display_key}  {binding.label}"
+
+
+def _button_label(action: str) -> str:
+    binding = binding_for_action(action)
+    return f"{binding.label} [{binding.display_key}]"
+
+
+def _binding_key(action: str) -> str:
+    return binding_for_action(action).display_key
+
+
 class HelpScreen(ModalScreen[None]):
     """Compact contextual help that works at terminal sizes."""
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
-        Binding("question_mark", "dismiss", "Close", show=False),
+        Binding(binding_for_action("help").key, "dismiss", "Close", show=False),
     ]
 
     CSS = """
@@ -87,30 +102,15 @@ class HelpScreen(ModalScreen[None]):
     #help-close { margin-top: 1; width: 100%; }
     """
 
+    def __init__(self, view: str) -> None:
+        super().__init__()
+        self.view = view
+
     def compose(self) -> ComposeResult:
+        title, copy = render_tui_help(self.view)
         with Vertical(id="help-dialog"):
-            yield Static("PTM WORKBENCH / QUICK REFERENCE", id="help-title")
-            yield Static(
-                "1-5 switch workspaces\n"
-                "t   train the built-in XOR model\n"
-                "x   cancel active training or search\n"
-                "e   export the completed run\n"
-                "l   load and verify the artifact path\n"
-                "r   run the loaded artifact record\n"
-                "F5  run the bounded search request\n"
-                "F6  cancel the active search\n"
-                "o   open the Overview workspace\n"
-                "c   open the Clauses workspace\n"
-                "Ctrl+L toggle the event dock\n"
-                "Tab / Shift+Tab move between controls\n"
-                "p   open Textual's command palette\n"
-                "?   open or close this help\n"
-                "q   quit\n\n"
-                "Clauses are pattern voters. Specificity controls how readily "
-                "they become specialized; states per action controls automaton "
-                "memory depth; threshold scales the signed vote.",
-                id="help-copy",
-            )
+            yield Static(title, id="help-title")
+            yield Static(copy, id="help-copy")
             yield Button("Close", id="help-close", variant="primary")
 
     def action_dismiss(self) -> None:
@@ -243,24 +243,8 @@ class PTMApp(App[None]):
     Screen.compact #events { height: 5; }
     """
     BINDINGS = [
-        Binding("1", "show_overview", "Overview"),
-        Binding("2", "show_train", "Train"),
-        Binding("3", "show_clauses", "Clauses"),
-        Binding("4", "show_artifacts", "Artifacts"),
-        Binding("5", "show_search", "Search"),
-        Binding("t", "train", "Train XOR"),
-        Binding("x", "cancel", "Cancel"),
-        Binding("e", "export", "Export", show=False),
-        Binding("l", "load_artifact", "Load artifact", show=False),
-        Binding("r", "run_record", "Run record", show=False),
-        Binding("f5", "search", "Run search", show=False),
-        Binding("f6", "cancel_search", "Cancel search", show=False),
-        Binding("o", "show_overview", "Overview", show=False),
-        Binding("c", "show_clauses", "Clauses", show=False),
-        Binding("p", "command_palette", "Palette", show=False),
-        Binding("question_mark", "help", "Help"),
-        Binding("ctrl+l", "events", "Events"),
-        Binding("q", "quit", "Quit"),
+        Binding(binding.key, binding.action, binding.label, show=binding.show)
+        for binding in TUI_BINDINGS
     ]
 
     def __init__(self, *, workspace: Path | None = None, demo: str = "xor") -> None:
@@ -280,11 +264,15 @@ class PTMApp(App[None]):
         with Horizontal(id="shell"):
             with Vertical(id="rail"):
                 yield Static("PTM\nWORKBENCH", id="brand")
-                yield Button("1  Overview", id="nav-overview", classes="active")
-                yield Button("2  Train", id="nav-train")
-                yield Button("3  Clauses", id="nav-clauses")
-                yield Button("4  Artifacts", id="nav-artifacts")
-                yield Button("5  Search", id="nav-search")
+                yield Button(
+                    _navigation_label("show_overview"),
+                    id="nav-overview",
+                    classes="active",
+                )
+                yield Button(_navigation_label("show_train"), id="nav-train")
+                yield Button(_navigation_label("show_clauses"), id="nav-clauses")
+                yield Button(_navigation_label("show_artifacts"), id="nav-artifacts")
+                yield Button(_navigation_label("show_search"), id="nav-search")
                 yield Static(
                     "LOG-CENTRIC MODE\n\nBounded Prolog search is available when GNU "
                     "Prolog passes environment preflight.",
@@ -314,7 +302,8 @@ class PTMApp(App[None]):
                             yield Static("ENVIRONMENT PREFLIGHT", classes="card-title")
                             yield DataTable(id="capabilities", zebra_stripes=True)
                     yield Static(
-                        "NEXT  Press t to train with reproducible defaults. "
+                        "NEXT  Press "
+                        f"{_binding_key('train')} to train with reproducible defaults. "
                         "No native build is required.",
                         id="overview-next",
                     )
@@ -339,8 +328,16 @@ class PTMApp(App[None]):
                         yield Input(id="config-seed", type="integer")
                         yield Static("", id="validation")
                         with Horizontal(id="train-actions"):
-                            yield Button("Train [t]", id="train-button", variant="success")
-                            yield Button("Cancel [x]", id="cancel-button", disabled=True)
+                            yield Button(
+                                _button_label("train"),
+                                id="train-button",
+                                variant="success",
+                            )
+                            yield Button(
+                                _button_label("cancel"),
+                                id="cancel-button",
+                                disabled=True,
+                            )
                     with Vertical(id="results"):
                         yield Static("READY", id="job")
                         yield ProgressBar(
@@ -354,7 +351,9 @@ class PTMApp(App[None]):
                         yield Sparkline([0.0], id="accuracy-spark")
                         yield DataTable(id="predictions", zebra_stripes=True)
                         yield Static(
-                            "Press t to train the deterministic scalar oracle.",
+                            "Press "
+                            f"{_binding_key('train')} to train the deterministic "
+                            "scalar oracle.",
                             id="next-action",
                         )
                 with Vertical(id="view-clauses", classes="view"):
@@ -370,7 +369,8 @@ class PTMApp(App[None]):
                         cursor_type="row",
                     )
                     yield Static(
-                        "No snapshot yet. Press t to train, then return here.",
+                        "No snapshot yet. Press "
+                        f"{_binding_key('train')} to train, then return here.",
                         id="clause-detail",
                     )
                 with Horizontal(id="view-artifacts", classes="view"):
@@ -389,7 +389,8 @@ class PTMApp(App[None]):
                         yield Label("Description", classes="field-label")
                         yield Input(id="artifact-description")
                         yield Button(
-                            "Export completed run [e]",
+                            "Export completed run "
+                            f"[{_binding_key('export')}]",
                             id="export-button",
                             variant="primary",
                             disabled=True,
@@ -405,7 +406,7 @@ class PTMApp(App[None]):
                         yield Input(id="artifact-open-path")
                         with Horizontal(id="artifact-open-actions"):
                             yield Button(
-                                "Load + verify [l]",
+                                f"Load + verify [{_binding_key('load_artifact')}]",
                                 id="load-artifact-button",
                                 variant="success",
                             )
@@ -423,7 +424,7 @@ class PTMApp(App[None]):
                         yield Static("RAW RECORD", id="record-heading")
                         yield Vertical(id="record-fields")
                         yield Button(
-                            "Run typed record [r]",
+                            f"Run typed record [{_binding_key('run_record')}]",
                             id="run-record-button",
                             variant="primary",
                             disabled=True,
@@ -462,12 +463,14 @@ class PTMApp(App[None]):
                         )
                         with Horizontal(id="search-actions"):
                             yield Button(
-                                "Run search [F5]",
+                                _button_label("search"),
                                 id="search-button",
                                 variant="success",
                             )
                             yield Button(
-                                "Cancel [F6]", id="search-cancel-button", disabled=True
+                                _button_label("cancel_search"),
+                                id="search-cancel-button",
+                                disabled=True,
                             )
                     with Vertical(id="search-result-panel"):
                         yield Static("READY / NO SEARCH RUN", id="search-status")
@@ -591,7 +594,8 @@ class PTMApp(App[None]):
             self.query_one("#job", Static).update("SUCCEEDED / STALE CONFIGURATION")
             self.query_one("#metric-run", Static).update("RUN\nSTALE CONFIG")
             self.query_one("#next-action", Static).update(
-                "The visible results belong to the previous settings. Press t to retrain."
+                "The visible results belong to the previous settings. Press "
+                f"{_binding_key('train')} to retrain."
             )
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -610,7 +614,7 @@ class PTMApp(App[None]):
             f"READY / {kind.value.upper()} DEMO LOADED"
         )
         self.query_one("#search-result", TextArea).text = (
-            "Edit the bounded request or press F5 to run it."
+            f"Edit the bounded request or press {_binding_key('search')} to run it."
         )
         self.query_one("#counterexamples", DataTable).clear()
         self.query_one("#search-export-button", Button).disabled = True
@@ -783,7 +787,8 @@ class PTMApp(App[None]):
         self.query_one("#run-record-button", Button).disabled = not bool(fields)
         self.query_one("#feature-trace", DataTable).clear()
         self.query_one("#artifact-inference", Static).update(
-            "Enter one typed record, then press r to materialize and run it."
+            "Enter one typed record, then press "
+            f"{_binding_key('run_record')} to materialize and run it."
             if fields
             else "Raw-record inference is unavailable for this artifact."
         )
@@ -859,7 +864,9 @@ class PTMApp(App[None]):
         self.query_one("#events").toggle_class("hidden")
 
     def action_help(self) -> None:
-        self.push_screen(HelpScreen())
+        current = self.query_one("#workspace", ContentSwitcher).current
+        view = current.removeprefix("view-") if current else "overview"
+        self.push_screen(HelpScreen(view))
 
     def action_search(self) -> None:
         if self.session.search_state in (
@@ -1151,7 +1158,8 @@ class PTMApp(App[None]):
     def _show_cancelled(self, message: str) -> None:
         self._set_job_state(JobState.CANCELLED, "CANCELLED")
         self.query_one("#next-action", Static).update(
-            "Adjust the configuration or press t to try again."
+            "Adjust the configuration or press "
+            f"{_binding_key('train')} to try again."
         )
         self._emit("training", "job_state", message=message)
 
@@ -1167,7 +1175,8 @@ class PTMApp(App[None]):
             progress=result.request.epochs,
         )
         self.query_one("#next-action", Static).update(
-            "Press 3 to inspect learned clauses or 4 to export a portable model."
+            f"Press {_binding_key('show_clauses')} to inspect learned clauses or "
+            f"{_binding_key('show_artifacts')} to export a portable model."
         )
         predictions = self.query_one("#predictions", DataTable)
         for row, target, prediction in zip(result.rows, result.targets, result.predictions):
@@ -1223,7 +1232,8 @@ class PTMApp(App[None]):
         self.action_show_artifacts()
         if self.session.run is None or self.session.job_state is not JobState.SUCCEEDED:
             self.query_one("#artifact-status", Static).update(
-                "NO COMPLETED RUN / Press t to train before exporting."
+                "NO COMPLETED RUN / Press "
+                f"{_binding_key('train')} to train before exporting."
             )
             return
         raw_path = self.query_one("#artifact-path", Input).value.strip()
@@ -1254,7 +1264,8 @@ class PTMApp(App[None]):
         self.query_one("#artifact-details", Static).update(
             f"EXPORTED ARTIFACT READY TO LOAD\n{summary.path}\n\n"
             f"Artifact ID\n{summary.artifact_id}\n\n"
-            "Press l to open its schema-driven record form."
+            f"Press {_binding_key('load_artifact')} to open its schema-driven "
+            "record form."
         )
         self._update_overview()
         self._emit(

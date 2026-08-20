@@ -20,6 +20,7 @@ explanation.
 
 ## Reference
 
+- [Generated help topics and workbench controls](reference/help-topics.md)
 - [C ABI](../c-api.md)
 - [Deterministic preprocessing contract](../preprocessing-contract.md)
 - [Typed feature templates](../feature-templates.md)
@@ -38,6 +39,7 @@ For supported version combinations, see the release-owned
 ../bounded-search
 ../model-export-runtime
 ../data-connectors
+reference/help-topics
 ../c-api
 ../preprocessing-contract
 ../feature-templates

@@ -11,6 +11,12 @@ from typing import Sequence
 
 from ._version import __version__
 from .artifact import PAArtifact
+from .help_topics import (
+    TOPIC_ORDER,
+    parser_topic_kwargs,
+    render_topic,
+    render_topic_index,
+)
 from .logic_consolidation import (
     FixedLogicInstruction,
     FixedLogicOpcode,
@@ -315,8 +321,17 @@ def _export_pa(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _help(arguments: argparse.Namespace) -> int:
+    print(render_topic(arguments.topic) if arguments.topic else render_topic_index())
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ptm")
+    parser = argparse.ArgumentParser(
+        prog="ptm",
+        description="Train, inspect, search, and package deterministic PTM models.",
+        epilog="Conceptual help and examples: ptm help [TOPIC]",
+    )
     try:
         package_version = version("prolog-tsetlin-machine")
     except PackageNotFoundError:
@@ -325,38 +340,74 @@ def _parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {package_version}"
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    tui = commands.add_parser("tui", help="launch the optional terminal workbench")
-    tui.add_argument("--workspace", type=Path)
-    tui.add_argument("--demo", choices=("xor",), default="xor")
+    help_command = commands.add_parser(
+        "help",
+        help="list or explain conceptual help topics",
+        **parser_topic_kwargs("workbench"),
+    )
+    help_command.add_argument(
+        "topic",
+        nargs="?",
+        choices=TOPIC_ORDER,
+        metavar="TOPIC",
+        help="conceptual topic to explain; omit to list available topics",
+    )
+    help_command.set_defaults(handler=_help)
+
+    tui = commands.add_parser(
+        "tui",
+        help="launch the optional terminal workbench",
+        **parser_topic_kwargs("workbench"),
+    )
+    tui.add_argument(
+        "--workspace",
+        type=Path,
+        help="directory used for artifacts and workbench state",
+    )
+    tui.add_argument(
+        "--demo", choices=("xor",), default="xor", help="initial demonstration dataset"
+    )
     tui.set_defaults(handler=_tui)
 
     artifact = commands.add_parser(
-        "artifact", help="inspect, verify, or run a portable .ptm artifact"
+        "artifact",
+        help="inspect, verify, or run a portable .ptm artifact",
+        **parser_topic_kwargs("artifacts"),
     )
     artifact_commands = artifact.add_subparsers(
         dest="artifact_command", required=True
     )
     artifact_inspect = artifact_commands.add_parser(
-        "inspect", help="validate and describe an artifact"
+        "inspect",
+        help="validate and describe an artifact",
+        **parser_topic_kwargs("artifacts"),
     )
-    artifact_inspect.add_argument("model", type=Path)
+    artifact_inspect.add_argument("model", type=Path, help="portable .ptm artifact")
     artifact_inspect.add_argument(
         "--manifest", action="store_true", help="include the complete manifest"
     )
-    artifact_inspect.add_argument("--pretty", action="store_true")
+    artifact_inspect.add_argument(
+        "--pretty", action="store_true", help="indent JSON output"
+    )
     artifact_inspect.set_defaults(handler=_artifact_inspect)
 
     artifact_verify = artifact_commands.add_parser(
-        "verify", help="check integrity, contracts, and conformance vectors"
+        "verify",
+        help="check integrity, contracts, and conformance vectors",
+        **parser_topic_kwargs("artifacts"),
     )
-    artifact_verify.add_argument("model", type=Path)
-    artifact_verify.add_argument("--pretty", action="store_true")
+    artifact_verify.add_argument("model", type=Path, help="portable .ptm artifact")
+    artifact_verify.add_argument(
+        "--pretty", action="store_true", help="indent JSON output"
+    )
     artifact_verify.set_defaults(handler=_artifact_verify)
 
     artifact_run = artifact_commands.add_parser(
-        "run-record", help="preprocess typed JSON records and run inference"
+        "run-record",
+        help="preprocess typed JSON records and run inference",
+        **parser_topic_kwargs("preprocessing"),
     )
-    artifact_run.add_argument("model", type=Path)
+    artifact_run.add_argument("model", type=Path, help="portable .ptm artifact")
     record_source = artifact_run.add_mutually_exclusive_group(required=True)
     record_source.add_argument(
         "--record",
@@ -370,11 +421,15 @@ def _parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="newline-delimited JSON records; use - for standard input",
     )
-    artifact_run.add_argument("--pretty", action="store_true")
+    artifact_run.add_argument(
+        "--pretty", action="store_true", help="indent JSON output"
+    )
     artifact_run.set_defaults(handler=_artifact_run_record)
 
     search = commands.add_parser(
-        "search", help="run a resource-bounded GNU Prolog search"
+        "search",
+        help="run a resource-bounded GNU Prolog search",
+        **parser_topic_kwargs("bounded-search"),
     )
     search_commands = search.add_subparsers(dest="search_kind", required=True)
     search_help = {
@@ -385,7 +440,11 @@ def _parser() -> argparse.ArgumentParser:
         SearchKind.REPAIR: "repair a parent tree from counterexamples",
     }
     for kind, help_text in search_help.items():
-        search_command = search_commands.add_parser(kind.value, help=help_text)
+        search_command = search_commands.add_parser(
+            kind.value,
+            help=help_text,
+            **parser_topic_kwargs("bounded-search"),
+        )
         search_command.add_argument(
             "request",
             nargs="?",
@@ -405,7 +464,9 @@ def _parser() -> argparse.ArgumentParser:
             type=Path,
             help="GNU Prolog executable; otherwise use PTM_GPROLOG or PATH",
         )
-        search_command.add_argument("--pretty", action="store_true")
+        search_command.add_argument(
+            "--pretty", action="store_true", help="indent JSON output"
+        )
         if kind in (SearchKind.DECISION_TREE, SearchKind.REPAIR):
             search_command.add_argument(
                 "--output", type=Path, help="export fixed-Logic .ptm artifact"
@@ -414,52 +475,91 @@ def _parser() -> argparse.ArgumentParser:
         search_command.set_defaults(handler=_search)
 
     export = commands.add_parser(
-        "export", help="freeze a scalar TM snapshot JSON file into a .ptm artifact"
+        "export",
+        help="freeze a scalar TM snapshot JSON file into a .ptm artifact",
+        **parser_topic_kwargs("artifacts"),
     )
-    export.add_argument("snapshot")
-    export.add_argument("output")
-    export.add_argument("--name")
-    export.add_argument("--description", default="")
-    export.add_argument("--author", action="append", default=[])
-    export.add_argument("--license", default="unspecified")
-    export.add_argument("--intended-use", default="research")
-    export.add_argument("--limitations", default="research prototype")
-    export.add_argument("--feature-names")
-    export.add_argument("--feature-literal-ids")
-    export.add_argument("--feature-catalog-version", default="anonymous-v1")
+    export.add_argument("snapshot", help="scalar TM snapshot JSON file")
+    export.add_argument("output", help="destination .ptm artifact")
+    export.add_argument("--name", help="artifact title; defaults to the input stem")
+    export.add_argument("--description", default="", help="artifact description")
+    export.add_argument(
+        "--author", action="append", default=[], help="author name; repeat as needed"
+    )
+    export.add_argument("--license", default="unspecified", help="license identifier")
+    export.add_argument(
+        "--intended-use", default="research", help="intended-use statement"
+    )
+    export.add_argument(
+        "--limitations", default="research prototype", help="limitations statement"
+    )
+    export.add_argument(
+        "--feature-names", help="comma-separated feature names in input order"
+    )
+    export.add_argument(
+        "--feature-literal-ids", help="comma-separated integer literal IDs"
+    )
+    export.add_argument(
+        "--feature-catalog-version",
+        default="anonymous-v1",
+        help="feature-catalog version label",
+    )
     export.set_defaults(handler=_export)
 
     export_logic = commands.add_parser(
         "export-logic",
         help="package a fixed LogicProgram32 JSON file into a .ptm artifact",
+        **parser_topic_kwargs("artifacts"),
     )
-    export_logic.add_argument("program")
-    export_logic.add_argument("output")
-    export_logic.add_argument("--name")
-    export_logic.add_argument("--description", default="")
-    export_logic.add_argument("--author", action="append", default=[])
-    export_logic.add_argument("--license", default="unspecified")
-    export_logic.add_argument("--intended-use", default="research")
-    export_logic.add_argument("--limitations", default="research prototype")
-    export_logic.add_argument("--binding-names")
-    export_logic.add_argument("--binding-literal-ids")
+    export_logic.add_argument("program", help="fixed LogicProgram32 JSON file")
+    export_logic.add_argument("output", help="destination .ptm artifact")
+    export_logic.add_argument("--name", help="artifact title; defaults to the input stem")
+    export_logic.add_argument("--description", default="", help="artifact description")
     export_logic.add_argument(
-        "--binding-catalog-version", default="logic-bindings-v1"
+        "--author", action="append", default=[], help="author name; repeat as needed"
+    )
+    export_logic.add_argument(
+        "--license", default="unspecified", help="license identifier"
+    )
+    export_logic.add_argument(
+        "--intended-use", default="research", help="intended-use statement"
+    )
+    export_logic.add_argument(
+        "--limitations", default="research prototype", help="limitations statement"
+    )
+    export_logic.add_argument(
+        "--binding-names",
+        help="comma-separated binding names (default: A,B,C,D,E)",
+    )
+    export_logic.add_argument(
+        "--binding-literal-ids", help="comma-separated integer literal IDs"
+    )
+    export_logic.add_argument(
+        "--binding-catalog-version",
+        default="logic-bindings-v1",
+        help="binding-catalog version label",
     )
     export_logic.set_defaults(handler=_export_logic)
 
     export_pa = commands.add_parser(
         "export-pa",
         help="package a validated Class II PA JSON artifact into a .ptm file",
+        **parser_topic_kwargs("artifacts"),
     )
-    export_pa.add_argument("artifact")
-    export_pa.add_argument("output")
-    export_pa.add_argument("--name")
-    export_pa.add_argument("--description", default="")
-    export_pa.add_argument("--author", action="append", default=[])
-    export_pa.add_argument("--license", default="unspecified")
-    export_pa.add_argument("--intended-use", default="research")
-    export_pa.add_argument("--limitations", default="research prototype")
+    export_pa.add_argument("artifact", help="validated Class II PA JSON file")
+    export_pa.add_argument("output", help="destination .ptm artifact")
+    export_pa.add_argument("--name", help="artifact title; defaults to the input stem")
+    export_pa.add_argument("--description", default="", help="artifact description")
+    export_pa.add_argument(
+        "--author", action="append", default=[], help="author name; repeat as needed"
+    )
+    export_pa.add_argument("--license", default="unspecified", help="license identifier")
+    export_pa.add_argument(
+        "--intended-use", default="research", help="intended-use statement"
+    )
+    export_pa.add_argument(
+        "--limitations", default="research prototype", help="limitations statement"
+    )
     export_pa.set_defaults(handler=_export_pa)
     return parser
 

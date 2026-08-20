@@ -25,6 +25,8 @@ and releases use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Versioned bounded-search JSON contracts, `ptm search` commands, cooperative
   GNU Prolog cancellation, and a Textual Search workspace with repair
   counterexamples and fixed-Logic export.
+- Shared conceptual help topics, `ptm help TOPIC`, generated workbench control
+  reference, and contextual TUI help sourced from the application bindings.
 
 ### Changed
 

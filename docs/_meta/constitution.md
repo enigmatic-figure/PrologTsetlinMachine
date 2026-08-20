@@ -30,7 +30,7 @@ those roles, but it should have one primary job.
 
 1. The CLI parser owns command names, arguments, defaults, metavariables, and
    syntax. Generated command reference and man pages project those facts.
-2. The structured help registry, once introduced, will own reusable topic IDs,
+2. The structured help registry owns reusable topic IDs,
    examples, related commands, TUI controls, requirements, and manual links.
    CLI, TUI, manual, and man-page prose may vary in depth but share those facts.
 3. Python docstrings and public native headers own individual public API

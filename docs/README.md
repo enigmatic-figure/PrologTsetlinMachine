@@ -27,6 +27,7 @@ checkpoints.
 - [Installation](../INSTALL.md)
 - [Clean consumer tutorial](consumer-tutorial.md)
 - [Terminal workbench](tui.md)
+- [Generated help topics and workbench controls](manual/reference/help-topics.md)
 - [Compatibility matrix](compatibility.md)
 - [Contributing](../CONTRIBUTING.md)
 - [Upgrade guide](../UPGRADING.md)
