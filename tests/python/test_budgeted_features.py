@@ -1,6 +1,7 @@
 """Tests for budgeted feature persistence and retirement."""
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -68,6 +69,18 @@ def test_budgeted_persist_and_load_canonical() -> None:
     assert restored.to_dict() == store.to_dict()
     assert restored.size == store.size
     Path(tmp).unlink()
+
+
+def test_budgeted_persist_without_directory_fsync_support(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+    path = tmp_path / "store.json"
+    store = BudgetedFeatureStore(_schema(), budget=3)
+    store.catalog.numeric_ge("score", 5)
+
+    store_id = store.persist(path)
+
+    assert store_id.startswith("sha256:")
+    assert BudgetedFeatureStore.load(path).to_dict() == store.to_dict()
 
 
 def test_budgeted_hostile_budget() -> None:

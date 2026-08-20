@@ -46,6 +46,21 @@ def _stable_id(payload: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory fsync on platforms that expose O_DIRECTORY."""
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        return
+    try:
+        directory_fd = os.open(str(path), directory_flag)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        pass
+
+
 @dataclass(slots=True)
 class BudgetedLiteralRecord:
     descriptor: LiteralDescriptor
@@ -358,14 +373,7 @@ class BudgetedFeatureStore:
                 os.fsync(f.fileno())
             os.replace(tmp, str(p))
             # fsync directory on POSIX after replace for crash-durable publication
-            try:
-                dfd = os.open(str(p.parent), os.O_DIRECTORY)
-                try:
-                    os.fsync(dfd)
-                finally:
-                    os.close(dfd)
-            except OSError:
-                pass
+            _fsync_directory(p.parent)
         finally:
             try:
                 os.unlink(tmp)
