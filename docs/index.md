@@ -19,8 +19,35 @@ archive/index
 
 ```{toctree}
 :hidden:
+:caption: Compatibility paths
 
+../CHANGELOG
+../CONTRIBUTING
+../INSTALL
 README
+../UPGRADING
+architecture
+architecture/adr/template
+class-ii-lifecycle
+class-ii-persistence
+compatibility
+cuda-packed-tm
+dashboard
+gpu-handoff
+hostile-input-testing
+logic-ast
+logic-class-ii-consolidation
+logic-compiler
+logic-dataset-baseline
+logic-morphology
+packed-tm
+pta-control-plane
+references
+roadmap
+semantic-contract
+textual-tui-plan
+tui
+../prolog/README
 ```
 
 The [documentation constitution](_meta/constitution.md) defines ownership,

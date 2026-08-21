@@ -1,5 +1,9 @@
 # CUDA packed TM execution
 
+> Status: mixed transitional page. The backend boundary and exactness rules
+> are current; host measurements and historical observations remain pending
+> extraction into benchmark and archive records.
+
 The optional CUDA path is a native benchmark and research boundary for exact
 64-example packed Tsetlin inference. It does not alter `ptm_core`, make CUDA a
 CPU-only dependency, or extend C ABI version 2.

@@ -3,13 +3,13 @@
 > Historical environment record. This page preserves benchmark provenance and
 > host-specific recovery notes; it is not an installation guide. New users
 > should start with [Installation](../manual/how-to/install.md) and
-> [CUDA packed TM execution](../cuda-packed-tm.md).
+> [CUDA packed TM execution](../architecture/cuda-packed-tm.md).
 
 > Status (2026-08-06): the optional build boundary, `cuda_sparse`,
 > `cuda_warp_tile`, `cuda_dense_bitset`, and the independent
 > `fused_atomic` vote strategy are implemented, correctness-gated, and
 > sanitizer-clean on SM 7.5 and SM 8.9. See
-> [CUDA packed TM execution](../cuda-packed-tm.md).
+> [CUDA packed TM execution](../architecture/cuda-packed-tm.md).
 
 ## RTX 4050 host checkpoint
 
@@ -43,7 +43,7 @@ over the prior CUDA best at 256/4096 pages; sparse and warp-tile remain
 preferred at low density. Fused voting improves the strongest 1024-clause
 sparse kernel routes by 1.09x to 1.49x, but downloading the complete exact
 clause-output matrix often hides that gain. See
-[CUDA packed TM execution](../cuda-packed-tm.md) for the measured tables.
+[CUDA packed TM execution](../architecture/cuda-packed-tm.md) for the measured tables.
 
 A Colab Tesla T4 independently compiled the same working tree for SM 7.5,
 passed the expanded CUDA exactness suite, and completed Compute Sanitizer with

@@ -29,7 +29,7 @@ checkpoints.
 - [First native consumer](manual/tutorials/first-native-consumer.md)
 - [First terminal-workbench session](manual/tutorials/first-tui-session.md)
 - [Generated help topics and workbench controls](manual/reference/help-topics.md)
-- [Compatibility matrix](compatibility.md)
+- [Compatibility matrix](releases/compatibility.md)
 - [Contributing](developer/contributing.md)
 - [Upgrade guide](releases/upgrading.md)
 - [Changelog](releases/changelog.md)

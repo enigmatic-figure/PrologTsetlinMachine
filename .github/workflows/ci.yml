@@ -93,6 +93,7 @@ jobs:
       - name: Validate documentation metadata and links
         run: |
           python scripts/render_help_reference.py --check
+          python scripts/render_cli_reference.py --check
           python scripts/check_docs.py
           python scripts/check_markdown_links.py
       - name: Build HTML documentation with warnings as errors

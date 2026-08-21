@@ -120,6 +120,7 @@ def main() -> int:
         rows = list(reader)
 
     classified: set[str] = set()
+    rows_by_path: dict[str, dict[str, str]] = {}
     previous_path = ""
     for line, row in enumerate(rows, start=2):
         prefix = f"{INVENTORY.relative_to(ROOT)}:{line}"
@@ -133,6 +134,7 @@ def main() -> int:
         if path_text in classified:
             failures.append(f"{prefix}: duplicate path {path_text}")
         classified.add(path_text)
+        rows_by_path[path_text] = row
         if previous_path and path_text <= previous_path:
             failures.append(f"{prefix}: inventory paths must be strictly sorted")
         previous_path = path_text
@@ -205,6 +207,42 @@ def main() -> int:
         failures.append(f"unclassified Markdown file: {path_text}")
     for path_text in sorted(classified - discovered):
         failures.append(f"inventory entry does not exist: {path_text}")
+
+    aliases = {
+        path: row["destination"]
+        for path, row in rows_by_path.items()
+        if row.get("type") == "landing"
+        and row.get("authority") == "derived"
+        and row.get("destination") != path
+    }
+    for source, destination in aliases.items():
+        seen = {source}
+        current = destination
+        while current in aliases:
+            if current in seen:
+                failures.append(f"{source}: compatibility destination cycle")
+                break
+            seen.add(current)
+            current = aliases[current]
+
+    # Compatibility landings are for old inbound URLs. Canonical documents
+    # must link directly to their destination rather than routing through an
+    # alias and back into the current documentation graph.
+    for source in sorted(discovered - set(aliases)):
+        source_path = ROOT / source
+        for target in MARKDOWN_LINK.findall(source_path.read_text(encoding="utf-8")):
+            target_path = target.split("#", 1)[0]
+            if not target_path or "://" in target_path or target_path.startswith("#"):
+                continue
+            resolved = (source_path.parent / target_path).resolve()
+            try:
+                relative = resolved.relative_to(ROOT).as_posix()
+            except ValueError:
+                continue
+            if relative in aliases:
+                failures.append(
+                    f"{source}: canonical page links to compatibility landing {relative}"
+                )
 
     if failures:
         raise SystemExit("\n".join(failures))

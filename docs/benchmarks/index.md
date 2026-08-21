@@ -6,8 +6,8 @@ named bundles; they do not serve as a live results database.
 
 Current transitional records:
 
-- [Logic dataset representational-exhaustion baseline](../logic-dataset-baseline.md)
-- [Research references](../references.md)
+- [Logic dataset representational-exhaustion baseline](logic-dataset-baseline.md)
+- [Research references](references.md)
 
 The existing benchmark pages predate a shared result-manifest schema. Their
 procedures and observations remain useful, but new publishable results should
@@ -20,6 +20,7 @@ exclusions, failed cases, and raw-data content hash.
 :hidden:
 :maxdepth: 2
 
-../logic-dataset-baseline
-../references
+logic-dataset-baseline
+protocol
+references
 ```

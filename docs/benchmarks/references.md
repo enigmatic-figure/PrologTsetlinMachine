@@ -25,4 +25,4 @@ canonical version and licensing information.
 
 Adding a paper to this list does not imply that PTM implements every model or
 result it describes. Project capabilities are tracked in the
-[roadmap](../roadmap.md) and [compatibility matrix](../releases/compatibility.md).
+[RFCs](../rfcs/index.md) and [compatibility matrix](../releases/compatibility.md).

@@ -7,7 +7,7 @@ contribution procedures.
 
 - [Contributing](contributing.md)
 - [GNU Prolog integration](prolog.md)
-- [Hostile-input testing](../hostile-input-testing.md)
+- [Hostile-input testing](hostile-input-testing.md)
 - [Documentation constitution](../_meta/constitution.md)
 - [Documentation inventory](../_meta/inventory.md)
 - [Migration plan](../_meta/migration-plan.md)
@@ -18,7 +18,8 @@ contribution procedures.
 
 contributing
 prolog
-../hostile-input-testing
+prolog-api
+hostile-input-testing
 ../_meta/constitution
 ../_meta/inventory
 ../_meta/migration-plan

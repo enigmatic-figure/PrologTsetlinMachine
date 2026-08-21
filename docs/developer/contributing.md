@@ -48,6 +48,7 @@ lifecycle. Classify every new Markdown page in
 python scripts/check_docs.py
 python scripts/check_markdown_links.py
 python scripts/render_help_reference.py --check
+python scripts/render_cli_reference.py --check
 python -m sphinx -W --keep-going -b html -c docs . out/docs/html
 ```
 

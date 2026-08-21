@@ -103,13 +103,13 @@ work.
 | Install PTM | [Installation guide](docs/manual/how-to/install.md) |
 | Export a first Python model | [First Python model](docs/manual/tutorials/first-python-model.md) |
 | Embed the native runtime | [First native consumer](docs/manual/tutorials/first-native-consumer.md) |
-| Upgrade an existing checkout or integration | [Upgrade guide](UPGRADING.md) |
-| Check supported and tested versions | [Compatibility matrix](docs/compatibility.md) |
+| Upgrade an existing checkout or integration | [Upgrade guide](docs/releases/upgrading.md) |
+| Check supported and tested versions | [Compatibility matrix](docs/releases/compatibility.md) |
 | Export or inspect `.ptm` artifacts | [Artifact how-to](docs/manual/how-to/export-artifacts.md) |
 | Understand raw-record transforms | [Preprocessing reference](docs/manual/reference/preprocessing.md) |
 | Stream Arrow/Parquet, images, or tokens | [Data connector reference](docs/manual/reference/data-connectors.md) |
 | Run bounded symbolic search | [Bounded-search how-to](docs/manual/how-to/run-bounded-search.md) |
-| Contribute or run the complete test matrix | [Contributor guide](CONTRIBUTING.md) |
+| Contribute or run the complete test matrix | [Contributor guide](docs/developer/contributing.md) |
 
 ## Project boundaries
 
@@ -124,10 +124,10 @@ the Python loader or the independently versioned `ptmrt` runtime.
 For the user manual, developer guide, architecture contracts, RFCs, release
 records, benchmarks, and archive, start at the
 [documentation hub](docs/README.md). For background reading, use the linked
-[research references](docs/references.md); large paper copies are intentionally
+[research references](docs/benchmarks/references.md); large paper copies are intentionally
 not stored in the repository.
 
 ## License
 
 PTM is licensed under the [Apache License 2.0](LICENSE). See the
-[changelog](CHANGELOG.md) for release history and pending changes.
+[changelog](docs/releases/changelog.md) for release history and pending changes.

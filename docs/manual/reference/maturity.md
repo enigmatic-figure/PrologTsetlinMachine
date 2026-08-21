@@ -1,7 +1,7 @@
 # Capability maturity
 
-> Status: generated from `docs/_meta/capabilities.json` — Checkpoint 5 stub.
-> Maturity tables will be generated from the machine-readable registry and validated in CI.
+> Transitional baseline: this table is hand-maintained alongside the registry until
+> the maturity renderer and evidence validation are implemented.
 
 This page lists PTM capabilities and their evidence-backed maturity stages. The registry `docs/_meta/capabilities.json` is the single source of truth.
 

@@ -1,6 +1,6 @@
 # Native API reference
 
-> Generated from public headers under `include/ptm/` (Checkpoint 4). The header comment is the source of truth for C++ signatures, parameters, return values, exceptions, limits, and invariants. When `doxygen` + `breathe` are present, this page renders Doxygen XML directly; otherwise it links to the authoritative headers and preserves the exact include paths.
+> Transitional header index. Public headers under `include/ptm/` are the source of truth for C++ signatures, parameters, return values, exceptions, limits, and invariants. Doxygen/Breathe generation is planned but not yet wired into the build.
 
 Authoritative sources: `include/ptm/c_api.h`, `include/ptm/*.hpp` (`#include "ptm/..."`).
 
@@ -23,7 +23,7 @@ breathe_projects = {"ptm": "xml/"}
 breathe_default_project = "ptm"
 ```
 
-Until then, the table below is the generated header index; each header owns its documented surface.
+The table below is an authored header index; each header owns its documented surface.
 
 ## Header index
 

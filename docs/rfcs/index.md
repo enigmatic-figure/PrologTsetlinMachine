@@ -6,8 +6,8 @@ belongs in issues after a decision is accepted.
 
 Current transitional proposals:
 
-- [PTA reasoning/control plane](../pta-control-plane.md)
-- [Textual TUI product and implementation plan](../textual-tui-plan.md)
+- [PTA reasoning/control plane](pta-control-plane.md)
+- [Textual TUI product and implementation plan](textual-tui.md)
 
 Each future RFC should declare its status, authors or owners, created and last
 updated dates, decision deadline when applicable, affected contracts, and links
@@ -17,6 +17,6 @@ to the originating discussion and final ADR or rejection.
 :hidden:
 :maxdepth: 2
 
-../pta-control-plane
-../textual-tui-plan
+pta-control-plane
+textual-tui
 ```

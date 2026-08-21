@@ -5,11 +5,11 @@ own speculative future architecture.
 
 - [Changelog](changelog.md)
 - [Upgrade guide](upgrading.md)
-- [Compatibility matrix](../compatibility.md)
-- [Transitional roadmap](../roadmap.md)
+- [Compatibility matrix](compatibility.md)
+- [Current capability status](../manual/reference/maturity.md)
 
-The roadmap is currently a mixed document. A later checkpoint will separate
-completed history, evidence-backed capability status, and future work.
+Future work is tracked in RFCs and the project issue tracker; this domain
+records release history and migration requirements only.
 
 ```{toctree}
 :hidden:
@@ -17,6 +17,5 @@ completed history, evidence-backed capability status, and future work.
 
 changelog
 upgrading
-../compatibility
-../roadmap
+compatibility
 ```

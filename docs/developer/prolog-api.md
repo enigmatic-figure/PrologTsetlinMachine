@@ -1,6 +1,8 @@
 # Prolog predicate reference
 
-> Generated from structured predicate comments in `prolog/*.pl` and bounded-search contracts in `python/prolog_tsetlin/prolog_bridge.py` (Checkpoint 4). Prolog files own predicate modes, determinism, bounds, and effects; Python owns request validation and the versioned result protocol. See [GNU Prolog integration](prolog.md) for the architectural narrative.
+> Transitional authored reference. Prolog files own predicate modes, determinism,
+> bounds, and effects; Python owns request validation and the versioned result
+> protocol. A structured-comment renderer is planned. See [GNU Prolog integration](prolog.md).
 
 ## Protocol overview
 

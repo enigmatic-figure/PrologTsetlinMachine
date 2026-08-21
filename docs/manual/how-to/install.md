@@ -15,7 +15,7 @@ workbench and add the native runtime or GNU Prolog only when needed.
 | CUDA research | Experimental GPU kernels and benchmarks | Native profile, compatible CUDA toolkit/GPU |
 
 The exact tested versions and platform status are in the
-[compatibility matrix](../../compatibility.md).
+[compatibility matrix](../../releases/compatibility.md).
 
 ## Get the source
 
@@ -139,7 +139,7 @@ cmake --build out/cuda --config Release
 ctest --test-dir out/cuda -C Release --output-on-failure
 ```
 
-See [CUDA packed-TM execution](../../cuda-packed-tm.md) for the experimental
+See [CUDA packed-TM execution](../../architecture/cuda-packed-tm.md) for the experimental
 backend contract. WSL is one tested CUDA host, not an installation requirement.
 
 ## Offline installation

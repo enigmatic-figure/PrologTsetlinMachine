@@ -22,7 +22,7 @@ extensions = [
     "sphinx.ext.viewcode",
 ]
 source_suffix = {".md": "markdown", ".rst": "restructuredtext"}
-root_doc = "index"
+root_doc = "docs/index"
 exclude_patterns = [
     ".agents/**",
     ".codex/**",
@@ -36,6 +36,7 @@ exclude_patterns = [
     "dist/**",
     "out/**",
     "AGENTS.md",
+    "README.md",
 ]
 
 # Autodoc: Python package docstrings own the API reference (Checkpoint 4).
@@ -63,11 +64,9 @@ napoleon_numpy_docstring = True
 napoleon_include_init_with_doc = True
 
 # Sphinx generates many reference pages that are linked directly; the explicit
-# toctree is for the primary navigation. Suppress noisy not_included warnings
-# and duplicate-index warnings that autodoc can emit for re-exported enums.
+# toctree is for the primary navigation. Keep warning classes enabled so that
+# missing navigation and broken autodoc remain visible during migration.
 suppress_warnings = [
-    "toc.not_included",
-    "autodoc",
     "ref.python.duplicate",
     "ref.duplicate",
 ]
@@ -79,8 +78,8 @@ html_theme = "alabaster"
 html_title = f"PTM {release} documentation"
 html_show_sourcelink = True
 
-# Man pages: ptm(1) and ptmrt(1) share the argparse source with the CLI reference.
+# The ptm(1) page shares the argparse source with the CLI reference. ptmrt is a
+# native executable with a separate parser and is not represented here yet.
 man_pages = [
-    ("manual/reference/cli", "ptm", "PTM command line", [author], 1),
-    ("manual/reference/c-api", "ptmrt", "PTM native runtime C ABI", [author], 1),
+    ("docs/manual/reference/cli", "ptm", "PTM command line", [author], 1),
 ]

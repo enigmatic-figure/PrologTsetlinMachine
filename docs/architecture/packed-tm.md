@@ -1,5 +1,9 @@
 # Packed 64-example Tsetlin inference
 
+> Status: mixed transitional page. The execution contract below is current;
+> the performance and calibration material near the end remains pending
+> extraction into the benchmark record.
+
 The native adaptive substrate now has a direct batch path that does not lower a
 trained TM through the general Boolean graph. `PackedTMModel64` prepares one
 immutable scalar-TM snapshot, retains its exact multi-state automata as bit

@@ -88,7 +88,7 @@ TA state is bit-sliced across the automaton population, while feature-major
 both prediction and feedback clause words, clamped signed scores, and a
 prediction mask without routing through the general graph. This immutable
 snapshot image is replaced after learning changes its source states. See
-[packed TM execution](../../packed-tm.md).
+[packed TM execution](../packed-tm.md).
 
 ## Deployment boundary
 

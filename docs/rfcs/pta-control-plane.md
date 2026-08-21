@@ -2,7 +2,9 @@
 
 > **Status:** design — Milestone 7 proposal. Native TM remains the fast executable representation; the PTA collective reasons, invents, and prunes, and every deployable result crosses a strict lowering gate.
 
-See `docs/architecture.md` for existing contracts and `Tsetlin Machine GitHub Implementations.pdf` for the broader TM ecosystem survey that motivates this division.
+See [Architecture and contracts](../architecture/index.md) for existing
+contracts. The broader ecosystem survey is historical context and is not a
+repository-local source.
 
 ## Two planes
 
