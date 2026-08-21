@@ -7,6 +7,8 @@ named bundles; they do not serve as a live results database.
 Current transitional records:
 
 - [Logic dataset representational-exhaustion baseline](logic-dataset-baseline.md)
+- [Packed TM CPU inference](packed-tm-cpu.md)
+- [Packed TM CUDA routing](packed-tm-cuda.md)
 - [Research references](references.md)
 
 The existing benchmark pages predate a shared result-manifest schema. Their
@@ -21,6 +23,8 @@ exclusions, failed cases, and raw-data content hash.
 :maxdepth: 2
 
 logic-dataset-baseline
+packed-tm-cpu
+packed-tm-cuda
 protocol
 references
 ```
