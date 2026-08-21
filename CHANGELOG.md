@@ -8,6 +8,8 @@ and releases use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Focused consumer tutorials, how-to guides, references, and explanations,
+  with compatibility landings for previous public documentation paths.
 - Keyboard-first Textual workbench with training telemetry, clause inspection,
   cancellation, environment preflight, and artifact export.
 - Typed GNU Prolog searches for feature templates, signed TA clauses, bounded

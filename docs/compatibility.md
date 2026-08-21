@@ -48,5 +48,5 @@ approximate an unsupported execution contract: loaders fail closed instead.
 - **Research-only:** CUDA dispatch, benchmark-specific scripts, and internal
   persistence experiments.
 
-See [Installation](../INSTALL.md) for commands and [Upgrading](../UPGRADING.md)
+See [Installation](manual/how-to/install.md) for commands and [Upgrading](../UPGRADING.md)
 for migration rules.

@@ -24,9 +24,10 @@ checkpoints.
 
 ## Immediate entry points
 
-- [Installation](../INSTALL.md)
-- [Clean consumer tutorial](consumer-tutorial.md)
-- [Terminal workbench](tui.md)
+- [Installation](manual/how-to/install.md)
+- [First Python model](manual/tutorials/first-python-model.md)
+- [First native consumer](manual/tutorials/first-native-consumer.md)
+- [First terminal-workbench session](manual/tutorials/first-tui-session.md)
 - [Generated help topics and workbench controls](manual/reference/help-topics.md)
 - [Compatibility matrix](compatibility.md)
 - [Contributing](../CONTRIBUTING.md)

@@ -177,7 +177,8 @@ def test_ptm_help_lists_and_renders_topics() -> None:
     rendered = stdout.getvalue()
     assert "BOUNDED SYMBOLIC SEARCH" in rendered
     assert "ptm search repair" in rendered
-    assert "docs/bounded-search.md" in rendered
+    assert "docs/manual/how-to/run-bounded-search.md" in rendered
+    assert "docs/manual/reference/search-contracts.md" in rendered
 
 
 def test_subcommand_help_links_to_shared_topic() -> None:

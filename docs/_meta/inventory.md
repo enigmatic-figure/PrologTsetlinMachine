@@ -27,3 +27,8 @@ The `destination` column records the intended stable home. A destination does
 not claim that migration is complete. The `action` column distinguishes pages
 that can be retained from those that must be split, archived, moved with
 compatibility, generated, or excluded from publication.
+
+Pages below `docs/manual/tutorials`, `how-to`, `reference`, and `explanation`
+must use the matching inventory type. A derived compatibility landing whose
+destination differs from its own path must link directly to that authoritative
+destination.

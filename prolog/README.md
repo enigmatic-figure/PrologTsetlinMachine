@@ -79,4 +79,4 @@ Run `examples/prolog_structures.py` for typed template selection, a signed
 clause, an XOR tree, and counterexample-guided repair.
 
 For the supported JSON contract, CLI/TUI workflow, exit statuses, cancellation,
-and fixed-Logic export, see [Bounded Prolog search](../docs/bounded-search.md).
+and fixed-Logic export, see [Bounded Prolog search](../docs/manual/how-to/run-bounded-search.md).

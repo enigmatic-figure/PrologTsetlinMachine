@@ -54,7 +54,8 @@ ptm help training
 | `q` | Quit the workbench. |
 
 Authored guides:
-- [docs/tui.md](../../tui.md)
+- [docs/manual/tutorials/first-tui-session.md](../tutorials/first-tui-session.md)
+- [docs/manual/how-to/tui.md](../how-to/tui.md)
 
 ## Deterministic training and clauses
 
@@ -92,7 +93,7 @@ ptm tui --demo xor
 | `q` | Quit the workbench. |
 
 Authored guides:
-- [docs/tui.md](../../tui.md)
+- [docs/manual/tutorials/first-tui-session.md](../tutorials/first-tui-session.md)
 
 ## Portable artifacts
 
@@ -150,7 +151,8 @@ ptm export snapshot.json model.ptm
 | `q` | Quit the workbench. |
 
 Authored guides:
-- [docs/model-export-runtime.md](../../model-export-runtime.md)
+- [docs/manual/how-to/export-artifacts.md](../how-to/export-artifacts.md)
+- [docs/manual/reference/artifact-contract.md](artifact-contract.md)
 
 ## Typed record preprocessing
 
@@ -202,7 +204,7 @@ ptm artifact run-record model.ptm --jsonl records.jsonl
 | `q` | Quit the workbench. |
 
 Authored guides:
-- [docs/preprocessing-contract.md](../../preprocessing-contract.md)
+- [docs/manual/reference/preprocessing.md](preprocessing.md)
 
 ## Bounded symbolic search
 
@@ -258,4 +260,5 @@ ptm search repair --demo --output repair.ptm --pretty
 | `q` | Quit the workbench. |
 
 Authored guides:
-- [docs/bounded-search.md](../../bounded-search.md)
+- [docs/manual/how-to/run-bounded-search.md](../how-to/run-bounded-search.md)
+- [docs/manual/reference/search-contracts.md](search-contracts.md)

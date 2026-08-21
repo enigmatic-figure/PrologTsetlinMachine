@@ -107,7 +107,7 @@ mandatory accelerator. The scalar implementation is the portability baseline;
 SIMD and CUDA remain optional exact dispatch targets. Declarative artifacts may
 be embedded in applications or model containers, but they never contain
 arbitrary executable code. See
-[Portable model export and static inference runtime](model-export-runtime.md).
+[portable artifact and runtime reference](manual/reference/artifact-contract.md).
 
 Packed-TM artifacts may also embed `ptm.preprocessing.v1`, an ordered and
 bounded transform contract for numeric thresholds/ranges, typed categorical
@@ -115,7 +115,7 @@ equality/membership, Boolean values, and missingness. The Python and standalone
 C++ paths enforce the same non-coercing value rules and stable literal order.
 Connector parsing and richer transforms remain host responsibilities unless a
 later portable contract explicitly versions them. See
-[deterministic raw-record preprocessing](preprocessing-contract.md).
+[deterministic raw-record preprocessing](manual/reference/preprocessing.md).
 
 ## Prolog boundary
 

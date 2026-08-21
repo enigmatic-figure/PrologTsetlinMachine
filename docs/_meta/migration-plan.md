@@ -1,6 +1,6 @@
 # Documentation migration plan
 
-Status: checkpoints 1 and 2 are implemented; the remaining sequence is
+Status: checkpoints 1 through 3 are implemented; the remaining sequence is
 proposed and each checkpoint requires its own reviewed change.
 
 This plan applies the [documentation constitution](constitution.md) in bounded,

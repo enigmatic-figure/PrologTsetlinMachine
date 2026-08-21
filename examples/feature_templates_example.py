@@ -1,5 +1,7 @@
 """Example demonstrating typed feature templates and TA-clause configuration exports."""
 
+from pathlib import Path
+
 from prolog_tsetlin import (
     FeatureSchema,
     FieldKind,
@@ -7,7 +9,6 @@ from prolog_tsetlin import (
     create_feature_template_catalog,
     analyze_clause_configuration,
     export_template_schema,
-    TAClauseConfiguration,
 )
 
 
@@ -127,7 +128,8 @@ def main():
               f"included_literals={len(clause_cfg.included_literals)}")
 
     # Export configuration to JSON
-    output_path = "/workspace/out/clause_configuration.json"
+    output_path = Path("out/feature-templates/clause-configuration.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     config.save(output_path)
     print(f"\nClause configuration exported to: {output_path}")
 

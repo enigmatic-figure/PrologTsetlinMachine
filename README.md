@@ -72,7 +72,7 @@ ptm search decision-tree --demo --pretty
 ptm search repair --demo --output out/xor-repair.ptm --pretty
 ```
 
-See [Installation](INSTALL.md) for native C/C++, GNU Prolog, CUDA, offline,
+See [Installation](docs/manual/how-to/install.md) for native C/C++, GNU Prolog, CUDA, offline,
 and troubleshooting instructions.
 
 ## What is included
@@ -99,15 +99,16 @@ work.
 
 | Goal | Start here |
 | --- | --- |
-| Explore interactively | [Terminal workbench](docs/tui.md) |
-| Install PTM | [Installation guide](INSTALL.md) |
-| Follow a clean consumer example | [Consumer tutorial](docs/consumer-tutorial.md) |
+| Explore interactively | [First workbench session](docs/manual/tutorials/first-tui-session.md) |
+| Install PTM | [Installation guide](docs/manual/how-to/install.md) |
+| Export a first Python model | [First Python model](docs/manual/tutorials/first-python-model.md) |
+| Embed the native runtime | [First native consumer](docs/manual/tutorials/first-native-consumer.md) |
 | Upgrade an existing checkout or integration | [Upgrade guide](UPGRADING.md) |
 | Check supported and tested versions | [Compatibility matrix](docs/compatibility.md) |
-| Export or embed `.ptm` artifacts | [Portable runtime](docs/model-export-runtime.md) |
-| Understand raw-record transforms | [Preprocessing contract](docs/preprocessing-contract.md) |
-| Stream Arrow/Parquet, images, or tokens | [Data connectors](docs/data-connectors.md) |
-| Run bounded symbolic search | [Bounded Prolog search](docs/bounded-search.md) |
+| Export or inspect `.ptm` artifacts | [Artifact how-to](docs/manual/how-to/export-artifacts.md) |
+| Understand raw-record transforms | [Preprocessing reference](docs/manual/reference/preprocessing.md) |
+| Stream Arrow/Parquet, images, or tokens | [Data connector reference](docs/manual/reference/data-connectors.md) |
+| Run bounded symbolic search | [Bounded-search how-to](docs/manual/how-to/run-bounded-search.md) |
 | Contribute or run the complete test matrix | [Contributor guide](CONTRIBUTING.md) |
 
 ## Project boundaries

@@ -93,7 +93,10 @@ _TOPICS = (
             HelpExample(("help", "training"), "Read the training topic in a terminal."),
         ),
         requirements=("Install the optional TUI extra to launch the workbench.",),
-        manual_links=("docs/tui.md",),
+        manual_links=(
+            "docs/manual/tutorials/first-tui-session.md",
+            "docs/manual/how-to/tui.md",
+        ),
     ),
     HelpTopic(
         topic_id="training",
@@ -110,7 +113,7 @@ _TOPICS = (
             HelpExample(("tui", "--demo", "xor"), "Open the training workbench."),
         ),
         requirements=(),
-        manual_links=("docs/tui.md",),
+        manual_links=("docs/manual/tutorials/first-tui-session.md",),
     ),
     HelpTopic(
         topic_id="artifacts",
@@ -137,7 +140,10 @@ _TOPICS = (
             ),
         ),
         requirements=(),
-        manual_links=("docs/model-export-runtime.md",),
+        manual_links=(
+            "docs/manual/how-to/export-artifacts.md",
+            "docs/manual/reference/artifact-contract.md",
+        ),
     ),
     HelpTopic(
         topic_id="preprocessing",
@@ -168,7 +174,7 @@ _TOPICS = (
             ),
         ),
         requirements=("The artifact must declare a portable raw-record contract.",),
-        manual_links=("docs/preprocessing-contract.md",),
+        manual_links=("docs/manual/reference/preprocessing.md",),
     ),
     HelpTopic(
         topic_id="bounded-search",
@@ -202,7 +208,10 @@ _TOPICS = (
             "GNU Prolog must be installed and discoverable through --gprolog, PTM_GPROLOG, "
             "or PATH.",
         ),
-        manual_links=("docs/bounded-search.md",),
+        manual_links=(
+            "docs/manual/how-to/run-bounded-search.md",
+            "docs/manual/reference/search-contracts.md",
+        ),
     ),
 )
 

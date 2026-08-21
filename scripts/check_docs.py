@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path, PurePosixPath
 
 
@@ -45,6 +46,7 @@ TYPES = {
     "benchmark-record",
     "bibliography",
     "contract",
+    "explanation",
     "how-to",
     "inventory",
     "landing",
@@ -61,6 +63,13 @@ TYPES = {
 STATES = {"current", "historical", "internal", "mixed", "proposed"}
 AUTHORITIES = {"authoritative", "derived", "record", "transitional"}
 ACTIONS = {"archive", "exclude", "move-compatible", "retain", "split"}
+MANUAL_ROLES = {
+    "explanation": "explanation",
+    "how-to": "how-to",
+    "reference": "reference",
+    "tutorials": "tutorial",
+}
+MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 
 
 def markdown_files() -> set[str]:
@@ -120,6 +129,42 @@ def main() -> int:
             failures.append(f"{prefix}: historical pages belong in the archive domain")
         if row.get("published") == "no" and row.get("state") != "internal":
             failures.append(f"{prefix}: unpublished pages must be internal")
+
+        parts = normalized.parts
+        if len(parts) >= 4 and parts[:2] == ("docs", "manual"):
+            expected_type = MANUAL_ROLES.get(parts[2])
+            if expected_type is not None and row.get("type") != expected_type:
+                failures.append(
+                    f"{prefix}: docs/manual/{parts[2]} pages must use type "
+                    f"{expected_type!r}"
+                )
+
+        destination = row.get("destination", "")
+        if (
+            row.get("type") == "landing"
+            and row.get("authority") == "derived"
+            and destination != path_text
+        ):
+            destination_path = ROOT / destination
+            source_path = ROOT / path_text
+            if not destination_path.is_file():
+                failures.append(
+                    f"{prefix}: compatibility destination does not exist: "
+                    f"{destination}"
+                )
+            elif source_path.is_file():
+                linked_targets = {
+                    (source_path.parent / target.split("#", 1)[0]).resolve()
+                    for target in MARKDOWN_LINK.findall(
+                        source_path.read_text(encoding="utf-8")
+                    )
+                    if target and "://" not in target and not target.startswith("#")
+                }
+                if destination_path.resolve() not in linked_targets:
+                    failures.append(
+                        f"{prefix}: compatibility landing must link to destination "
+                        f"{destination}"
+                    )
 
     discovered = markdown_files()
     for path_text in sorted(discovered - classified):

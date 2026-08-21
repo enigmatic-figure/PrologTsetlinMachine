@@ -85,5 +85,5 @@ runtime. Do not convert or overwrite the only copy of a snapshot or persistence
 log during an upgrade.
 
 See the [compatibility matrix](docs/compatibility.md) for tested toolchains and
-the [portable runtime contract](docs/model-export-runtime.md) for fail-closed
+the [portable runtime contract](docs/manual/reference/artifact-contract.md) for fail-closed
 artifact behavior.
