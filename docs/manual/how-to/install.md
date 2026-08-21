@@ -77,10 +77,15 @@ contributors. Consumers should use the regular install shown above.
 
 GNU Prolog is required only for bounded symbolic searches. Download a binary or
 source distribution from the [GNU Prolog project](https://www.gprolog.org/),
-then make `gprolog` available on `PATH`:
+then make `gprolog` available on `PATH`. Use the platform's null device for a
+non-interactive smoke test:
 
 ```bash
+# Linux and macOS
 gprolog --consult-file /dev/null --query-goal halt
+
+# Windows PowerShell or cmd.exe
+gprolog --consult-file NUL --query-goal halt
 ```
 
 On platforms where that command is not on `PATH`, set `PTM_GPROLOG` to the

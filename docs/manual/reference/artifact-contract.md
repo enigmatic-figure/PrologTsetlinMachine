@@ -83,6 +83,14 @@ the baseline runtime has no Python, Prolog, training, CUDA, or filesystem
 dependency. Handles are read-only and support concurrent inference with
 caller-private buffers.
 
+The native loader validates integrity, resource bounds, versions, reserved
+fields, execution-critical manifest fields, model dimensions and ports,
+payload structure, and embedded conformance cases. It checks that the manifest
+is a UTF-8 JSON object but treats non-execution metadata as opaque. The Python
+reference loader additionally enforces canonical JSON bytes and the complete
+metadata schema. Native and Python verification therefore protect the same
+execution boundary without claiming identical metadata validation.
+
 ### Packed-TM ports
 
 | Direction | Name | Type and shape | Meaning |

@@ -33,8 +33,10 @@ Partial, unaudited, activating, or hash-inconsistent state is not exportable.
 
 Run `ptm help artifacts` for inspection and verification examples. For typed
 raw-record inference, use `ptm help preprocessing`. The native `ptmrt` tool
-provides equivalent inspect, verify, run, and run-record operations for an
-installed standalone runtime.
+provides corresponding inspect, verify, run, and run-record operations for an
+installed standalone runtime, but its verification scope is not identical to
+the Python reference loader. The [artifact reference](../reference/artifact-contract.md#runtime-lifecycle)
+defines that boundary.
 
 Only packed-TM artifacts carrying `ptm.preprocessing.v1` accept raw records.
 The result includes the deterministic Boolean feature vector alongside each

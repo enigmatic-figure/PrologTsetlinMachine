@@ -8,11 +8,9 @@ runtime from a C or CMake application.
 Configure with a C++20 toolchain and install into an isolated prefix:
 
 ```bash
-cmake -S . -B out/consumer-build -DPTM_BUILD_TESTS=OFF \
-  -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B out/consumer-build -DPTM_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build out/consumer-build --config Release
-cmake --install out/consumer-build --config Release \
-  --prefix out/consumer-install
+cmake --install out/consumer-build --config Release --prefix out/consumer-install
 ```
 
 The prefix contains `ptmrt`, public headers under `include/ptm`, and a
@@ -32,8 +30,7 @@ headers as `#include "ptm/..."`.
 Configure consumers with the install prefix:
 
 ```bash
-cmake -S path/to/consumer -B out/consumer \
-  -DCMAKE_PREFIX_PATH=/absolute/path/to/out/consumer-install
+cmake -S path/to/consumer -B out/consumer -DCMAKE_PREFIX_PATH=/absolute/path/to/out/consumer-install
 cmake --build out/consumer --config Release
 ```
 

@@ -21,8 +21,7 @@ On a single-config build, run:
 
 ```bash
 out/consumer-install/bin/ptmrt verify out/consumer/raw-xor.ptm
-out/consumer-install/bin/ptmrt run-record out/consumer/raw-xor.ptm \
-  left:bool=false right:bool=true
+out/consumer-install/bin/ptmrt run-record out/consumer/raw-xor.ptm left:bool=false right:bool=true
 ```
 
 Append `.exe` to `ptmrt` on Windows. The second command reports materialized
@@ -34,8 +33,7 @@ now agreed on preprocessing and inference.
 Use the installed prefix rather than the source or build directory:
 
 ```bash
-cmake -S tests/consumer -B out/consumer-sdk \
-  -DCMAKE_PREFIX_PATH=/absolute/path/to/PrologTsetlinMachine/out/consumer-install
+cmake -S tests/consumer -B out/consumer-sdk -DCMAKE_PREFIX_PATH=/absolute/path/to/PrologTsetlinMachine/out/consumer-install
 cmake --build out/consumer-sdk --config Release
 ```
 

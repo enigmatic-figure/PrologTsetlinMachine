@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +72,34 @@ MANUAL_ROLES = {
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 
 
+def _normalized_repo_path(
+    value: str,
+    *,
+    prefix: str,
+    field: str,
+    failures: list[str],
+) -> PurePosixPath | None:
+    """Validate one deterministic repository-relative POSIX path."""
+
+    normalized = PurePosixPath(value)
+    windows = PureWindowsPath(value)
+    if (
+        not value
+        or "\\" in value
+        or normalized.as_posix() == "."
+        or normalized.is_absolute()
+        or windows.is_absolute()
+        or bool(windows.drive)
+        or ".." in normalized.parts
+        or normalized.as_posix() != value
+    ):
+        failures.append(
+            f"{prefix}: {field} must be normalized repository-relative POSIX"
+        )
+        return None
+    return normalized
+
+
 def markdown_files() -> set[str]:
     return {
         path.relative_to(ROOT).as_posix()
@@ -95,14 +123,12 @@ def main() -> int:
     for line, row in enumerate(rows, start=2):
         prefix = f"{INVENTORY.relative_to(ROOT)}:{line}"
         path_text = row.get("path", "")
-        normalized = PurePosixPath(path_text)
-        if (
-            not path_text
-            or normalized.is_absolute()
-            or ".." in normalized.parts
-            or normalized.as_posix() != path_text
-        ):
-            failures.append(f"{prefix}: path must be normalized repository-relative POSIX")
+        normalized = _normalized_repo_path(
+            path_text,
+            prefix=prefix,
+            field="path",
+            failures=failures,
+        )
         if path_text in classified:
             failures.append(f"{prefix}: duplicate path {path_text}")
         classified.add(path_text)
@@ -130,7 +156,7 @@ def main() -> int:
         if row.get("published") == "no" and row.get("state") != "internal":
             failures.append(f"{prefix}: unpublished pages must be internal")
 
-        parts = normalized.parts
+        parts = normalized.parts if normalized is not None else ()
         if len(parts) >= 4 and parts[:2] == ("docs", "manual"):
             expected_type = MANUAL_ROLES.get(parts[2])
             if expected_type is not None and row.get("type") != expected_type:
@@ -140,12 +166,19 @@ def main() -> int:
                 )
 
         destination = row.get("destination", "")
+        destination_normalized = _normalized_repo_path(
+            destination,
+            prefix=prefix,
+            field="destination",
+            failures=failures,
+        )
         if (
             row.get("type") == "landing"
             and row.get("authority") == "derived"
             and destination != path_text
+            and destination_normalized is not None
         ):
-            destination_path = ROOT / destination
+            destination_path = ROOT / destination_normalized.as_posix()
             source_path = ROOT / path_text
             if not destination_path.is_file():
                 failures.append(
