@@ -5,6 +5,7 @@ current installation, product, or architecture guidance.
 
 - [Dear PyGUI dashboard prototype](dashboard.md)
 - [GPU development handoff](gpu-handoff.md)
+- [Roadmap disposition](roadmap-disposition.md)
 
 ```{toctree}
 :hidden:
@@ -12,4 +13,5 @@ current installation, product, or architecture guidance.
 
 dashboard
 gpu-handoff
+roadmap-disposition
 ```

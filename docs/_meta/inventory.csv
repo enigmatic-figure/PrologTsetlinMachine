@@ -93,7 +93,7 @@ docs/releases/upgrading.md,releases,how-to,current,authoritative,yes,docs/releas
 docs/rfcs/index.md,rfcs,landing,current,authoritative,yes,docs/rfcs/index.md,retain
 docs/rfcs/pta-control-plane.md,rfcs,rfc,proposed,record,yes,docs/rfcs/pta-control-plane.md,retain
 docs/rfcs/textual-tui.md,rfcs,rfc,mixed,transitional,yes,docs/rfcs/textual-tui.md,retain
-docs/archive/roadmap-disposition.md,archive,record,historical,record,yes,docs/archive/roadmap-disposition.md,retain
+docs/roadmap.md,releases,landing,current,derived,yes,docs/archive/roadmap-disposition.md,retain
 docs/semantic-contract.md,architecture,landing,current,derived,yes,docs/architecture/semantic-contract.md,retain
 docs/textual-tui-plan.md,rfcs,landing,current,derived,yes,docs/rfcs/textual-tui.md,retain
 docs/tui.md,manual,landing,current,derived,yes,docs/manual/how-to/tui.md,retain
