@@ -1,8 +1,7 @@
 # Packed 64-example Tsetlin inference
 
-> Status: mixed transitional page. The execution contract below is current;
-> the performance and calibration material near the end remains pending
-> extraction into the benchmark record.
+> Status: current architecture contract. Performance measurements have been
+> extracted to the [Packed TM CPU inference benchmark](../benchmarks/packed-tm-cpu.md) record.
 
 The native adaptive substrate now has a direct batch path that does not lower a
 trained TM through the general Boolean graph. `PackedTMModel64` prepares one
@@ -142,72 +141,9 @@ evaluation for:
 - capability coherence, model-specific selection, and rejection of forced
   unavailable backends through C++, C, and Python.
 
-## Performance and calibration
 
-The Release benchmark uses 20 clauses, 256 represented features, approximately
-2% included literals, one resident 64-example batch, and 5,000 repetitions on
-the provisioned Intel Core i3-13100. One observed run before SIMD specialization
-produced:
-
-| Path | Examples/second | Relative to scalar |
-| --- | ---: | ---: |
-| Scalar TM | 0.46M | 1.00x |
-| Packed, including portable C++ row transpose | 1.27M | 2.78x |
-| Packed, input already feature-major | 132.38M | 290.15x |
-
-These were cache-hot synthetic inference measurements, not training or
-end-to-end dataset throughput claims. Their main architectural result is that
-Class I should retain feature-major pages when a batch will be reused; repeated
-row transposition consumes most of the otherwise available speedup.
-
-The current dispatch harness sweeps clause count, represented feature count,
-Include density, and every compiled backend. On the same i3-13100, the standard
-Release sweep showed AVX2 about 1.5x faster than the scalar prepared-plan kernel
-for a sparse 20-clause, 64-feature tile. Scalar remained faster for denser
-plans, which is why density participates in automatic selection. The AVX-512
-object is compiled, while execution is correctly reported unavailable on this
-CPU.
-
-Each workload is checked against the forced scalar result before timing. CPU
-records use resident feature-major input and caller-owned output buffers. CUDA
-records report kernel-only CUDA-event time, resident-input evaluation plus
-result download, and cold input upload plus evaluation plus download as
-separate scopes. Immutable model upload is performed once and excluded from
-all three scopes. Human-readable output is the default. `-JsonLines` emits one
-independently parseable record per line using schema
-`ptm.runtime-benchmark.v1`:
-
-- `capabilities`: CPU, OS-state, compiled backends, and optional GPU device,
-  compute-capability, VRAM, driver/runtime, multiprocessor, and warp facts;
-- `measurement`: requested/selected backend, shape, density, resident pages,
-  timing scope/source, median throughput, median absolute deviation, transfer
-  bytes, checksum, and correctness/CUDA status;
-- `skip`: a requested backend unavailable on this host;
-- `run_end`: completed measurement count.
-
-Checksums and seeds are decimal strings so JavaScript dashboards retain exact
-unsigned 64-bit values. Identical CPU and CUDA workloads emit the same checksum
-across every timing scope.
-
-Reproduce the correctness-gated measurement with:
-
-```powershell
-.\scripts\benchmark-packed-tm.ps1
-```
-
-Run the standard routing sweep as a dashboard-friendly event stream:
-
-```powershell
-.\scripts\benchmark-packed-tm.ps1 -Sweep -JsonLines
-```
-
-Or provide comma-separated axes for a targeted crossover study:
-
-```powershell
-.\scripts\benchmark-packed-tm.ps1 `
-    -Clauses 8,20,64 -Features 64,256 -Densities 0.005,0.02,0.10 `
-    -ResidentPages 1,16 -Backend all -Repeats 2000 -JsonLines
-```
+Performance measurements and calibration data are recorded in the
+[Packed TM CPU inference benchmark](../benchmarks/packed-tm-cpu.md) benchmark record.
 
 The experimental WSL/CUDA route is documented separately in
 [CUDA packed TM execution](cuda-packed-tm.md).
