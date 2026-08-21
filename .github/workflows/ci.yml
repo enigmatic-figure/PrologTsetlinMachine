@@ -301,3 +301,36 @@ jobs:
           out/wheel-smoke/bin/ptm --version
           out/wheel-smoke/bin/python -c "from prolog_tsetlin import TokenAdapter; assert TokenAdapter('text').tokenize('Hello') == ('hello',)"
           test -f out/wheel-smoke/share/prolog-tsetlin-machine/prolog/bounded_structure_search.pl
+
+  required-ci:
+    name: Required CI
+    if: ${{ always() }}
+    needs:
+      - python
+      - native
+      - data
+      - documentation
+      - prolog
+      - sanitizers
+      - distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every required job succeeded
+        shell: bash
+        run: |
+          results=(
+            "${{ needs.python.result }}"
+            "${{ needs.native.result }}"
+            "${{ needs.data.result }}"
+            "${{ needs.documentation.result }}"
+            "${{ needs.prolog.result }}"
+            "${{ needs.sanitizers.result }}"
+            "${{ needs.distribution.result }}"
+          )
+
+          for result in "${results[@]}"; do
+            if [[ "$result" != "success" ]]; then
+              echo "Required upstream job result: $result" >&2
+              exit 1
+            fi
+          done
