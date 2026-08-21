@@ -81,4 +81,4 @@ prepared plans averaging no more than one included literal per clause and for
 ## Related documentation
 
 - [Packed 64-example Tsetlin inference](../architecture/packed-tm.md) — execution contract and semantics;
-- [CUDA packed TM execution](cuda-packed-tm-cuda.md) — GPU handoff measurements.
+- [CUDA packed TM execution](packed-tm-cuda.md) — GPU handoff measurements.
