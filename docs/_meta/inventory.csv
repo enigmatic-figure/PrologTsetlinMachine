@@ -26,8 +26,11 @@ docs/architecture/semantic-contract.md,architecture,contract,current,authoritati
 docs/archive/dashboard.md,archive,record,historical,record,yes,docs/archive/dashboard.md,retain
 docs/archive/gpu-handoff.md,archive,record,historical,record,yes,docs/archive/gpu-handoff.md,retain
 docs/archive/index.md,archive,landing,current,derived,yes,docs/archive/index.md,retain
+docs/archive/roadmap-disposition.md,archive,record,historical,record,yes,docs/archive/roadmap-disposition.md,retain
 docs/benchmarks/index.md,benchmarks,landing,current,authoritative,yes,docs/benchmarks/index.md,retain
 docs/benchmarks/logic-dataset-baseline.md,benchmarks,benchmark-record,current,record,yes,docs/benchmarks/logic-dataset-baseline.md,retain
+docs/benchmarks/packed-tm-cpu.md,benchmarks,benchmark-record,current,record,yes,docs/benchmarks/packed-tm-cpu.md,retain
+docs/benchmarks/packed-tm-cuda.md,benchmarks,benchmark-record,current,record,yes,docs/benchmarks/packed-tm-cuda.md,retain
 docs/benchmarks/protocol.md,benchmarks,contract,current,authoritative,yes,docs/benchmarks/protocol.md,retain
 docs/benchmarks/references.md,benchmarks,bibliography,current,record,yes,docs/benchmarks/references.md,retain
 docs/bounded-search.md,manual,landing,current,derived,yes,docs/manual/how-to/run-bounded-search.md,retain
@@ -90,7 +93,7 @@ docs/releases/upgrading.md,releases,how-to,current,authoritative,yes,docs/releas
 docs/rfcs/index.md,rfcs,landing,current,authoritative,yes,docs/rfcs/index.md,retain
 docs/rfcs/pta-control-plane.md,rfcs,rfc,proposed,record,yes,docs/rfcs/pta-control-plane.md,retain
 docs/rfcs/textual-tui.md,rfcs,rfc,mixed,transitional,yes,docs/rfcs/textual-tui.md,retain
-docs/roadmap.md,releases,plan,mixed,transitional,yes,docs/roadmap.md,split
+docs/roadmap.md,releases,landing,current,derived,yes,docs/archive/roadmap-disposition.md,retain
 docs/semantic-contract.md,architecture,landing,current,derived,yes,docs/architecture/semantic-contract.md,retain
 docs/textual-tui-plan.md,rfcs,landing,current,derived,yes,docs/rfcs/textual-tui.md,retain
 docs/tui.md,manual,landing,current,derived,yes,docs/manual/how-to/tui.md,retain
