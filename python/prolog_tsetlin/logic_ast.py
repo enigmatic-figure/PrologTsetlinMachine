@@ -365,6 +365,7 @@ def _convert_python_ast(node: ast.expr) -> _TreeNode:
 
 
 def parse_logic_tokens(tokens: Sequence[str]) -> LogicASTProgram:
+    """Parse tokenized Logic syntax into a typed AST program."""
     if not tokens:
         raise ValueError("cannot parse an empty Logic expression")
     translations = {"&": "and", "x": "or", "-": "not", "$": "else"}

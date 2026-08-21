@@ -19,7 +19,6 @@ not become architecture until they are accepted and implemented.
 :hidden:
 :maxdepth: 2
 
-adr/0001-hybrid-runtime-boundaries
 semantic-contract
 packed-tm
 cuda-packed-tm

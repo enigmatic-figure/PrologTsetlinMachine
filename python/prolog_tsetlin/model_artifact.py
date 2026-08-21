@@ -1092,6 +1092,7 @@ InferenceArtifact = (
 def load_model_artifact_from_bytes(
     data: bytes | bytearray | memoryview,
 ) -> InferenceArtifact:
+    """Load and validate an inference artifact from serialized bytes."""
     serialized = bytes(data)
     if len(serialized) < _CONTAINER_HEADER.size:
         raise ModelArtifactError("model artifact is truncated")
@@ -1108,6 +1109,7 @@ def load_model_artifact_from_bytes(
 
 
 def load_model_artifact(path: str | Path) -> InferenceArtifact:
+    """Load and validate an inference artifact from a filesystem path."""
     return load_model_artifact_from_bytes(_read_bounded_artifact(path))
 
 

@@ -92,6 +92,7 @@ jobs:
         run: python -m pip install -e ".[docs]"
       - name: Validate documentation metadata and links
         run: |
+          python scripts/check_python_api.py
           python scripts/render_help_reference.py --check
           python scripts/render_cli_reference.py --check
           python scripts/check_docs.py

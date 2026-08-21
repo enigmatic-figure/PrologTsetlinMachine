@@ -244,6 +244,7 @@ def load_logic_dataset(
     natural_path: str | Path,
     symbolic_path: str | Path,
 ) -> LogicDataset:
+    """Load paired natural and symbolic Logic CSV files with validation."""
     natural_file = Path(natural_path)
     symbolic_file = Path(symbolic_path)
     with natural_file.open(encoding="utf-8-sig", newline="") as stream:
@@ -300,6 +301,7 @@ def stratified_logic_split(
     evaluation_fraction: float = 0.2,
     seed: int = 20260806,
 ) -> LogicSplit:
+    """Create a deterministic class-stratified train/evaluation split."""
     if not 0.0 < evaluation_fraction < 1.0:
         raise ValueError("evaluation fraction must lie strictly between zero and one")
     by_target: dict[int, list[int]] = {0: [], 1: []}
@@ -572,6 +574,7 @@ def encode_logic_split(
     split: LogicSplit,
     encoding: LogicEncoding,
 ) -> EncodedLogicSplit:
+    """Fit the requested encoding on training rows and encode both partitions."""
     encoder = LogicEncoder.fit(
         encoding, (dataset.problems[index] for index in split.train_indices)
     )
@@ -587,6 +590,7 @@ def collision_report(
     rows: Sequence[Sequence[int]],
     targets: Sequence[int],
 ) -> CollisionReport:
+    """Measure duplicate encoded rows and label collisions."""
     if len(rows) != len(targets) or not rows:
         raise ValueError("collision rows and targets must be non-empty and aligned")
     groups: dict[tuple[int, ...], list[int]] = defaultdict(lambda: [0, 0])
@@ -608,6 +612,7 @@ def evaluation_signature_report(
     evaluation_rows: Sequence[Sequence[int]],
     evaluation_targets: Sequence[int],
 ) -> EvaluationSignatureReport:
+    """Compare train and evaluation signature coverage and collisions."""
     if len(train_rows) != len(train_targets) or not train_rows:
         raise ValueError("training signatures must be non-empty and aligned")
     if len(evaluation_rows) != len(evaluation_targets) or not evaluation_rows:

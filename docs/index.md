@@ -27,7 +27,6 @@ archive/index
 README
 ../UPGRADING
 architecture
-architecture/adr/template
 class-ii-lifecycle
 class-ii-persistence
 compatibility

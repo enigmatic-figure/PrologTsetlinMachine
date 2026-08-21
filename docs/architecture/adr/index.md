@@ -14,6 +14,14 @@ Each ADR records:
 Accepted ADRs are not rewritten to reflect a later design. A later ADR marks
 the earlier record superseded and updates the current architecture pages.
 
-The existing [hybrid runtime boundary record](0001-hybrid-runtime-boundaries.md) predates
-this directory and remains the accepted ADR 0001 until a compatibility-preserving
-file migration is scheduled.
+ADR 0001 was migrated from the original `docs/architecture.md` public path.
+That old path remains as a compatibility landing; this directory is now the
+canonical ADR location.
+
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+0001-hybrid-runtime-boundaries
+template
+```

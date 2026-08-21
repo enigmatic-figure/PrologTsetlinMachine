@@ -14,6 +14,10 @@ The `prolog_tsetlin` package re-exports the public surface from the modules belo
 .. automodule:: prolog_tsetlin._version
    :members:
    :no-index:
+
+.. automodule:: prolog_tsetlin
+   :members:
+   :no-index:
 ```
 
 ## Class II persistence and mapping
@@ -150,6 +154,18 @@ The `prolog_tsetlin` package re-exports the public surface from the modules belo
 
 ```{eval-rst}
 .. automodule:: prolog_tsetlin.adapters
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :no-index:
+
+.. automodule:: prolog_tsetlin.graph.connectors
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :no-index:
+
+.. automodule:: prolog_tsetlin.graph.types
    :members:
    :undoc-members:
    :show-inheritance:
