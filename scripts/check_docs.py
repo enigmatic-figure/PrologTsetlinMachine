@@ -12,6 +12,7 @@ INVENTORY = ROOT / "docs" / "_meta" / "inventory.csv"
 IGNORED_PARTS = {
     ".agents",
     ".codex",
+    ".gemini",
     ".git",
     ".hypothesis",
     ".pytest_cache",

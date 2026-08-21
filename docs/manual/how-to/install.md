@@ -173,5 +173,5 @@ an equivalent platform/architecture, or build from the source archive locally.
 | TUI extra is missing | Run `python -m pip install ".[tui]"` in the active environment. |
 | GNU Prolog is not found | Put `gprolog` on `PATH` or set `PTM_GPROLOG`. |
 | Native Python ABI mismatch | Rebuild the native library from the same checkout; core ABI is currently v2. |
-| `ptmrt` rejects an artifact version | Use a runtime supporting the artifact's declared container/payload version; see [Upgrading](../../../UPGRADING.md). |
+| `ptmrt` rejects an artifact version | Use a runtime supporting the artifact's declared container/payload version; see [Upgrading](../../releases/upgrading.md). |
 | CMake cannot find PTM | Set `CMAKE_PREFIX_PATH` to the install prefix, not the source or build directory. |

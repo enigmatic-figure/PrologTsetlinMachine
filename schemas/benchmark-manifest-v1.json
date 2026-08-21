@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ptm.benchmark-manifest.v1",
+  "title": "PTM benchmark manifest v1",
+  "type": "object",
+  "required": [
+    "commit",
+    "dirty",
+    "environment",
+    "backend",
+    "input_shape",
+    "timing_boundary",
+    "samples",
+    "median",
+    "mad",
+    "checksum",
+    "raw_data_hash"
+  ],
+  "properties": {
+    "commit": {
+      "type": "string"
+    },
+    "dirty": {
+      "type": "boolean"
+    },
+    "environment": {
+      "type": "object"
+    },
+    "backend": {
+      "type": "string"
+    },
+    "input_shape": {
+      "type": "object"
+    },
+    "timing_boundary": {
+      "type": "string"
+    },
+    "samples": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "median": {
+      "type": "number"
+    },
+    "mad": {
+      "type": "number"
+    },
+    "checksum": {
+      "type": "string"
+    },
+    "exclusions": {
+      "type": "array"
+    },
+    "raw_data_hash": {
+      "type": "string"
+    }
+  }
+}

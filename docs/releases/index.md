@@ -3,8 +3,8 @@
 This domain records what changed and what users must do about it. It does not
 own speculative future architecture.
 
-- [Changelog](../../CHANGELOG.md)
-- [Upgrade guide](../../UPGRADING.md)
+- [Changelog](changelog.md)
+- [Upgrade guide](upgrading.md)
 - [Compatibility matrix](../compatibility.md)
 - [Transitional roadmap](../roadmap.md)
 
@@ -15,8 +15,8 @@ completed history, evidence-backed capability status, and future work.
 :hidden:
 :maxdepth: 2
 
-../../CHANGELOG
-../../UPGRADING
+changelog
+upgrading
 ../compatibility
 ../roadmap
 ```

@@ -22,12 +22,16 @@ task, reference for exact facts, or explanation for design context.
 ## Reference
 
 - [Generated help topics and workbench controls](reference/help-topics.md)
+- [CLI reference — generated from the live parser](reference/cli.md)
+- [Python API reference — generated from docstrings](reference/python-api.md)
+- [Native API reference — generated from headers](reference/native-api.md)
+- [C ABI](reference/c-api.md)
 - [Portable artifact and runtime reference](reference/artifact-contract.md)
 - [Deterministic preprocessing contract](reference/preprocessing.md)
 - [Bounded-search contracts](reference/search-contracts.md)
 - [Streaming data connectors and transforms](reference/data-connectors.md)
 - [Typed feature templates](reference/feature-templates.md)
-- [C ABI](reference/c-api.md)
+- [Capability maturity — generated from registry](reference/maturity.md)
 
 For tested version combinations, see the release-owned
 [compatibility matrix](../compatibility.md).
@@ -53,19 +57,21 @@ how-to/export-artifacts
 how-to/embed-ptmrt
 how-to/create-feature-catalog
 reference/help-topics
+reference/cli
+reference/python-api
+reference/native-api
 reference/artifact-contract
 reference/preprocessing
 reference/search-contracts
 reference/data-connectors
 reference/feature-templates
 reference/c-api
+reference/maturity
 explanation/portable-deployment
 explanation/host-pipelines
 explanation/symbolic-search
 explanation/workbench
 
-../../README
-../../INSTALL
 ../consumer-tutorial
 ../tui
 ../bounded-search

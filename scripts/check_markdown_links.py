@@ -12,6 +12,7 @@ LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 IGNORED_PARTS = {
     ".agents",
     ".codex",
+    ".gemini",
     ".git",
     ".hypothesis",
     ".pytest_cache",

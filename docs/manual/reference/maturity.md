@@ -1,0 +1,17 @@
+# Capability maturity
+
+> Status: generated from `docs/_meta/capabilities.json` — Checkpoint 5 stub.
+> Maturity tables will be generated from the machine-readable registry and validated in CI.
+
+This page lists PTM capabilities and their evidence-backed maturity stages. The registry `docs/_meta/capabilities.json` is the single source of truth.
+
+| Capability | Maturity | Evidence |
+|---|---|---|
+| packed-tm-inference | stable | `docs/architecture/packed-tm.md` |
+| cuda-packed-tm | experimental | `docs/architecture/cuda-packed-tm.md` |
+| ptmrt-runtime | stable | `docs/manual/reference/artifact-contract.md` |
+| bounded-search | stable | `docs/manual/reference/search-contracts.md` |
+| pta-control-plane | proposed | `docs/rfcs/pta-control-plane.md` |
+| tui-workbench | experimental | `docs/manual/how-to/tui.md` |
+
+See [Architecture and contracts](../../architecture/index.md) for contracts and [RFCs](../../rfcs/index.md) for proposed directions.

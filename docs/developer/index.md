@@ -5,8 +5,8 @@ individual invariants belong in Python docstrings, public native headers, and
 Prolog predicate documentation; authored pages explain cross-language flows and
 contribution procedures.
 
-- [Contributing](../../CONTRIBUTING.md)
-- [GNU Prolog integration](../../prolog/README.md)
+- [Contributing](contributing.md)
+- [GNU Prolog integration](prolog.md)
 - [Hostile-input testing](../hostile-input-testing.md)
 - [Documentation constitution](../_meta/constitution.md)
 - [Documentation inventory](../_meta/inventory.md)
@@ -16,8 +16,8 @@ contribution procedures.
 :hidden:
 :maxdepth: 2
 
-../../CONTRIBUTING
-../../prolog/README
+contributing
+prolog
 ../hostile-input-testing
 ../_meta/constitution
 ../_meta/inventory
