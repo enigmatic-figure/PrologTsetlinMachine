@@ -1,3 +1,4 @@
-# Documentation and architecture files only - no build artifacts, dependencies, or temp files to ignore
-
-# Output remains empty as only documentation/markdown files are present
+```
+# Documentation archives
+docs/archive/
+```
