@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from math import isfinite
 import random
 from dataclasses import dataclass
 from typing import Iterable, Sequence
@@ -42,8 +43,8 @@ class ScalarBinaryTsetlinMachine:
             raise ValueError("clause and feature counts must be positive")
         if states_per_action <= 0:
             raise ValueError("states_per_action must be positive")
-        if specificity <= 1.0:
-            raise ValueError("specificity must be greater than one")
+        if not isfinite(specificity) or specificity <= 1.0:
+            raise ValueError("specificity must be finite and greater than one")
         if threshold <= 0:
             raise ValueError("threshold must be positive")
         self.number_of_clauses = number_of_clauses
@@ -265,4 +266,3 @@ class ScalarBinaryTsetlinMachine:
         )
         self._states = [list(row) for row in snapshot.states]
         self._rng.setstate(copy.deepcopy(snapshot.rng_state))
-

@@ -24,6 +24,7 @@ from ..prolog_bridge import (
     TAClauseSearchProblem,
     ThresholdSearchProblem,
 )
+from ._atomic import publish_bytes
 
 
 SEARCH_REQUEST_SCHEMA = "ptm.search.request.v1"
@@ -423,8 +424,7 @@ def export_search_artifact(
             "mismatch_count": result.report.get("mismatch_count"),
         },
     )
-    with destination.open("xb") as stream:
-        stream.write(artifact.serialized)
+    publish_bytes(destination, artifact.serialized, overwrite=False)
     return {
         "artifact_id": artifact.artifact_id,
         "artifact_kind": artifact.manifest["artifact_kind"],

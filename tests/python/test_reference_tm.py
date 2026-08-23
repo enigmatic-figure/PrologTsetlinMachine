@@ -37,6 +37,16 @@ def configured_xor_machine() -> ScalarBinaryTsetlinMachine:
 
 
 class ScalarTMTests(unittest.TestCase):
+    def test_constructor_rejects_non_finite_specificity(self) -> None:
+        for specificity in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(specificity=specificity):
+                with self.assertRaisesRegex(
+                    ValueError, "specificity must be finite and greater than one"
+                ):
+                    ScalarBinaryTsetlinMachine(
+                        2, 2, specificity=specificity
+                    )
+
     def test_class_i_output_feeds_xor_machine(self) -> None:
         schema = FeatureSchema.from_fields(
             x0=FieldKind.BOOLEAN,
@@ -78,4 +88,3 @@ class ScalarTMTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
