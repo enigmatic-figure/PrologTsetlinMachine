@@ -9,3 +9,4 @@
 *.py text eol=lf
 *.ps1 text eol=crlf
 *.sh text eol=lf
+tests/python/__snapshots__/**/*.svg text eol=lf whitespace=-blank-at-eol

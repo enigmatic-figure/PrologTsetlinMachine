@@ -27,8 +27,13 @@ Documentation = "https://github.com/enigmatic-figure/PrologTsetlinMachine/tree/m
 Issues = "https://github.com/enigmatic-figure/PrologTsetlinMachine/issues"
 
 [project.optional-dependencies]
-tui = ["textual>=8.2,<9"]
-test = ["pytest>=8", "pytest-asyncio>=1", "hypothesis>=6.100,<7"]
+tui = ["textual>=8.2,<9", "textual-plotext>=1.0"]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=1",
+    "pytest-textual-snapshot>=1.1,<2",
+    "hypothesis>=6.100,<7",
+]
 data = ["pyarrow>=18,<26", "Pillow>=12,<13"]
 graph = []
 docs = [
@@ -64,3 +69,6 @@ version = {attr = "prolog_tsetlin._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["python"]
+
+[tool.setuptools.package-data]
+"prolog_tsetlin.tui.single_pane" = ["*.tcss"]

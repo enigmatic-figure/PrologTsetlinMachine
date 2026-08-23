@@ -384,6 +384,12 @@ def _parser() -> argparse.ArgumentParser:
     tui.add_argument(
         "--demo", choices=("xor",), default="xor", help="initial demonstration dataset"
     )
+    tui.add_argument(
+        "--style",
+        choices=("classic", "single_pane"),
+        default="classic",
+        help="workbench style (classic screen-per-step or single-pane)",
+    )
     tui.set_defaults(handler=_tui)
 
     artifact = _topic_parser(
@@ -603,7 +609,7 @@ def _tui(arguments: argparse.Namespace) -> int:
                 "`python -m pip install 'prolog-tsetlin-machine[tui]'`"
             ) from None
         raise
-    run(workspace=arguments.workspace, demo=arguments.demo)
+    run(workspace=arguments.workspace, demo=arguments.demo, style=arguments.style)
     return 0
 
 

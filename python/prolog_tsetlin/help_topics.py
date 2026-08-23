@@ -355,6 +355,32 @@ TUI_BINDINGS = (
     TUIBindingSpec("q", "quit", "Quit", "Quit the workbench.", _ALL_VIEWS),
 )
 
+# Navigation is shell presentation, not a PTM command.  Keep the complete
+# registry above for the classic frontend and its contextual help, while
+# allowing other shells to share only behavior with the same semantics.
+TUI_NAVIGATION_ACTIONS = frozenset(
+    ("show_overview", "show_train", "show_clauses", "show_artifacts", "show_search")
+)
+TUI_SEMANTIC_ACTIONS = frozenset(
+    (
+        "train",
+        "cancel",
+        "export",
+        "load_artifact",
+        "run_record",
+        "search",
+        "cancel_search",
+        "help",
+        "quit",
+    )
+)
+TUI_NAVIGATION_BINDINGS = tuple(
+    binding for binding in TUI_BINDINGS if binding.action in TUI_NAVIGATION_ACTIONS
+)
+TUI_SEMANTIC_BINDINGS = tuple(
+    binding for binding in TUI_BINDINGS if binding.action in TUI_SEMANTIC_ACTIONS
+)
+
 
 _DISPLAY_KEY_OVERRIDES: Mapping[str, str] = MappingProxyType(
     {
