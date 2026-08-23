@@ -31,7 +31,13 @@ jobs:
           assert importlib.util.find_spec('textual') is None;
           assert not any(name == 'textual' or name.startswith('textual.') for name in sys.modules)"
       - name: Run core Python tests
-        run: python -m pytest tests/python --ignore=tests/python/test_tui.py
+        run: >-
+          python -m pytest tests/python
+          --ignore=tests/python/test_tui.py
+          --ignore=tests/python/test_frontend_contract.py
+          --ignore=tests/python/test_single_pane.py
+          --ignore=tests/python/test_single_pane_snapshot.py
+          --ignore=tests/python/test_tui_launcher.py
 
   tui:
     name: TUI / Python ${{ matrix.python }} / ${{ matrix.os }}
@@ -48,12 +54,21 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - name: Install TUI test environment
-        run: python -m pip install -e ".[tui,test]"
+        run: python -m pip install -e ".[tui,test,tui-test]"
+      - name: Verify TUI test dependencies
+        run: >-
+          python -c "import importlib.util;
+          assert importlib.util.find_spec('textual') is not None;
+          assert importlib.util.find_spec('pytest_textual_snapshot') is not None"
       - name: Run TUI tests
         run: >-
           python -m pytest
           tests/python/test_tui.py
           tests/python/test_help_topics.py
+          tests/python/test_frontend_contract.py
+          tests/python/test_single_pane.py
+          tests/python/test_single_pane_snapshot.py
+          tests/python/test_tui_launcher.py
 
   native:
     name: Native / ${{ matrix.os }}
@@ -325,9 +340,11 @@ jobs:
       - name: Test the built wheel in isolation
         run: |
           python -m venv out/wheel-smoke
-          out/wheel-smoke/bin/python -m pip install dist/*.whl
+          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          out/wheel-smoke/bin/python -m pip install "${wheel}[tui]"
           out/wheel-smoke/bin/ptm --version
           out/wheel-smoke/bin/python -c "from prolog_tsetlin import TokenAdapter; assert TokenAdapter('text').tokenize('Hello') == ('hello',)"
+          out/wheel-smoke/bin/python -c "from importlib.resources import files; from prolog_tsetlin.tui.single_pane import SinglePaneApp; assert files('prolog_tsetlin.tui.single_pane').joinpath('ptm.tcss').is_file(); assert SinglePaneApp.CSS_PATH == 'ptm.tcss'"
           test -f out/wheel-smoke/share/prolog-tsetlin-machine/prolog/bounded_structure_search.pl
 
   required-ci:

@@ -735,11 +735,13 @@ test = [
     { name = "hypothesis" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "pytest-textual-snapshot" },
 ]
 tui = [
     { name = "textual" },
     { name = "textual-plotext" },
+]
+tui-test = [
+    { name = "pytest-textual-snapshot" },
 ]
 
 [package.metadata]
@@ -751,13 +753,13 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'data'", specifier = ">=18,<26" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=1" },
-    { name = "pytest-textual-snapshot", marker = "extra == 'test'", specifier = ">=1.1,<2" },
+    { name = "pytest-textual-snapshot", marker = "extra == 'tui-test'", specifier = ">=1.1,<2" },
     { name = "sphinx", marker = "python_full_version >= '3.11' and extra == 'docs'", specifier = ">=8.2,<10" },
     { name = "sphinx", marker = "python_full_version < '3.11' and extra == 'docs'", specifier = ">=7,<8.2" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=8.2,<9" },
     { name = "textual-plotext", marker = "extra == 'tui'", specifier = ">=1.0" },
 ]
-provides-extras = ["tui", "test", "data", "graph", "docs"]
+provides-extras = ["tui", "test", "tui-test", "data", "graph", "docs"]
 
 [[package]]
 name = "pyarrow"

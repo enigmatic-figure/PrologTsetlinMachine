@@ -12,6 +12,27 @@ def _temporary_files(target: Path) -> list[Path]:
     return list(target.parent.glob(f".{target.name}.tmp.*"))
 
 
+def test_atomic_no_overwrite_publication_succeeds_without_residue(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "model.ptm"
+
+    _atomic.publish_bytes(target, b"complete artifact", overwrite=False)
+
+    assert target.read_bytes() == b"complete artifact"
+    assert _temporary_files(target) == []
+
+
+def test_atomic_overwrite_publication_replaces_complete_bytes(tmp_path: Path) -> None:
+    target = tmp_path / "model.ptm"
+    target.write_bytes(b"original")
+
+    _atomic.publish_bytes(target, b"complete replacement", overwrite=True)
+
+    assert target.read_bytes() == b"complete replacement"
+    assert _temporary_files(target) == []
+
+
 def test_atomic_publication_preserves_no_overwrite_semantics(tmp_path: Path) -> None:
     target = tmp_path / "model.ptm"
     target.write_bytes(b"original")

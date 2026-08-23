@@ -245,5 +245,6 @@ Explore PTM through the keyboard-first Textual workbench.
 |---|---|
 | `--workspace` | directory used for artifacts and workbench state |
 | `--demo` | initial demonstration dataset {choices: xor} (default: `'xor'`) |
+| `--style` | workbench style (classic screen-per-step or single-pane) {choices: classic, single_pane} (default: `'classic'`) |
 
 See [Help topics](help-topics.md) for conceptual topics, examples, requirements, and workbench controls.

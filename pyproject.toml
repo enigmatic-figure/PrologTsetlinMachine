@@ -31,9 +31,9 @@ tui = ["textual>=8.2,<9", "textual-plotext>=1.0"]
 test = [
     "pytest>=8",
     "pytest-asyncio>=1",
-    "pytest-textual-snapshot>=1.1,<2",
     "hypothesis>=6.100,<7",
 ]
+tui-test = ["pytest-textual-snapshot>=1.1,<2"]
 data = ["pyarrow>=18,<26", "Pillow>=12,<13"]
 graph = []
 docs = [
