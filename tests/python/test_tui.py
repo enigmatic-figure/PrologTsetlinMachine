@@ -9,12 +9,13 @@ except ImportError as error:  # dependency-free unittest verification path
     raise SkipTest("Textual tests require the optional pytest stack") from error
 
 textual = pytest.importorskip("textual")
-from textual.widgets import Input, Select, TextArea
+from textual.widgets import Button, Input, Select, TextArea
 
 from prolog_tsetlin.model_artifact import load_model_artifact
 from prolog_tsetlin.tui.app import PTMApp
 from prolog_tsetlin.tui.models import JobState
 from prolog_tsetlin.services.search import SearchKind
+from prolog_tsetlin.services.training import TrainingRequest, train_xor
 
 
 GPROLOG = Path(
@@ -42,7 +43,7 @@ async def test_tui_trains_xor_from_keyboard() -> None:
 @pytest.mark.asyncio
 async def test_tui_can_cancel_training() -> None:
     app = PTMApp()
-    app.session.request = app.session.request.__class__(epochs=100_000)
+    app.session.configured_request = TrainingRequest(epochs=100_000)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.press("t")
         await pilot.press("x")
@@ -78,6 +79,25 @@ async def test_tui_marks_a_completed_run_stale_when_configuration_changes() -> N
         await pilot.pause()
 
         assert app.session.configuration_dirty
+        assert app.query_one("#export-button", Button).disabled
+
+
+@pytest.mark.asyncio
+async def test_tui_mid_training_edit_is_stale_when_run_completes() -> None:
+    app = PTMApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.query_one("#config-epochs", Input).value = "1"
+        await pilot.pause()
+        trained_request = app._request_from_form()
+        app.training.begin(trained_request)
+
+        app.query_one("#config-seed", Input).value = str(trained_request.seed + 1)
+        await pilot.pause()
+        app._show_result(train_xor(trained_request))
+
+        assert app.session.configuration_dirty
+        assert "STALE CONFIGURATION" in str(app.query_one("#job").render())
+        assert app.query_one("#export-button", Button).disabled
         assert "STALE CONFIGURATION" in str(app.query_one("#job").render())
 
 

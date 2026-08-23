@@ -11,6 +11,7 @@ from typing import Any
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Resize
 from textual.screen import ModalScreen
@@ -39,24 +40,13 @@ from ..prolog_bridge import (
     PrologBridgeError,
     PrologSearchCancelled,
 )
-from ..services.artifacts import ArtifactExportRequest, export_training_run
+from ..services.artifacts import ArtifactExportRequest
 from ..services.environment import inspect_environment
-from ..services.inference import (
-    ArtifactInputField,
-    artifact_input_fields,
-    inspect_artifact,
-    parse_typed_record,
-    run_artifact_records,
-    verify_artifact,
-)
+from ..services.inference import ArtifactInputField
 from ..services.search import (
-    BoundedSearchRequest,
     BoundedSearchResult,
     SearchKind,
     demo_search_document,
-    export_search_artifact,
-    run_bounded_search,
-    search_request_budget,
 )
 from ..services.telemetry import TelemetrySession
 from ..services.training import (
@@ -64,7 +54,11 @@ from ..services.training import (
     TrainingProgress,
     TrainingRequest,
     TrainingRun,
-    train_xor,
+)
+from .controllers import (
+    ArtifactSessionController,
+    SearchSessionController,
+    TrainingSessionController,
 )
 from .models import JobState, SessionState
 
@@ -252,9 +246,13 @@ class PTMApp(App[None]):
         self.workspace = (workspace or Path.cwd()).expanduser().resolve()
         self.demo = demo
         self.session = SessionState()
+        self.training = TrainingSessionController(self.session)
+        self.artifacts = ArtifactSessionController(self.session)
+        self.search = SearchSessionController(self.session)
         self.telemetry = TelemetrySession()
         self._cancel = Event()
         self._search_cancel = Event()
+        self._search_generation = 0
         self._hydrating = True
         self._run_started = 0.0
 
@@ -500,7 +498,10 @@ class PTMApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        request = self.session.request
+        request = self.session.configured_request
+        if request is None:
+            request = TrainingRequest()
+            self.session.configured_request = request
         values = {
             "#config-clauses": request.number_of_clauses,
             "#config-states": request.states_per_action,
@@ -589,27 +590,48 @@ class PTMApp(App[None]):
             return
         if not event.input.id.startswith("config-"):
             return
-        self.session.configuration_dirty = True
-        if self.session.run is not None and self.session.job_state is JobState.SUCCEEDED:
+        try:
+            current_request = self._request_from_form()
+            current_request.validate()
+        except ValueError:
+            stale = self.training.synchronize_configuration(None)
+        else:
+            stale = self.training.synchronize_configuration(current_request)
+        if self.session.last_completed_run is None:
+            return
+        self._sync_training_export_control()
+        if stale:
             self.query_one("#job", Static).update("SUCCEEDED / STALE CONFIGURATION")
             self.query_one("#metric-run", Static).update("RUN\nSTALE CONFIG")
             self.query_one("#next-action", Static).update(
                 "The visible results belong to the previous settings. Press "
                 f"{_binding_key('train')} to retrain."
             )
+        else:
+            run = self.session.last_completed_run
+            self.query_one("#job", Static).update(
+                f"SUCCEEDED / accuracy {run.accuracy:.0%}"
+            )
+            self.query_one("#metric-run", Static).update("RUN\nSUCCEEDED")
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._hydrating or event.select.id != "search-kind":
             return
+        if self.search.active:
+            self._search_cancel.set()
+            self._emit(
+                "search",
+                "job_state",
+                message="active search invalidated by kind change",
+            )
+        self._search_generation += 1
         kind = SearchKind(str(event.value))
         document = demo_search_document(kind)
         self.query_one("#search-json", TextArea).text = json.dumps(document, indent=2)
         self.query_one("#search-timeout", Input).value = str(
             document.get("timeout_seconds", 30)
         )
-        self.session.search_request = None
-        self.session.search_result = None
-        self.session.search_state = JobState.IDLE
+        self.search.reset()
         self.query_one("#search-status", Static).update(
             f"READY / {kind.value.upper()} DEMO LOADED"
         )
@@ -620,8 +642,15 @@ class PTMApp(App[None]):
         self.query_one("#search-export-button", Button).disabled = True
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        if event.data_table.id == "clauses" and self.session.run is not None:
-            self._show_clause_detail(event.cursor_row)
+        if (
+            event.data_table.id == "clauses"
+            and self.session.last_completed_run is not None
+        ):
+            try:
+                self._show_clause_detail(event.cursor_row)
+            except NoMatches:
+                # A final table event may race normal screen teardown in tests.
+                return
 
     def on_resize(self, event: Resize) -> None:
         self._apply_breakpoint(event.size.width, event.size.height)
@@ -730,13 +759,11 @@ class PTMApp(App[None]):
         fields_container = self.query_one("#record-fields", Vertical)
         try:
             path = self._artifact_path_from_form()
-            report = inspect_artifact(path)
-            verification = verify_artifact(path)
-            fields = artifact_input_fields(path)
+            loaded = self.artifacts.load(path)
+            report = loaded.inspection
+            verification = loaded.verification
+            fields = loaded.fields
         except (OSError, ValueError, RuntimeError) as error:
-            self.session.loaded_artifact_path = None
-            self.session.artifact_inspection = None
-            self.session.artifact_fields = ()
             await fields_container.remove_children()
             await fields_container.mount(
                 Static("No raw-record schema is available until an artifact loads.")
@@ -750,9 +777,6 @@ class PTMApp(App[None]):
             self._emit("artifact", "failure", "error", message=str(error))
             return
 
-        self.session.loaded_artifact_path = path
-        self.session.artifact_inspection = report
-        self.session.artifact_fields = fields
         await fields_container.remove_children()
         if fields:
             widgets = []
@@ -801,7 +825,9 @@ class PTMApp(App[None]):
     def action_verify_artifact(self) -> None:
         self.action_show_artifacts()
         try:
-            report = verify_artifact(self._artifact_path_from_form())
+            report = self.artifacts.verify_loaded(
+                displayed_path=self._artifact_path_from_form()
+            )
         except (OSError, ValueError, RuntimeError) as error:
             self.query_one("#artifact-open-status", Static).update(
                 f"VERIFY FAILED / {error}"
@@ -818,20 +844,17 @@ class PTMApp(App[None]):
 
     def action_run_record(self) -> None:
         self.action_show_artifacts()
-        path = self.session.loaded_artifact_path
         fields = self.session.artifact_fields
         try:
-            if path is None or not fields:
+            if not fields:
                 raise ValueError("load a raw-record-capable artifact first")
-            if self._artifact_path_from_form() != path:
-                raise ValueError("artifact path changed; load it before running")
             values = {
                 field.name: self.query_one(f"#record-field-{index}", Input).value
                 for index, field in enumerate(fields)
             }
-            record = parse_typed_record(fields, values)
-            report = run_artifact_records(path, (record,))
-            result = report["results"][0]
+            result = self.artifacts.run_record(
+                values, displayed_path=self._artifact_path_from_form()
+            )
         except (OSError, ValueError, RuntimeError) as error:
             self.query_one("#artifact-inference", Static).update(
                 f"INFERENCE FAILED / {error}"
@@ -841,23 +864,23 @@ class PTMApp(App[None]):
 
         trace = self.query_one("#feature-trace", DataTable)
         trace.clear()
-        for item in result["feature_trace"]:
+        for item in result.feature_trace:
             trace.add_row(
                 item["field"],
                 item["expression"],
                 item["value"],
                 item["literal_id"],
             )
-        prediction = result["prediction"]
-        label = result.get("label", prediction)
+        prediction = result.prediction
+        label = result.label
         self.query_one("#artifact-inference", Static).update(
             f"PREDICTION {label} / class index {prediction}\n"
-            f"Materialized features: {result['features']}"
+            f"Materialized features: {list(result.features)}"
         )
         self._emit(
             "artifact",
             "prediction",
-            message=f"record prediction={prediction} features={result['features']}",
+            message=f"record prediction={prediction} features={list(result.features)}",
         )
 
     def action_events(self) -> None:
@@ -869,11 +892,7 @@ class PTMApp(App[None]):
         self.push_screen(HelpScreen(view))
 
     def action_search(self) -> None:
-        if self.session.search_state in (
-            JobState.QUEUED,
-            JobState.RUNNING,
-            JobState.CANCELLING,
-        ):
+        if self.search.active:
             return
         self.action_show_search()
         try:
@@ -882,22 +901,23 @@ class PTMApp(App[None]):
             if not isinstance(document, dict):
                 raise ValueError("search JSON must contain an object")
             timeout = float(self.query_one("#search-timeout", Input).value)
-            request = BoundedSearchRequest.from_dict(
+            prepared = self.search.prepare(
                 document,
                 expected_kind=kind,
                 timeout_seconds=timeout,
             )
-            budget = search_request_budget(request)
+            request = prepared.request
+            budget = prepared.budget
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            self.session.search_error = str(error)
+            self.search.failed(str(error))
             self._set_search_state(JobState.FAILED, "INVALID REQUEST")
             self.query_one("#search-result", TextArea).text = str(error)
             self._emit("search", "failure", "error", message=str(error))
             return
-        self.session.search_request = request
-        self.session.search_result = None
-        self.session.search_error = None
-        self._search_cancel.clear()
+        self._search_generation += 1
+        generation = self._search_generation
+        cancel = Event()
+        self._search_cancel = cancel
         self.query_one("#counterexamples", DataTable).clear()
         self.query_one("#search-export-button", Button).disabled = True
         self.query_one("#search-result", TextArea).text = json.dumps(
@@ -918,65 +938,91 @@ class PTMApp(App[None]):
                 f"timeout={request.timeout_seconds:g}s"
             ),
         )
-        self._search_worker()
+        self._search_worker(request, cancel, generation)
 
     def action_cancel_search(self) -> None:
-        if self.session.search_state not in (JobState.QUEUED, JobState.RUNNING):
+        if not self.search.request_cancel():
             return
         self._search_cancel.set()
         self._set_search_state(JobState.CANCELLING, "CANCELLING PROLOG SEARCH")
         self._emit("search", "job_state", message="cancellation requested")
 
     @work(thread=True, exclusive=True, group="prolog-search")
-    def _search_worker(self) -> None:
-        request = self.session.search_request
-        if request is None:
-            return
-        self.call_from_thread(self._show_search_running)
+    def _search_worker(self, request, cancel: Event, generation: int) -> None:
+        self.call_from_thread(self._show_search_running, generation)
         try:
-            result = run_bounded_search(
-                request,
-                cancel=self._search_cancel.is_set,
-            )
+            result = self.search.run(request, cancel=cancel.is_set)
         except PrologSearchCancelled as error:
-            self.call_from_thread(self._show_search_cancelled, str(error))
+            self.call_from_thread(
+                self._show_search_cancelled, str(error), generation
+            )
         except (
             NoThresholdSolution,
             NoFeatureTemplateSolution,
             NoTAClauseSolution,
             NoDecisionTreeSolution,
         ) as error:
-            self.call_from_thread(self._show_search_no_solution, str(error))
+            self.call_from_thread(
+                self._show_search_no_solution, str(error), generation
+            )
         except (KeyError, TypeError, ValueError, OSError, PrologBridgeError) as error:
-            self.call_from_thread(self._show_search_failure, str(error))
+            self.call_from_thread(
+                self._show_search_failure, str(error), generation
+            )
         else:
-            self.call_from_thread(self._show_search_result, result)
+            self.call_from_thread(self._show_search_result, result, generation)
 
-    def _show_search_running(self) -> None:
+    def _search_callback_is_current(self, generation: int | None) -> bool:
+        return generation is None or generation == self._search_generation
+
+    def _show_search_running(self, generation: int | None = None) -> None:
+        if not self._search_callback_is_current(generation):
+            return
         if self.session.search_state is JobState.QUEUED:
+            self.search.mark_running()
             self._set_search_state(JobState.RUNNING, "SEARCHING / GNU PROLOG")
             self._emit("search", "job_state", message="GNU Prolog started")
 
-    def _show_search_cancelled(self, message: str) -> None:
+    def _show_search_cancelled(
+        self, message: str, generation: int | None = None
+    ) -> None:
+        if not self._search_callback_is_current(generation):
+            return
+        self.search.cancelled()
         self._set_search_state(JobState.CANCELLED, "CANCELLED")
         self.query_one("#search-result", TextArea).text = message.splitlines()[0]
         self._emit("search", "job_state", message="search cancelled")
 
-    def _show_search_no_solution(self, message: str) -> None:
+    def _show_search_no_solution(
+        self, message: str, generation: int | None = None
+    ) -> None:
+        if not self._search_callback_is_current(generation):
+            return
+        self.search.no_solution()
         self._set_search_state(JobState.SUCCEEDED, "COMPLETE / NO EXACT SOLUTION")
         self.query_one("#search-result", TextArea).text = json.dumps(
             {"status": "no_solution", "message": message}, indent=2
         )
         self._emit("search", "search_result", message=f"no solution: {message}")
 
-    def _show_search_failure(self, message: str) -> None:
-        self.session.search_error = message
+    def _show_search_failure(
+        self, message: str, generation: int | None = None
+    ) -> None:
+        if not self._search_callback_is_current(generation):
+            return
+        self.search.failed(message)
         self._set_search_state(JobState.FAILED, "SEARCH FAILED")
         self.query_one("#search-result", TextArea).text = message
         self._emit("search", "failure", "error", message=message)
 
-    def _show_search_result(self, result: BoundedSearchResult) -> None:
-        self.session.search_result = result
+    def _show_search_result(
+        self,
+        result: BoundedSearchResult,
+        generation: int | None = None,
+    ) -> None:
+        if not self._search_callback_is_current(generation):
+            return
+        self.search.complete(result)
         report = result.to_dict()
         candidate_bound = int(result.report.get("candidate_upper_bound", 0))
         self._set_search_state(
@@ -1020,8 +1066,8 @@ class PTMApp(App[None]):
         if not path.is_absolute():
             path = self.workspace / path
         try:
-            report = export_search_artifact(
-                result, path, name=f"prolog-{result.kind.value}"
+            report = self.search.export(
+                path, name=f"prolog-{result.kind.value}"
             )
         except FileExistsError:
             self.query_one("#search-status", Static).update(
@@ -1042,28 +1088,21 @@ class PTMApp(App[None]):
         )
 
     def action_train(self) -> None:
-        if self.session.job_state in (
-            JobState.QUEUED,
-            JobState.RUNNING,
-            JobState.CANCELLING,
-        ):
+        if self.training.active:
             return
         self.action_show_train()
         try:
             request = self._request_from_form()
-            request.validate()
+            self.training.begin(request)
         except ValueError as error:
+            self.training.synchronize_configuration(None)
+            self._sync_training_export_control()
             message = str(error)
             self.session.error = message
             self.query_one("#validation", Static).update(message)
             self._emit("training", "failure", "error", message=f"configuration: {message}")
             return
-        self.session.request = request
-        self.session.configuration_dirty = False
-        self.session.error = None
-        self.session.progress_epoch = 0
-        self.session.progress_accuracy = 0.0
-        self.session.accuracy_history.clear()
+        self._sync_training_export_control()
         self.query_one("#validation", Static).update("")
         self.query_one("#predictions", DataTable).clear()
         self.query_one("#clauses", DataTable).clear()
@@ -1100,11 +1139,26 @@ class PTMApp(App[None]):
             seed=integer("#config-seed", "seed"),
         )
 
+    def _current_request_or_none(self) -> TrainingRequest | None:
+        try:
+            current_request = self._request_from_form()
+            current_request.validate()
+        except ValueError:
+            return None
+        return current_request
+
+    def _sync_training_export_control(self) -> None:
+        self.query_one("#export-button", Button).disabled = (
+            self.session.last_completed_run is None
+            or self.training.active
+            or self.session.configuration_dirty
+        )
+
     def action_cancel(self) -> None:
         if self.session.search_state in (JobState.QUEUED, JobState.RUNNING):
             self.action_cancel_search()
             return
-        if self.session.job_state not in (JobState.QUEUED, JobState.RUNNING):
+        if not self.training.request_cancel():
             return
         self._cancel.set()
         self._set_job_state(JobState.CANCELLING, "CANCELLING")
@@ -1119,7 +1173,7 @@ class PTMApp(App[None]):
                 self.call_from_thread(self._show_progress, value)
 
         try:
-            result = train_xor(self.session.request, progress=report, cancel=self._cancel)
+            result = self.training.run(progress=report, cancel=self._cancel)
         except TrainingCancelled as error:
             self.call_from_thread(self._show_cancelled, str(error))
         except (ValueError, RuntimeError) as error:
@@ -1133,9 +1187,7 @@ class PTMApp(App[None]):
             self._emit("training", "job_state", message="training started")
 
     def _show_progress(self, value: TrainingProgress) -> None:
-        self.session.progress_epoch = value.epoch
-        self.session.progress_accuracy = value.accuracy
-        self.session.accuracy_history.append(value.accuracy)
+        self.training.record_progress(value.epoch, value.accuracy)
         self.query_one("#progress", ProgressBar).update(
             total=value.epochs,
             progress=value.epoch,
@@ -1151,11 +1203,18 @@ class PTMApp(App[None]):
         )
 
     def _show_failure(self, message: str) -> None:
-        self.session.error = message
+        self.training.failed(
+            message, current_request=self._current_request_or_none()
+        )
+        self._sync_training_export_control()
         self._set_job_state(JobState.FAILED, "FAILED")
         self._emit("training", "failure", "error", message=message)
 
     def _show_cancelled(self, message: str) -> None:
+        self.training.cancelled(
+            current_request=self._current_request_or_none()
+        )
+        self._sync_training_export_control()
         self._set_job_state(JobState.CANCELLED, "CANCELLED")
         self.query_one("#next-action", Static).update(
             "Adjust the configuration or press "
@@ -1164,11 +1223,18 @@ class PTMApp(App[None]):
         self._emit("training", "job_state", message=message)
 
     def _show_result(self, result: TrainingRun) -> None:
-        self.session.run = result
+        self.training.complete(
+            result, current_request=self._current_request_or_none()
+        )
         elapsed = perf_counter() - self._run_started
+        completion_label = (
+            "SUCCEEDED / STALE CONFIGURATION"
+            if self.session.configuration_dirty
+            else f"SUCCEEDED / accuracy {result.accuracy:.0%} / {elapsed:.2f}s"
+        )
         self._set_job_state(
             JobState.SUCCEEDED,
-            f"SUCCEEDED / accuracy {result.accuracy:.0%} / {elapsed:.2f}s",
+            completion_label,
         )
         self.query_one("#progress", ProgressBar).update(
             total=result.request.epochs,
@@ -1204,8 +1270,14 @@ class PTMApp(App[None]):
                 key=str(index),
             )
         self._show_clause_detail(0)
-        self.query_one("#export-button", Button).disabled = False
+        self._sync_training_export_control()
         self._update_overview()
+        if self.session.configuration_dirty:
+            self.query_one("#metric-run", Static).update("RUN\nSTALE CONFIG")
+            self.query_one("#next-action", Static).update(
+                "The completed run belongs to the settings that started training. "
+                f"Press {_binding_key('train')} to train the visible configuration."
+            )
         self._emit(
             "training",
             "metric",
@@ -1213,7 +1285,7 @@ class PTMApp(App[None]):
         )
 
     def _show_clause_detail(self, index: int) -> None:
-        run = self.session.run
+        run = self.session.last_completed_run
         if run is None or index < 0 or index >= len(run.snapshot.states):
             return
         states = run.snapshot.states[index]
@@ -1230,10 +1302,13 @@ class PTMApp(App[None]):
 
     def action_export(self) -> None:
         self.action_show_artifacts()
-        if self.session.run is None or self.session.job_state is not JobState.SUCCEEDED:
+        try:
+            current_request = self._request_from_form()
+            current_request.validate()
+        except ValueError as error:
+            self.training.synchronize_configuration(None)
             self.query_one("#artifact-status", Static).update(
-                "NO COMPLETED RUN / Press "
-                f"{_binding_key('train')} to train before exporting."
+                f"EXPORT BLOCKED / Invalid visible configuration: {error}"
             )
             return
         raw_path = self.query_one("#artifact-path", Input).value.strip()
@@ -1247,7 +1322,7 @@ class PTMApp(App[None]):
             description=self.query_one("#artifact-description", Input).value,
         )
         try:
-            summary = export_training_run(self.session.run, request)
+            summary = self.training.export(current_request, request)
         except FileExistsError:
             message = "REFUSED / That file already exists. Choose a new path; no data was replaced."
             self.query_one("#artifact-status", Static).update(message)
@@ -1258,7 +1333,6 @@ class PTMApp(App[None]):
             self.query_one("#artifact-status", Static).update(f"EXPORT FAILED / {message}")
             self._emit("artifact", "failure", "error", message=message)
             return
-        self.session.artifact = summary
         self.query_one("#artifact-status", Static).update("EXPORTED / CONFORMANCE VERIFIED")
         self.query_one("#artifact-open-path", Input).value = str(summary.path)
         self.query_one("#artifact-details", Static).update(
@@ -1303,7 +1377,7 @@ class PTMApp(App[None]):
             )
 
     def _update_overview(self) -> None:
-        run = self.session.run
+        run = self.session.last_completed_run
         artifact = self.session.artifact
         if run is not None:
             self.query_one("#metric-run", Static).update("RUN\nSUCCEEDED")
