@@ -3,6 +3,8 @@
 import pytest
 from prolog_tsetlin.representation import FeatureSchema, FieldKind, LiteralCatalog
 from prolog_tsetlin.pta import (
+    NATIVE_TARGETS,
+    ExecutableBinaryClause,
     PTAEscalationProposal,
     PTAInsight,
     lower_exact,
@@ -27,6 +29,152 @@ from prolog_tsetlin.pta import (
 )
 from prolog_tsetlin.pta.proposal import PTAMorphologyProposal
 from prolog_tsetlin.pta.graph_pta import RelationalHypothesis
+
+
+def _minimal_proposal(**overrides) -> PTAEscalationProposal:
+    values = {
+        "proposal_id": "strict-types",
+        "source_pta_ids": ("pta:test",),
+        "supporting_insights": (),
+        "counterexamples_addressed": (),
+        "required_literals": (),
+        "native_target": "composite_gate",
+        "structure": {"specialists": ["binary"]},
+        "resource_bounds": {},
+    }
+    values.update(overrides)
+    return PTAEscalationProposal(**values)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("proposal_id", True),
+        ("source_pta_ids", (1.9,)),
+        ("source_pta_ids", (True,)),
+        ("counterexamples_addressed", (1.9,)),
+        ("counterexamples_addressed", (True,)),
+        ("required_literals", (1.9,)),
+        ("required_literals", (True,)),
+        ("weights", (1.9,)),
+        ("weights", (True,)),
+        ("output_assignments", ((0, 1.9),)),
+        ("output_assignments", ((True, 0),)),
+        ("support_trace", (1.9,)),
+        ("support_trace", (True,)),
+        ("native_target", True),
+        ("lowering_version", True),
+    ],
+)
+def test_escalation_proposal_rejects_semantic_type_coercion(field, value):
+    with pytest.raises(TypeError):
+        _minimal_proposal(**{field: value})
+
+
+def test_insight_rejects_non_string_identity_fields():
+    with pytest.raises(TypeError):
+        PTAInsight(True, "kind", "subject")
+
+
+def _proposal_for_native_target(target, catalog, descriptor):
+    from prolog_tsetlin.logic_consolidation import (
+        FixedLogicInstruction,
+        FixedLogicOpcode,
+        LogicProgram32,
+    )
+
+    program = LogicProgram32(
+        (FixedLogicInstruction(FixedLogicOpcode.INPUT, argument=0),),
+        root_instruction=0,
+    )
+    structures = {
+        "binary_clause": {"clause": [descriptor.literal_id]},
+        "logic_program": {"program": program.to_dict()},
+        "threshold": {"clause": [descriptor.literal_id]},
+        "shared_weighted_clause": {"weights": {"0:0": 1}},
+        "regression_clause": {"clause": [descriptor.literal_id]},
+        "graph_clause": {"depth": 1},
+        "patch_clause": {
+            "kind": "region",
+            "patch": {"rows": 1, "cols": 1},
+        },
+        "composite_gate": {"specialists": ["binary"]},
+    }
+    bounds = {
+        "binary_clause": {"literal_count": 1},
+        "logic_program": {"literal_count": 1},
+        "threshold": {"literal_count": 1},
+        "shared_weighted_clause": {"clause_count": 1},
+        "regression_clause": {"literal_count": 1},
+        "graph_clause": {"graph_depth": 1},
+        "patch_clause": {"patch_extent": 1},
+        "composite_gate": {"literal_count": 1},
+    }
+    required = (
+        (descriptor,)
+        if target in {"binary_clause", "threshold", "regression_clause"}
+        else ()
+    )
+    return PTAEscalationProposal(
+        proposal_id=f"target:{target}",
+        source_pta_ids=("pta:test",),
+        supporting_insights=(),
+        counterexamples_addressed=(),
+        required_literals=required,
+        native_target=target,
+        structure=structures[target],
+        resource_bounds=bounds[target],
+    )
+
+
+@pytest.mark.parametrize("target", NATIVE_TARGETS)
+def test_every_native_target_has_exact_fail_closed_semantics(target):
+    schema = FeatureSchema.from_fields(x=FieldKind.NUMBER)
+    catalog = LiteralCatalog(schema)
+    descriptor = catalog.numeric_ge("x", 5.0)
+    proposal = _proposal_for_native_target(target, catalog, descriptor)
+
+    result = lower_exact(proposal, catalog=catalog)
+
+    if target == "binary_clause":
+        assert isinstance(result, LoweredCandidate)
+        assert result.native_kind == "executable_binary_clause"
+        assert isinstance(result.native_object, ExecutableBinaryClause)
+    elif target == "logic_program":
+        assert isinstance(result, LoweredCandidate)
+        assert result.native_kind == "logic_program32"
+    else:
+        assert isinstance(result, NotRepresentable)
+
+
+def test_lowered_candidate_cannot_claim_an_unsupported_target():
+    proposal = _minimal_proposal()
+    with pytest.raises(TypeError, match="only be created by lower_exact"):
+        LoweredCandidate(proposal, object(), "composite_gate")
+
+
+def test_lowered_candidate_factory_cannot_be_bypassed_with_different_semantics():
+    schema = FeatureSchema.from_fields(x=FieldKind.NUMBER)
+    catalog = LiteralCatalog(schema)
+    declared = catalog.numeric_ge("x", 1.0)
+    different = catalog.numeric_ge("x", 2.0)
+    proposal = PTAEscalationProposal(
+        proposal_id="candidate-mismatch",
+        source_pta_ids=("pta:test",),
+        supporting_insights=(),
+        counterexamples_addressed=(),
+        required_literals=(declared,),
+        native_target="binary_clause",
+        structure={"clause": (declared.literal_id,)},
+        resource_bounds={"literal_count": 1},
+    )
+
+    with pytest.raises(TypeError, match="only be created by lower_exact"):
+        LoweredCandidate(
+            proposal,
+            ExecutableBinaryClause((different,)),
+            "executable_binary_clause",
+        )
 
 
 def test_pattern_only_logic_fails_exact():
@@ -140,7 +288,15 @@ def test_literal_must_exist_in_catalog():
         structure={"clause": [desc.literal_id]},
         resource_bounds={"literal_count": 1},
     )
-    assert isinstance(lower_exact(p_ok, catalog=cat), LoweredCandidate)
+    lowered = lower_exact(p_ok, catalog=cat)
+    assert isinstance(lowered, LoweredCandidate)
+    assert isinstance(lowered.native_object, ExecutableBinaryClause)
+    assert lowered.native_object.evaluate({desc.literal_id: True}) is True
+    assert lowered.native_object.evaluate({desc.literal_id: False}) is False
+    with pytest.raises(KeyError, match="missing truth value"):
+        lowered.native_object.evaluate({})
+    with pytest.raises(TypeError, match="must be bool"):
+        lowered.native_object.evaluate({desc.literal_id: 1})
     # Fake integer not in catalog should fail exact with catalog
     p_fake = PTAEscalationProposal(
         proposal_id="fake",
@@ -153,6 +309,66 @@ def test_literal_must_exist_in_catalog():
         resource_bounds={"literal_count": 1},
     )
     assert isinstance(lower_exact(p_fake, catalog=cat), NotRepresentable)
+
+
+def test_binary_clause_exact_lowering_requires_canonical_literal_identity():
+    schema = FeatureSchema.from_fields(x=FieldKind.NUMBER)
+    catalog = LiteralCatalog(schema)
+    descriptors = (
+        catalog.numeric_ge("x", 1.0),
+        catalog.numeric_ge("x", 2.0),
+    )
+    literal_ids = tuple(sorted(descriptor.literal_id for descriptor in descriptors))
+
+    for clause in (tuple(reversed(literal_ids)), (literal_ids[0], literal_ids[0])):
+        proposal = PTAEscalationProposal(
+            proposal_id="noncanonical-clause",
+            source_pta_ids=("pta:test",),
+            supporting_insights=(),
+            counterexamples_addressed=(),
+            required_literals=(),
+            native_target="binary_clause",
+            structure={"clause": clause},
+            resource_bounds={"literal_count": len(clause)},
+        )
+        assert isinstance(lower_exact(proposal, catalog=catalog), NotRepresentable)
+
+    noncanonical_reference = PTAEscalationProposal(
+        proposal_id="noncanonical-reference",
+        source_pta_ids=("pta:test",),
+        supporting_insights=(),
+        counterexamples_addressed=(),
+        required_literals=(f"literal:0{literal_ids[0]}",),
+        native_target="binary_clause",
+        structure={"clause": (literal_ids[0],)},
+        resource_bounds={"literal_count": 1},
+    )
+    assert isinstance(
+        lower_exact(noncanonical_reference, catalog=catalog), NotRepresentable
+    )
+
+
+def test_descriptor_and_canonical_literal_id_share_semantic_identity():
+    schema = FeatureSchema.from_fields(x=FieldKind.NUMBER)
+    catalog = LiteralCatalog(schema)
+    descriptor = catalog.numeric_ge("x", 1.0)
+    common = {
+        "proposal_id": "semantic-literal-identity",
+        "source_pta_ids": ("pta:test",),
+        "supporting_insights": (),
+        "counterexamples_addressed": (),
+        "native_target": "binary_clause",
+        "structure": {"clause": (descriptor.literal_id,)},
+        "resource_bounds": {"literal_count": 1},
+    }
+    by_descriptor = PTAEscalationProposal(
+        required_literals=(descriptor,), **common
+    )
+    by_id = PTAEscalationProposal(
+        required_literals=(f"literal:{descriptor.literal_id}",), **common
+    )
+
+    assert by_descriptor.semantic_id() == by_id.semantic_id()
 
 
 def test_fake_composite_gate_fails_exact():
