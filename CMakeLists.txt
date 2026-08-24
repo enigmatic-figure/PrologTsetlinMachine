@@ -206,6 +206,8 @@ if(PTM_BUILD_TESTS)
         tests/cpp/model_runtime_tests.cpp)
     target_link_libraries(ptm_model_runtime_tests
         PRIVATE PTM::runtime Threads::Threads)
+    target_include_directories(ptm_model_runtime_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_features(ptm_model_runtime_tests PRIVATE cxx_std_20)
     target_compile_definitions(ptm_model_runtime_tests PRIVATE
         PTM_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"

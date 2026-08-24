@@ -231,6 +231,19 @@ constexpr std::array<std::uint32_t, 64> sha256_constants{
     return result;
 }
 
+[[nodiscard]] std::string stable_u64_decimal(
+    std::string_view canonical_json) {
+    const auto bytes = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(canonical_json.data()),
+        canonical_json.size());
+    const auto digest = sha256(bytes);
+    std::uint64_t identity = 0;
+    for (std::size_t index = 0; index < sizeof(identity); ++index) {
+        identity = (identity << 8U) | digest[index];
+    }
+    return std::to_string(identity);
+}
+
 void copy_text(char* destination,
                std::size_t capacity,
                std::string_view source) noexcept {
@@ -1636,7 +1649,8 @@ namespace {
     const auto literal_ids =
         ptm::runtime_detail::feature_literal_ids(manifest);
     if (!ptm::runtime_detail::parse_preprocessing(
-            manifest, features, model->preprocessing) ||
+            manifest, features, model->preprocessing,
+            stable_u64_decimal) ||
         !materialization || !literal_ids ||
         (*materialization != "precomputed" &&
          *materialization != "precomputed_or_raw_record_v1") ||
