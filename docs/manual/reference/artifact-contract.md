@@ -27,6 +27,16 @@ The raw trailer digest, rendered as `sha256:<hex>`, is the artifact identity.
 The manifest names the mechanism `sha256-trailer-v1`; it cannot contain its
 own resulting digest.
 
+The portable manifest complexity contract is part of `ptm.model.v1`, not an
+implementation-specific parser setting. A manifest is limited to 16 MiB of
+canonical UTF-8 JSON, a maximum decoded value depth of 8 (the root is depth
+zero), and at most 100,000 decoded JSON values. Object member names are not
+values for the node count. Exporters reject manifests outside these bounds
+before publication, and both the Python loader and `ptmrt` enforce the same
+limits before schema-specific interpretation. The C header exposes the limits
+as `PTMRT_MODEL_MANIFEST_MAX_BYTES`, `PTMRT_MODEL_MANIFEST_MAX_DEPTH`, and
+`PTMRT_MODEL_MANIFEST_MAX_NODES`.
+
 The manifest declares versions, producer, kind, runtime requirements,
 research metadata, named ports, feature/literal identities, validation data,
 source lineage, dimensions, and resource bounds. Unknown required payloads or

@@ -124,6 +124,109 @@ std::vector<std::uint8_t> read_golden() {
     return read_fixture("xor_packed_tm_v1.hex");
 }
 
+[[nodiscard]] std::uint64_t read_u64_test(
+    const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    require(offset + sizeof(std::uint64_t) <= bytes.size(),
+            "test fixture uint64 read is out of bounds");
+    std::uint64_t result = 0;
+    for (std::size_t byte = 0; byte < sizeof(result); ++byte) {
+        result |= static_cast<std::uint64_t>(bytes[offset + byte])
+                  << (byte * 8U);
+    }
+    return result;
+}
+
+void write_u64_test(std::vector<std::uint8_t>& bytes, std::size_t offset,
+                    std::uint64_t value) {
+    require(offset + sizeof(value) <= bytes.size(),
+            "test fixture uint64 write is out of bounds");
+    for (std::size_t byte = 0; byte < sizeof(value); ++byte) {
+        bytes[offset + byte] =
+            static_cast<std::uint8_t>(value >> (byte * 8U));
+    }
+}
+
+[[nodiscard]] std::string fixture_manifest(
+    const std::vector<std::uint8_t>& artifact) {
+    const auto manifest_size = read_u64_test(artifact, 24U);
+    require(manifest_size <= artifact.size() - 64U - 32U,
+            "test fixture manifest is out of bounds");
+    return std::string(
+        artifact.begin() + 64,
+        artifact.begin() + 64 + static_cast<std::ptrdiff_t>(manifest_size));
+}
+
+[[nodiscard]] std::vector<std::uint8_t> replace_fixture_manifest(
+    const std::vector<std::uint8_t>& artifact, std::string_view manifest) {
+    const auto old_manifest_size = read_u64_test(artifact, 24U);
+    const auto payload_size = read_u64_test(artifact, 32U);
+    const auto payload_offset = 64U + old_manifest_size;
+    require(payload_offset + payload_size + 32U == artifact.size(),
+            "test fixture sections are inconsistent");
+
+    std::vector<std::uint8_t> result;
+    result.reserve(64U + manifest.size() +
+                   static_cast<std::size_t>(payload_size) + 32U);
+    result.insert(result.end(), artifact.begin(), artifact.begin() + 64);
+    result.insert(result.end(), manifest.begin(), manifest.end());
+    result.insert(
+        result.end(),
+        artifact.begin() + static_cast<std::ptrdiff_t>(payload_offset),
+        artifact.begin() +
+            static_cast<std::ptrdiff_t>(payload_offset + payload_size));
+    result.resize(result.size() + 32U);
+    write_u64_test(result, 24U, manifest.size());
+    const auto digest = sha256_test(std::span<const std::uint8_t>(
+        result.data(), result.size() - 32U));
+    std::copy(digest.begin(), digest.end(), result.end() - 32);
+    return result;
+}
+
+[[nodiscard]] std::string manifest_with_probe(
+    std::string manifest, std::string_view probe) {
+    require(!manifest.empty() && manifest.back() == '}',
+            "test fixture manifest is not an object");
+    manifest.pop_back();
+    manifest.append(",\"zz_portability_probe\":");
+    manifest.append(probe);
+    manifest.push_back('}');
+    return manifest;
+}
+
+[[nodiscard]] std::string nested_probe(std::size_t container_count) {
+    std::string result;
+    result.reserve(container_count * 6U + 4U);
+    for (std::size_t index = 0; index < container_count; ++index) {
+        result.append("{\"x\":");
+    }
+    result.append("null");
+    result.append(container_count, '}');
+    return result;
+}
+
+[[nodiscard]] std::string null_array_probe(std::size_t element_count) {
+    std::string result;
+    result.reserve(element_count * 5U + 2U);
+    result.push_back('[');
+    for (std::size_t index = 0; index < element_count; ++index) {
+        if (index != 0) result.push_back(',');
+        result.append("null");
+    }
+    result.push_back(']');
+    return result;
+}
+
+void require_open_status(const std::vector<std::uint8_t>& artifact,
+                         ptmrt_status expected, std::string_view message) {
+    ptmrt_model* model = nullptr;
+    const auto actual =
+        ptmrt_model_open_memory(artifact.data(), artifact.size(), &model);
+    require(actual == expected, message);
+    require((actual == PTMRT_STATUS_OK) == (model != nullptr),
+            "runtime returned an inconsistent model pointer");
+    ptmrt_model_close(model);
+}
+
 struct ModelOwner {
     ptmrt_model* value{};
     ModelOwner() = default;
@@ -542,6 +645,55 @@ void test_bounded_hostile_artifact_corpus() {
            "runtime accepted an artifact size above its allocation ceiling");
 }
 
+void test_portable_manifest_complexity_contract() {
+    static_assert(PTMRT_MODEL_MANIFEST_MAX_BYTES == 16U * 1024U * 1024U);
+    static_assert(PTMRT_MODEL_MANIFEST_MAX_DEPTH == 8U);
+    static_assert(PTMRT_MODEL_MANIFEST_MAX_NODES == 100000U);
+
+    struct FixtureCase {
+        std::string_view filename;
+        std::size_t base_nodes;
+    };
+    constexpr std::array cases{
+        FixtureCase{"xor_packed_tm_v1.hex", 69U},
+        FixtureCase{"conditional_logic_program_v1.hex", 86U},
+        FixtureCase{"masked_threshold_v1.hex", 93U},
+    };
+
+    for (const auto& test_case : cases) {
+        const auto base = read_fixture(test_case.filename);
+        const auto manifest = fixture_manifest(base);
+
+        auto candidate = replace_fixture_manifest(
+            base, manifest_with_probe(
+                      manifest,
+                      nested_probe(PTMRT_MODEL_MANIFEST_MAX_DEPTH - 1U)));
+        require_open_status(candidate, PTMRT_STATUS_OK,
+                            "runtime rejected a manifest at max depth");
+
+        candidate = replace_fixture_manifest(
+            base, manifest_with_probe(
+                      manifest,
+                      nested_probe(PTMRT_MODEL_MANIFEST_MAX_DEPTH)));
+        require_open_status(candidate, PTMRT_STATUS_INVALID_FORMAT,
+                            "runtime accepted a manifest above max depth");
+
+        const auto at_limit_elements =
+            PTMRT_MODEL_MANIFEST_MAX_NODES - test_case.base_nodes - 1U;
+        candidate = replace_fixture_manifest(
+            base, manifest_with_probe(
+                      manifest, null_array_probe(at_limit_elements)));
+        require_open_status(candidate, PTMRT_STATUS_OK,
+                            "runtime rejected a manifest at max nodes");
+
+        candidate = replace_fixture_manifest(
+            base, manifest_with_probe(
+                      manifest, null_array_probe(at_limit_elements + 1U)));
+        require_open_status(candidate, PTMRT_STATUS_INVALID_FORMAT,
+                            "runtime accepted a manifest above max nodes");
+    }
+}
+
 void test_file_loader() {
     const auto bytes = read_golden();
     const auto path = std::filesystem::path(PTM_TEST_BINARY_DIR) /
@@ -808,6 +960,7 @@ int main() {
         test_graph_artifact_load_describe_verify_and_unsupported_run();
         test_integrity_and_argument_rejection();
         test_bounded_hostile_artifact_corpus();
+        test_portable_manifest_complexity_contract();
         test_file_loader();
         test_concurrent_read_only_inference();
         test_concurrent_logic_inference();

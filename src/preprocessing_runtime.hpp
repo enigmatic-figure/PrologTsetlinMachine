@@ -37,7 +37,9 @@ public:
 
 private:
     [[nodiscard]] std::optional<JsonValue> value(unsigned depth) {
-        if (depth > 8 || position_ >= source_.size() || ++nodes_ > 100000) {
+        if (depth > PTMRT_MODEL_MANIFEST_MAX_DEPTH ||
+            position_ >= source_.size() ||
+            ++nodes_ > PTMRT_MODEL_MANIFEST_MAX_NODES) {
             return std::nullopt;
         }
         const auto lead = source_[position_];
