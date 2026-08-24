@@ -11,7 +11,8 @@ The `ptm.model.v1` boundary enforces:
 
 - 256 MiB maximum container size;
 - 16 MiB maximum canonical JSON manifest;
-- 16 levels and 1,000,000 decoded JSON nodes in the Python manifest loader;
+- 8 levels and 100,000 decoded JSON values in both the Python and `ptmrt`
+  manifest loaders;
 - payload-specific dimensions and at most 16 conformance cases;
 - SHA-256 integrity before JSON or payload interpretation;
 - exact section sizes, reserved bytes, versions, kinds, and canonical JSON.

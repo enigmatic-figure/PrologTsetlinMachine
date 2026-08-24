@@ -37,7 +37,9 @@ public:
 
 private:
     [[nodiscard]] std::optional<JsonValue> value(unsigned depth) {
-        if (depth > 8 || position_ >= source_.size() || ++nodes_ > 100000) {
+        if (depth > PTMRT_MODEL_MANIFEST_MAX_DEPTH ||
+            position_ >= source_.size() ||
+            ++nodes_ > PTMRT_MODEL_MANIFEST_MAX_NODES) {
             return std::nullopt;
         }
         const auto lead = source_[position_];
@@ -141,10 +143,84 @@ private:
                 case 'n': result.push_back('\n'); break;
                 case 'r': result.push_back('\r'); break;
                 case 't': result.push_back('\t'); break;
+                case 'u':
+                    if (!append_unicode_escape(result)) return std::nullopt;
+                    break;
                 default: return std::nullopt;
             }
         }
         return std::nullopt;
+    }
+
+    [[nodiscard]] static std::optional<std::uint32_t> hex_value(char value) {
+        if (value >= '0' && value <= '9') {
+            return static_cast<std::uint32_t>(value - '0');
+        }
+        if (value >= 'a' && value <= 'f') {
+            return 10U + static_cast<std::uint32_t>(value - 'a');
+        }
+        if (value >= 'A' && value <= 'F') {
+            return 10U + static_cast<std::uint32_t>(value - 'A');
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<std::uint32_t> unicode_code_unit() {
+        if (position_ + 4U > source_.size()) return std::nullopt;
+        std::uint32_t result = 0;
+        for (unsigned index = 0; index < 4U; ++index) {
+            const auto digit = hex_value(source_[position_ + index]);
+            if (!digit) return std::nullopt;
+            result = (result << 4U) | *digit;
+        }
+        position_ += 4U;
+        return result;
+    }
+
+    static void append_utf8(std::string& result, std::uint32_t code_point) {
+        if (code_point <= 0x7fU) {
+            result.push_back(static_cast<char>(code_point));
+        } else if (code_point <= 0x7ffU) {
+            result.push_back(static_cast<char>(0xc0U | (code_point >> 6U)));
+            result.push_back(static_cast<char>(0x80U | (code_point & 0x3fU)));
+        } else if (code_point <= 0xffffU) {
+            result.push_back(static_cast<char>(0xe0U | (code_point >> 12U)));
+            result.push_back(static_cast<char>(
+                0x80U | ((code_point >> 6U) & 0x3fU)));
+            result.push_back(static_cast<char>(0x80U | (code_point & 0x3fU)));
+        } else {
+            result.push_back(static_cast<char>(0xf0U | (code_point >> 18U)));
+            result.push_back(static_cast<char>(
+                0x80U | ((code_point >> 12U) & 0x3fU)));
+            result.push_back(static_cast<char>(
+                0x80U | ((code_point >> 6U) & 0x3fU)));
+            result.push_back(static_cast<char>(0x80U | (code_point & 0x3fU)));
+        }
+    }
+
+    [[nodiscard]] bool append_unicode_escape(std::string& result) {
+        const auto first = unicode_code_unit();
+        if (!first) return false;
+
+        std::uint32_t code_point = *first;
+        if (*first >= 0xd800U && *first <= 0xdbffU) {
+            if (position_ + 2U > source_.size() ||
+                source_[position_] != '\\' ||
+                source_[position_ + 1U] != 'u') {
+                return false;
+            }
+            position_ += 2U;
+            const auto second = unicode_code_unit();
+            if (!second || *second < 0xdc00U || *second > 0xdfffU) {
+                return false;
+            }
+            code_point = 0x10000U + ((*first - 0xd800U) << 10U) +
+                         (*second - 0xdc00U);
+        } else if (*first >= 0xdc00U && *first <= 0xdfffU) {
+            return false;
+        }
+        append_utf8(result, code_point);
+        return true;
     }
 
     [[nodiscard]] std::optional<JsonValue> number() {

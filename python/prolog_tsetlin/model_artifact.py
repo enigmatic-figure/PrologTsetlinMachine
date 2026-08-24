@@ -58,9 +58,9 @@ _MASKED_THRESHOLD_HEADER = struct.Struct("<IIIIIIII")
 _GRAPH_TM_HEADER = struct.Struct("<IIIIIIII")
 _DIGEST_SIZE = 32
 _MAX_ARTIFACT_BYTES = 256 << 20
-_MAX_MANIFEST_BYTES = 16 << 20
-_MAX_MANIFEST_DEPTH = 16
-_MAX_MANIFEST_NODES = 1_000_000
+MODEL_MANIFEST_MAX_BYTES = 16 << 20
+MODEL_MANIFEST_MAX_DEPTH = 8
+MODEL_MANIFEST_MAX_NODES = 100_000
 _MAX_DIMENSION = 1 << 20
 _MAX_CONFORMANCE_CASES = 16
 
@@ -93,13 +93,13 @@ def _validate_manifest_complexity(value: object) -> None:
     while stack:
         current, depth = stack.pop()
         nodes += 1
-        if nodes > _MAX_MANIFEST_NODES:
+        if nodes > MODEL_MANIFEST_MAX_NODES:
             raise ModelArtifactError("model artifact manifest is too complex")
-        if depth > _MAX_MANIFEST_DEPTH:
+        if depth > MODEL_MANIFEST_MAX_DEPTH:
             raise ModelArtifactError("model artifact manifest is nested too deeply")
         if isinstance(current, dict):
             stack.extend((child, depth + 1) for child in current.values())
-        elif isinstance(current, list):
+        elif isinstance(current, (list, tuple)):
             stack.extend((child, depth + 1) for child in current)
 
 
@@ -151,7 +151,7 @@ def _decode_model_container(
         raise ModelArtifactError("unsupported model artifact kind or flags")
     if reserved != bytes(len(reserved)):
         raise ModelArtifactError("model artifact reserved bytes are nonzero")
-    if manifest_size > _MAX_MANIFEST_BYTES:
+    if manifest_size > MODEL_MANIFEST_MAX_BYTES:
         raise ModelArtifactError("model artifact manifest exceeds the v1 size ceiling")
     expected_size = header_size + manifest_size + payload_size + _DIGEST_SIZE
     if expected_size != len(serialized):
@@ -198,13 +198,19 @@ def _decode_model_container(
 def _encode_model_container(
     model_kind: int, manifest: Mapping[str, Any], payload: bytes | bytearray
 ) -> bytes:
-    manifest_bytes = json.dumps(
-        manifest,
-        allow_nan=False,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    _validate_manifest_complexity(manifest)
+    try:
+        manifest_bytes = json.dumps(
+            manifest,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (RecursionError, TypeError, UnicodeEncodeError, ValueError) as error:
+        raise ModelArtifactError("model artifact manifest is invalid JSON") from error
+    if len(manifest_bytes) > MODEL_MANIFEST_MAX_BYTES:
+        raise ModelArtifactError("model artifact manifest exceeds the v1 size ceiling")
     header = _CONTAINER_HEADER.pack(
         _MAGIC,
         CONTAINER_VERSION,

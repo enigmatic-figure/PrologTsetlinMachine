@@ -36,7 +36,8 @@ constexpr std::size_t graph_tm_header_size = 32;
 constexpr std::size_t logic_instruction_size = 8;
 constexpr std::size_t digest_size = 32;
 constexpr std::size_t maximum_artifact_size = 256U * 1024U * 1024U;
-constexpr std::size_t maximum_manifest_size = 16U * 1024U * 1024U;
+constexpr std::size_t maximum_manifest_size =
+    PTMRT_MODEL_MANIFEST_MAX_BYTES;
 constexpr std::uint32_t maximum_dimension = 1U << 20U;
 constexpr std::uint32_t maximum_conformance_cases = 16;
 constexpr std::uint32_t logic_program_capacity = 32;
