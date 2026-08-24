@@ -1,5 +1,19 @@
-from .proposal import PTAEscalationProposal, PTAInsight, PTAMorphologyProposal
-from .lowering import LoweredCandidate, NotRepresentable, lowerable, lower_exact, syntactically_bounded, check_example
+from .proposal import (
+    NATIVE_TARGETS,
+    NativeTarget,
+    PTAEscalationProposal,
+    PTAInsight,
+    PTAMorphologyProposal,
+)
+from .executable import ExecutableBinaryClause
+from .lowering import (
+    LoweredCandidate,
+    NotRepresentable,
+    check_example,
+    lower_exact,
+    lowerable,
+    syntactically_bounded,
+)
 from .ontology import PROLOG_ONTOLOGY
 from .input import InputPTA, LiteralProposal
 from .deescalation import DeescalationPTA
@@ -17,6 +31,9 @@ __all__ = [
     "PTAEscalationProposal",
     "PTAInsight",
     "PTAMorphologyProposal",
+    "NativeTarget",
+    "NATIVE_TARGETS",
+    "ExecutableBinaryClause",
     "LoweredCandidate",
     "NotRepresentable",
     "lowerable",

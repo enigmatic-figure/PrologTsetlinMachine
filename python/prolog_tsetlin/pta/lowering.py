@@ -18,24 +18,81 @@ shallow preliminary check; lower_exact() is the gate.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Callable
 
-from .proposal import MAX_CLAUSES, MAX_GRAPH_DEPTH, PTAEscalationProposal
+from ..logic_ast import LOGIC_AST_VARIABLES
+from ..representation import LiteralDescriptor
+from .executable import ExecutableBinaryClause
+from .proposal import (
+    MAX_CLAUSES,
+    MAX_GRAPH_DEPTH,
+    NATIVE_TARGETS,
+    NativeTarget,
+    PTAEscalationProposal,
+)
 
 MAX_LITERALS_PER_CLAUSE = 64
 MAX_WEIGHT_ABS = 1_000_000
 PATCH_MAX_CELLS = 1 << 20
+_LOWERED_CANDIDATE_TOKEN = object()
+
+
+def _plain_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _plain_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_value(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
 class LoweredCandidate:
-    """Successful exact lowering — contains actual PTM representation."""
+    """Successful exact lowering containing an executable target object."""
 
     proposal: PTAEscalationProposal
     native_object: Any
     native_kind: str
     description: str = "ok"
+    _verification_token: object = field(
+        default=None, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        if self._verification_token is not _LOWERED_CANDIDATE_TOKEN:
+            raise TypeError("LoweredCandidate can only be created by lower_exact()")
+        if self.proposal.native_target == "binary_clause":
+            if self.native_kind != "executable_binary_clause" or not isinstance(
+                self.native_object, ExecutableBinaryClause
+            ):
+                raise TypeError(
+                    "binary_clause candidates require ExecutableBinaryClause"
+                )
+            if self.native_object.literal_ids != self.proposal.structure.get(
+                "clause"
+            ):
+                raise ValueError(
+                    "binary_clause candidate differs from the declared structure"
+                )
+            return
+        if self.proposal.native_target == "logic_program":
+            from ..logic_consolidation import LogicProgram32
+
+            if self.native_kind != "logic_program32" or not isinstance(
+                self.native_object, LogicProgram32
+            ):
+                raise TypeError("logic_program candidates require LogicProgram32")
+            if self.native_object.to_dict() != _plain_value(
+                self.proposal.structure.get("program")
+            ):
+                raise ValueError(
+                    "logic_program candidate differs from the declared structure"
+                )
+            return
+        raise TypeError(
+            f"{self.proposal.native_target} has no executable exact representation"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +112,7 @@ def validate_proposal_schema(proposal: PTAEscalationProposal) -> tuple[bool, str
         return False, "proposal_id must be nonempty printable"
     if not proposal.source_pta_ids:
         return False, "source_pta_ids empty"
-    if proposal.native_target not in {"binary_clause", "shared_weighted_clause", "regression_clause", "patch_clause", "graph_clause", "logic_program", "threshold", "composite_gate"}:
+    if proposal.native_target not in NATIVE_TARGETS:
         return False, f"unknown target {proposal.native_target}"
     for k, v in proposal.resource_bounds.items():
         if type(v) is not int or isinstance(v, bool) or v <= 0:
@@ -81,8 +138,6 @@ def syntactically_bounded(proposal: PTAEscalationProposal) -> tuple[bool, str]:
         if target == "shared_weighted_clause":
             if "weights" in struct:
                 # Allow dict or MappingProxyType after freeze
-                from collections.abc import Mapping
-
                 wdict = struct["weights"]
                 if not isinstance(wdict, Mapping) or not len(wdict):
                     return False, "shared weights must be nonempty dict"
@@ -113,20 +168,27 @@ def syntactically_bounded(proposal: PTAEscalationProposal) -> tuple[bool, str]:
         return True, "ok (syntactically bounded)"
 
     if target == "patch_clause":
-        if "patch_extent" in rb:
-            pe = rb["patch_extent"]
-            if isinstance(pe, int):
-                if pe > PATCH_MAX_CELLS:
-                    return False, "patch extent exceeds bounded cells"
-            elif isinstance(pe, dict):
-                cells = pe.get("rows", 1) * pe.get("cols", 1)
-                if cells > PATCH_MAX_CELLS:
-                    return False, "patch extent exceeds bounded cells"
+        if "patch_extent" not in rb:
+            return False, "patch_extent resource bound is required"
+        patch_extent = rb["patch_extent"]
+        if patch_extent > PATCH_MAX_CELLS:
+            return False, "patch extent exceeds bounded cells"
         extent = struct.get("patch")
-        if isinstance(extent, dict):
-            cells = extent.get("rows", 1) * extent.get("cols", 1)
-            if cells > PATCH_MAX_CELLS:
-                return False, "patch extent exceeds bounded cells"
+        if not isinstance(extent, Mapping):
+            return False, "patch must be a rows/cols mapping"
+        if "rows" not in extent or "cols" not in extent:
+            return False, "patch rows and cols are required"
+        rows = extent["rows"]
+        cols = extent["cols"]
+        if type(rows) is not int or rows <= 0:
+            return False, "patch rows must be a positive integer"
+        if type(cols) is not int or cols <= 0:
+            return False, "patch cols must be a positive integer"
+        cells = rows * cols
+        if cells > PATCH_MAX_CELLS:
+            return False, "patch extent exceeds bounded cells"
+        if cells != patch_extent:
+            return False, "patch dimensions do not match patch_extent"
         if not isinstance(struct.get("kind", ""), str):
             return False, "patch kind must be string"
         return True, "ok (syntactically bounded)"
@@ -208,121 +270,333 @@ def _decode_logic_program32(value: Any) -> Any | None:
         return None
 
 
-def _construct_native(proposal: PTAEscalationProposal, *, catalog: Any | None = None) -> tuple[Any, str] | None:
-    """Attempt to construct actual PTM representation for proposal.
+@dataclass(frozen=True, slots=True)
+class _ConstructedCandidate:
+    native_object: Any
+    native_kind: str
 
-    Returns (native_object, kind) on success, None on NotRepresentable (caller turns into reason).
-    """
-    target = proposal.native_target
-    struct = proposal.structure
 
-    # Exact lowering: binary/regression/threshold require catalog and real ClauseConfiguration
-    if target == "threshold":
-        # Threshold is a single-literal binary clause with threshold semantics — separate from binary_clause
-        clause = struct.get("clause") or struct.get("literals") or []
-        if not clause and not proposal.required_literals:
-            return None
-        if clause:
-            if catalog is None:
-                return None
-            for lit in clause:
-                if not any(d.literal_id == lit for d in getattr(catalog, "literals", ())):
-                    return None
-            try:
-                from ..feature_templates import ClauseConfiguration
-                cfg = ClauseConfiguration(clause_index=0, included_literals=tuple(clause), excluded_literals=(), polarity=1)
-                return cfg, "clause_configuration"
-            except Exception:
-                return None
-        # descriptor-only threshold
-        if catalog is None:
-            return None
-        for req in proposal.required_literals:
-            if hasattr(req, "literal_id"):
-                if not any(d.literal_id == req.literal_id for d in getattr(catalog, "literals", ())):
-                    return None
-            elif isinstance(req, str):
-                if ":" not in req:
-                    return None
-            else:
-                return None
-        # descriptors previewed and catalog contains them — construct placeholder ClauseConfiguration with those IDs
-        # For exact gate we still need clause ints, so descriptor-only threshold without clause is NotRepresentable
+_Constructor = Callable[
+    [PTAEscalationProposal, Any | None, Any | None],
+    _ConstructedCandidate | NotRepresentable,
+]
+_SemanticOracle = Callable[
+    [PTAEscalationProposal, _ConstructedCandidate, Any | None, Any | None],
+    tuple[bool, str],
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetLowerer:
+    construct: _Constructor
+    semantic_oracle: _SemanticOracle
+
+
+def _required_literal_id(value: LiteralDescriptor | str) -> int | None:
+    if isinstance(value, LiteralDescriptor):
+        return value.literal_id
+    prefix = "literal:"
+    if not value.startswith(prefix):
         return None
-
-    if target in ("binary_clause", "regression_clause"):
-        clause = struct.get("clause") or struct.get("literals") or []
-        if clause:
-            if catalog is None:
-                return None
-            for lit in clause:
-                if not any(d.literal_id == lit for d in getattr(catalog, "literals", ())):
-                    return None
-            try:
-                from ..feature_templates import ClauseConfiguration
-                cfg = ClauseConfiguration(clause_index=0, included_literals=tuple(clause), excluded_literals=(), polarity=1)
-                return cfg, "clause_configuration"
-            except Exception:
-                return None
-        # descriptor-only requires catalog and real descriptors
-        if proposal.required_literals:
-            if catalog is None:
-                return None
-            for req in proposal.required_literals:
-                if hasattr(req, "literal_id"):
-                    if not any(d.literal_id == req.literal_id for d in getattr(catalog, "literals", ())):
-                        return None
-                elif isinstance(req, str):
-                    if ":" not in req:
-                        return None
-                    # string descriptors like "numeric_ge:field:123" are not yet materialized — need catalog preview to become literal_id
-                    # Without materialization to literal_id, not exact
-                    return None
-                else:
-                    return None
-            # All required_literals are real descriptors already in catalog — but we still need clause ints to build ClauseConfiguration
-            # So descriptor-only without clause is NotRepresentable until clause is materialized
-            return None
+    raw = value[len(prefix) :]
+    if (
+        not raw
+        or not raw.isascii()
+        or not raw.isdecimal()
+        or str(int(raw)) != raw
+    ):
         return None
+    literal_id = int(raw)
+    return literal_id if literal_id < (1 << 64) else None
 
-    if target == "shared_weighted_clause":
-        return None
 
-    if target == "graph_clause":
-        return None
+def _lower_binary_clause(
+    proposal: PTAEscalationProposal,
+    catalog: Any | None,
+    context: Any | None,
+) -> _ConstructedCandidate | NotRepresentable:
+    del context
+    clause = proposal.structure.get("clause")
+    if not isinstance(clause, tuple) or not clause:
+        return NotRepresentable(
+            proposal, "binary_clause requires a nonempty canonical clause tuple"
+        )
+    if any(
+        type(literal_id) is not int or not 0 <= literal_id < (1 << 64)
+        for literal_id in clause
+    ):
+        return NotRepresentable(
+            proposal, "binary_clause literal IDs must be unsigned 64-bit integers"
+        )
+    if clause != tuple(sorted(set(clause))):
+        return NotRepresentable(
+            proposal, "binary_clause literal IDs must be sorted and unique"
+        )
+    if catalog is None:
+        return NotRepresentable(
+            proposal, "binary_clause requires a materialized LiteralCatalog"
+        )
+    registered = {
+        descriptor.literal_id: descriptor
+        for descriptor in getattr(catalog, "literals", ())
+        if isinstance(descriptor, LiteralDescriptor)
+    }
+    if any(literal_id not in registered for literal_id in clause):
+        return NotRepresentable(
+            proposal, "binary_clause references a literal absent from the catalog"
+        )
+    descriptors = tuple(registered[literal_id] for literal_id in clause)
+    try:
+        for descriptor in descriptors:
+            if catalog.validate_descriptor(descriptor) != descriptor:
+                raise ValueError("descriptor mismatch")
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return NotRepresentable(
+            proposal, "binary_clause catalog descriptor is not canonical"
+        )
 
-    if target == "patch_clause":
-        kind = struct.get("kind")
-        patch = struct.get("patch")
-        if kind not in {"region", "within", "above", "cooccurrence"}:
-            return None
-        if isinstance(patch, dict):
-            cells = patch.get("rows", 1) * patch.get("cols", 1)
-            if cells > PATCH_MAX_CELLS:
-                return None
-        return None  # CTM/patch not yet native — scaffold, not exact
+    required_ids: list[int] = []
+    for required in proposal.required_literals:
+        literal_id = _required_literal_id(required)
+        if literal_id is None or literal_id not in registered:
+            return NotRepresentable(
+                proposal, "required literal is not materialized in the catalog"
+            )
+        if isinstance(required, LiteralDescriptor) and registered[literal_id] != required:
+            return NotRepresentable(
+                proposal, "required literal descriptor differs from the catalog"
+            )
+        required_ids.append(literal_id)
+    if required_ids != sorted(set(required_ids)):
+        return NotRepresentable(
+            proposal, "required literal identities must be sorted and unique"
+        )
+    if not set(required_ids).issubset(clause):
+        return NotRepresentable(
+            proposal, "required literals are not contained in the declared clause"
+        )
 
-    if target == "logic_program":
-        # Exact requires actual LogicProgram32, not just pattern/window
-        if "program" in struct:
-            program = _decode_logic_program32(struct["program"])
-            if program is None:
-                return None
-            return program, "logic_program32"
-        # Pattern/window only is scaffold — not exact until compiled to LogicProgram32
-        if "pattern" in struct or "window" in struct:
-            return None
-        if "clause" in struct:
-            return None  # clause-based logic scaffold — not exact until LogicProgram32
-        return None
+    return _ConstructedCandidate(
+        ExecutableBinaryClause(descriptors), "executable_binary_clause"
+    )
 
-    if target == "threshold":
-        return None
 
-    if target == "composite_gate":
-        return None
+def _oracle_binary_clause(
+    proposal: PTAEscalationProposal,
+    candidate: _ConstructedCandidate,
+    catalog: Any | None,
+    context: Any | None,
+) -> tuple[bool, str]:
+    del catalog, context
+    native = candidate.native_object
+    clause = proposal.structure["clause"]
+    if candidate.native_kind != "executable_binary_clause" or not isinstance(
+        native, ExecutableBinaryClause
+    ):
+        return False, "binary clause constructor returned the wrong executable type"
+    if native.literal_ids != clause:
+        return False, "binary clause executable differs from declared literal order"
+    all_true = {literal_id: True for literal_id in native.literal_ids}
+    if not native.evaluate(all_true):
+        return False, "binary clause rejected the all-true assignment"
+    for literal_id in dict.fromkeys(native.literal_ids):
+        assignment = dict(all_true)
+        assignment[literal_id] = False
+        if native.evaluate(assignment):
+            return False, "binary clause accepted an assignment with a false literal"
+    return True, "binary conjunction oracle passed"
 
-    return None
+
+def _lower_logic_program(
+    proposal: PTAEscalationProposal,
+    catalog: Any | None,
+    context: Any | None,
+) -> _ConstructedCandidate | NotRepresentable:
+    del catalog, context
+    raw_program = proposal.structure.get("program")
+    program = _decode_logic_program32(raw_program)
+    if program is None:
+        if "pattern" in proposal.structure or "window" in proposal.structure:
+            reason = "pattern-only logic is not compiled to LogicProgram32"
+        else:
+            reason = "logic_program requires a canonical LogicProgram32 mapping"
+        return NotRepresentable(proposal, reason)
+    return _ConstructedCandidate(program, "logic_program32")
+
+
+def _evaluate_declared_logic_program(
+    program: Mapping[str, Any], bindings: tuple[bool, ...]
+) -> bool:
+    values: list[bool] = []
+    for instruction in program["instructions"]:
+        operand_mask = instruction["operand_mask"]
+        selected = tuple(
+            values[index]
+            for index in range(len(values))
+            if operand_mask & (1 << index)
+        )
+        opcode = instruction["opcode"]
+        if opcode == "constant":
+            value = bool(instruction["argument"])
+        elif opcode == "input":
+            value = bindings[instruction["argument"]]
+        elif opcode == "not":
+            value = not selected[0]
+        elif opcode == "and":
+            value = all(selected)
+        elif opcode == "or":
+            value = any(selected)
+        elif opcode == "xor":
+            value = bool(sum(selected) & 1)
+        else:
+            raise AssertionError(f"unvalidated opcode: {opcode}")
+        values.append(value)
+    return values[program["root_instruction"]]
+
+
+def _oracle_logic_program(
+    proposal: PTAEscalationProposal,
+    candidate: _ConstructedCandidate,
+    catalog: Any | None,
+    context: Any | None,
+) -> tuple[bool, str]:
+    del catalog, context
+    program = candidate.native_object
+    from ..logic_consolidation import LogicProgram32
+
+    if candidate.native_kind != "logic_program32" or not isinstance(
+        program, LogicProgram32
+    ):
+        return False, "logic program constructor returned the wrong executable type"
+    declared = _plain_value(proposal.structure["program"])
+    if program.to_dict() != declared:
+        return False, "LogicProgram32 differs from the declared canonical mapping"
+    width = len(LOGIC_AST_VARIABLES)
+    for assignment in range(1 << width):
+        bindings = tuple(bool(assignment & (1 << index)) for index in range(width))
+        expected = _evaluate_declared_logic_program(declared, bindings)
+        if program.evaluate(bindings).value is not expected:
+            return False, "LogicProgram32 behavioral oracle disagreed"
+    return True, "LogicProgram32 exhaustive oracle passed"
+
+
+def _lower_threshold(
+    proposal: PTAEscalationProposal,
+    catalog: Any | None,
+    context: Any | None,
+) -> _ConstructedCandidate | NotRepresentable:
+    del catalog, context
+    return NotRepresentable(
+        proposal,
+        "threshold has no exact executable target; use binary_clause for a "
+        "materialized threshold literal until masked-threshold lowering is defined",
+    )
+
+
+def _oracle_threshold(*args: Any) -> tuple[bool, str]:
+    del args
+    return False, "threshold has no executable semantic oracle"
+
+
+def _lower_shared_weighted_clause(
+    proposal: PTAEscalationProposal,
+    catalog: Any | None,
+    context: Any | None,
+) -> _ConstructedCandidate | NotRepresentable:
+    del catalog, context
+    return NotRepresentable(proposal, "native CoTM execution is not implemented")
+
+
+def _oracle_shared_weighted_clause(*args: Any) -> tuple[bool, str]:
+    del args
+    return False, "shared weighted clauses have no executable semantic oracle"
+
+
+def _lower_regression_clause(
+    proposal: PTAEscalationProposal,
+    catalog: Any | None,
+    context: Any | None,
+) -> _ConstructedCandidate | NotRepresentable:
+    del catalog, context
+    return NotRepresentable(
+        proposal, "regression_clause has no executable RTM representation"
+    )
+
+
+def _oracle_regression_clause(*args: Any) -> tuple[bool, str]:
+    del args
+    return False, "regression clauses have no executable semantic oracle"
+
+
+def _lower_graph_clause(
+    proposal: PTAEscalationProposal,
+    catalog: Any | None,
+    context: Any | None,
+) -> _ConstructedCandidate | NotRepresentable:
+    del catalog, context
+    if proposal.structure.get("recursive_unbounded") is True:
+        reason = "unbounded recursion is not lowerable to graph_tm_v1"
+    else:
+        reason = "Graph execution is unsupported by the exact native gate"
+    return NotRepresentable(proposal, reason)
+
+
+def _oracle_graph_clause(*args: Any) -> tuple[bool, str]:
+    del args
+    return False, "graph clauses have no executable semantic oracle"
+
+
+def _lower_patch_clause(
+    proposal: PTAEscalationProposal,
+    catalog: Any | None,
+    context: Any | None,
+) -> _ConstructedCandidate | NotRepresentable:
+    del catalog, context
+    return NotRepresentable(proposal, "native CTM patch execution is not implemented")
+
+
+def _oracle_patch_clause(*args: Any) -> tuple[bool, str]:
+    del args
+    return False, "patch clauses have no executable semantic oracle"
+
+
+def _lower_composite_gate(
+    proposal: PTAEscalationProposal,
+    catalog: Any | None,
+    context: Any | None,
+) -> _ConstructedCandidate | NotRepresentable:
+    del catalog, context
+    return NotRepresentable(proposal, "native composite execution is not implemented")
+
+
+def _oracle_composite_gate(*args: Any) -> tuple[bool, str]:
+    del args
+    return False, "composite gates have no executable semantic oracle"
+
+
+_TARGET_LOWERERS: Mapping[NativeTarget, _TargetLowerer] = MappingProxyType(
+    {
+        "binary_clause": _TargetLowerer(
+            _lower_binary_clause, _oracle_binary_clause
+        ),
+        "logic_program": _TargetLowerer(_lower_logic_program, _oracle_logic_program),
+        "threshold": _TargetLowerer(_lower_threshold, _oracle_threshold),
+        "shared_weighted_clause": _TargetLowerer(
+            _lower_shared_weighted_clause, _oracle_shared_weighted_clause
+        ),
+        "regression_clause": _TargetLowerer(
+            _lower_regression_clause, _oracle_regression_clause
+        ),
+        "graph_clause": _TargetLowerer(_lower_graph_clause, _oracle_graph_clause),
+        "patch_clause": _TargetLowerer(_lower_patch_clause, _oracle_patch_clause),
+        "composite_gate": _TargetLowerer(
+            _lower_composite_gate, _oracle_composite_gate
+        ),
+    }
+)
+
+if tuple(_TARGET_LOWERERS) != NATIVE_TARGETS:
+    raise RuntimeError("every NativeTarget must have one exact lowerer entry")
 
 
 def lower_exact(
@@ -331,25 +605,22 @@ def lower_exact(
     ok, msg = syntactically_bounded(proposal)
     if not ok:
         return NotRepresentable(proposal, msg)
-    constructed = _construct_native(proposal, catalog=catalog)
-    if constructed is None:
-        # Provide target-specific reason
-        target = proposal.native_target
-        if target == "shared_weighted_clause":
-            return NotRepresentable(proposal, "native CoTM/CTM not yet implemented")
-        if target == "graph_clause":
-            if proposal.structure.get("recursive_unbounded") is True:
-                return NotRepresentable(proposal, "unbounded recursion not lowerable to graph_tm_v1")
-            return NotRepresentable(proposal, "Graph execution still UNSUPPORTED_MODEL — no exact native deployment yet")
-        if target == "composite_gate":
-            return NotRepresentable(proposal, "native composite not yet implemented")
-        if target == "logic_program" and ("pattern" in proposal.structure or "window" in proposal.structure):
-            return NotRepresentable(proposal, "pattern-only logic not yet compiled to LogicProgram32")
-        if target in ("binary_clause", "regression_clause", "threshold"):
-            return NotRepresentable(proposal, "literal does not exist in catalog or descriptor invalid")
-        return NotRepresentable(proposal, f"NotRepresentable: {target} lacks exact native construction")
-    native_obj, kind = constructed
-    return LoweredCandidate(proposal, native_obj, kind, "ok")
+    lowerer = _TARGET_LOWERERS[proposal.native_target]
+    constructed = lowerer.construct(proposal, catalog, context)
+    if isinstance(constructed, NotRepresentable):
+        return constructed
+    oracle_ok, oracle_message = lowerer.semantic_oracle(
+        proposal, constructed, catalog, context
+    )
+    if not oracle_ok:
+        return NotRepresentable(proposal, oracle_message)
+    return LoweredCandidate(
+        proposal,
+        constructed.native_object,
+        constructed.native_kind,
+        oracle_message,
+        _LOWERED_CANDIDATE_TOKEN,
+    )
 
 
 # Backward compatibility: lowerable returns (bool,str) for existing callers

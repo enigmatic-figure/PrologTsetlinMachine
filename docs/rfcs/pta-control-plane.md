@@ -51,6 +51,27 @@ Pure checker `lowerable(Candidate, Target) → YES|NO`. Pipeline:
 
 `PTA reasoning → typed proposal → lowerability checker → native candidate → oracle validation → shadow audit → publish` and, on drift, `reopen → restore`.
 
+The current `pta.lowering.v2` contract uses `LoweredCandidate` only when an
+executable object for the proposal's exact declared target has been constructed
+and its target-specific semantic oracle passes. Proposal identity fields are
+strictly typed at the trust boundary; floats, booleans, and arbitrary objects
+are not coerced into integers or strings.
+
+| Native target | Exact executable representation | Semantic oracle |
+| --- | --- | --- |
+| `binary_clause` | `ExecutableBinaryClause` over canonical, materialized literal descriptors | conjunction activation over the Booleanized substrate |
+| `logic_program` | validated `LogicProgram32` | exhaustive comparison over all 32 A–E assignments |
+| `threshold` | none yet; a materialized threshold literal may participate in `binary_clause` | fail closed |
+| `shared_weighted_clause` | none until CoTM execution exists | fail closed |
+| `regression_clause` | none until executable RTM semantics exist | fail closed |
+| `graph_clause` | none | fail closed |
+| `patch_clause` | none | fail closed |
+| `composite_gate` | none | fail closed |
+
+`ClauseConfiguration` remains an analysis/configuration record and is not an
+exact lowering result. Adding a target to the executable set requires both a
+constructor and an independent behavioral oracle.
+
 ## What each PTA class owns
 
 **Input PTAs — literal-invention layer.** See raw values (`temperature=73.4`, `category`, `timestamp`, `position`, graph relations, prior observations) while native TAs see only instantiated Booleans. Propose `x ≥ 7.3`, `7.3 ≤ x < 9.8`, categorical groups, intervals. Escalation tests coverage; de-escalation collapses `x≥7.1..7.4` to the surviving boundary — *learned Booleanization with provenance and retirement*.

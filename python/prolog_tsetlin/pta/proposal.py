@@ -12,31 +12,69 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal
 
 from ..representation import LiteralDescriptor
 
-LOWERING_VERSION = "pta.lowering.v1"
+LOWERING_VERSION = "pta.lowering.v2"
 MAX_LITERALS_PER_CLAUSE = 64
 MAX_CLAUSES = 1024
 MAX_GRAPH_DEPTH = 8
 
-NativeTarget = str  # binary_clause | shared_weighted_clause | regression_clause | patch_clause | graph_clause | logic_program | threshold | composite_gate
-
-_VALID_TARGETS = {
+NativeTarget = Literal[
     "binary_clause",
-    "shared_weighted_clause",
-    "regression_clause",
-    "patch_clause",
-    "graph_clause",
     "logic_program",
     "threshold",
+    "shared_weighted_clause",
+    "regression_clause",
+    "graph_clause",
+    "patch_clause",
     "composite_gate",
-}
+]
+
+NATIVE_TARGETS: tuple[NativeTarget, ...] = (
+    "binary_clause",
+    "logic_program",
+    "threshold",
+    "shared_weighted_clause",
+    "regression_clause",
+    "graph_clause",
+    "patch_clause",
+    "composite_gate",
+)
+
+_VALID_TARGETS = frozenset(NATIVE_TARGETS)
 
 
 def _canon(v: Any) -> str:
     return json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _sequence_tuple(value: Any, field_name: str) -> tuple[Any, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError(f"{field_name} must be a sequence")
+    return tuple(value)
+
+
+def _printable_string(value: Any, field_name: str, *, nonempty: bool = True) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be a string")
+    if (nonempty and not value) or any(ord(character) < 0x20 for character in value):
+        qualifier = "nonempty " if nonempty else ""
+        raise ValueError(f"{field_name} must be a {qualifier}printable string")
+    return value
+
+
+def _semantic_literal_identity(value: LiteralDescriptor | str) -> int | str:
+    if isinstance(value, LiteralDescriptor):
+        return value.literal_id
+    prefix = "literal:"
+    if value.startswith(prefix):
+        raw = value[len(prefix) :]
+        if raw and raw.isascii() and raw.isdecimal() and str(int(raw)) == raw:
+            return int(raw)
+    return value
 
 
 def _deep_freeze(value: Any) -> Any:
@@ -110,8 +148,14 @@ class PTAInsight:
     evidence: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
-        # Deeply freeze evidence
-        object.__setattr__(self, "evidence", _freeze_evidence(tuple(self.evidence)))
+        _printable_string(self.source_pta, "source_pta")
+        _printable_string(self.kind, "kind")
+        _printable_string(self.subject, "subject")
+        object.__setattr__(
+            self,
+            "evidence",
+            _freeze_evidence(_sequence_tuple(self.evidence, "evidence")),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,36 +182,96 @@ class PTAEscalationProposal:
     support_trace: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.proposal_id or any(ord(c) < 0x20 for c in self.proposal_id):
-            raise ValueError("proposal_id must be nonempty printable")
-        if not self.source_pta_ids or any(not s for s in self.source_pta_ids):
-            raise ValueError("source_pta_ids must be nonempty")
+        _printable_string(self.proposal_id, "proposal_id")
+        if type(self.native_target) is not str:
+            raise TypeError("native_target must be a string")
         if self.native_target not in _VALID_TARGETS:
             raise ValueError(f"unknown native_target {self.native_target}")
+        if type(self.lowering_version) is not str:
+            raise TypeError("lowering_version must be a string")
         if self.lowering_version != LOWERING_VERSION:
             raise ValueError("unsupported lowering_version")
+
+        source_pta_ids = _sequence_tuple(self.source_pta_ids, "source_pta_ids")
+        if not source_pta_ids:
+            raise ValueError("source_pta_ids must be nonempty")
+        for source_pta_id in source_pta_ids:
+            _printable_string(source_pta_id, "source_pta_ids item")
+
+        supporting_insights = _sequence_tuple(
+            self.supporting_insights, "supporting_insights"
+        )
+        if any(not isinstance(value, PTAInsight) for value in supporting_insights):
+            raise TypeError("supporting_insights items must be PTAInsight")
+
+        counterexamples = _sequence_tuple(
+            self.counterexamples_addressed, "counterexamples_addressed"
+        )
+        if any(type(value) is not int for value in counterexamples):
+            raise TypeError("counterexamples_addressed items must be integers")
+        if any(value < 0 for value in counterexamples):
+            raise ValueError("counterexamples_addressed items must be nonnegative")
+
+        required_literals = _sequence_tuple(
+            self.required_literals, "required_literals"
+        )
+        for literal in required_literals:
+            if isinstance(literal, LiteralDescriptor):
+                continue
+            _printable_string(literal, "required_literals item")
+
+        weights: tuple[int, ...] | None = None
+        if self.weights is not None:
+            raw_weights = _sequence_tuple(self.weights, "weights")
+            if any(type(weight) is not int for weight in raw_weights):
+                raise TypeError("weights items must be integers")
+            weights = raw_weights
+
+        output_assignments: tuple[tuple[int, int], ...] | None = None
+        if self.output_assignments is not None:
+            assignments = []
+            for assignment in _sequence_tuple(
+                self.output_assignments, "output_assignments"
+            ):
+                pair = _sequence_tuple(assignment, "output_assignments item")
+                if len(pair) != 2 or any(type(value) is not int for value in pair):
+                    raise TypeError(
+                        "output_assignments items must be pairs of nonnegative integers"
+                    )
+                if any(value < 0 for value in pair):
+                    raise ValueError(
+                        "output_assignments items must be pairs of nonnegative integers"
+                    )
+                assignments.append((pair[0], pair[1]))
+            output_assignments = tuple(assignments)
+
+        support_trace = _sequence_tuple(self.support_trace, "support_trace")
+        for item in support_trace:
+            _printable_string(item, "support_trace item", nonempty=False)
+
+        for field_name, value in (
+            ("structure", self.structure),
+            ("resource_bounds", self.resource_bounds),
+            ("validation_signature", self.validation_signature),
+        ):
+            if not isinstance(value, Mapping):
+                raise TypeError(f"{field_name} must be a mapping")
+
         # resource bounds must be positive ints within known ceilings
         for k, v in self.resource_bounds.items():
-            if type(v) is not int or isinstance(v, bool) or v <= 0:
+            if type(v) is not int or v <= 0:
                 raise ValueError(f"resource_bounds[{k}] must be positive int")
         if self.resource_bounds.get("clause_count", 1) > MAX_CLAUSES:
             raise ValueError("clause_count exceeds MAX_CLAUSES")
         if self.resource_bounds.get("graph_depth", 1) > MAX_GRAPH_DEPTH:
             raise ValueError("graph_depth exceeds MAX_GRAPH_DEPTH")
-        # Normalize and deep-freeze all trust-boundary sequences
-        # source_pta_ids: ensure tuple of strings
-        norm_source = tuple(str(x) for x in self.source_pta_ids)
-        if any(not s or any(ord(c) < 0x20 for c in s) for s in norm_source):
-            raise ValueError("source_pta_ids must be nonempty printable strings")
-        object.__setattr__(self, "source_pta_ids", norm_source)
-        object.__setattr__(self, "supporting_insights", tuple(self.supporting_insights))
-        object.__setattr__(self, "counterexamples_addressed", tuple(int(x) for x in self.counterexamples_addressed))
-        object.__setattr__(self, "required_literals", tuple(self.required_literals))
-        if self.weights is not None:
-            object.__setattr__(self, "weights", tuple(int(w) for w in self.weights))
-        if self.output_assignments is not None:
-            object.__setattr__(self, "output_assignments", tuple(tuple(int(v) for v in pair) for pair in self.output_assignments))
-        object.__setattr__(self, "support_trace", tuple(str(x) for x in self.support_trace))
+        object.__setattr__(self, "source_pta_ids", source_pta_ids)
+        object.__setattr__(self, "supporting_insights", supporting_insights)
+        object.__setattr__(self, "counterexamples_addressed", counterexamples)
+        object.__setattr__(self, "required_literals", required_literals)
+        object.__setattr__(self, "weights", weights)
+        object.__setattr__(self, "output_assignments", output_assignments)
+        object.__setattr__(self, "support_trace", support_trace)
         # Deep-freeze mappings with strict key check (reject non-string keys, not str(k))
         def _strict_freeze(m):
             from types import MappingProxyType
@@ -182,12 +286,10 @@ class PTAEscalationProposal:
         object.__setattr__(self, "validation_signature", _strict_freeze(dict(self.validation_signature)))
 
     def _semantic_payload(self) -> dict[str, Any]:
-        lits = []
-        for lit in self.required_literals:
-            if hasattr(lit, "literal_id"):
-                lits.append(getattr(lit, "literal_id"))
-            else:
-                lits.append(str(lit))
+        lits = [
+            _semantic_literal_identity(literal)
+            for literal in self.required_literals
+        ]
         return {
             "native_target": self.native_target,
             "required_literals": sorted(lits, key=lambda x: str(x)),
@@ -224,7 +326,7 @@ class PTAEscalationProposal:
         return self.provenance_id()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "proposal_id": self.proposal_id,
             "source_pta_ids": list(self.source_pta_ids),
             "supporting_insights": [
@@ -242,6 +344,9 @@ class PTAEscalationProposal:
             "validation_signature": dict(self.validation_signature),
             "support_trace": list(self.support_trace),
         }
+        thawed = _thaw_for_json(value)
+        assert isinstance(thawed, dict)
+        return thawed
 
 
 @dataclass(frozen=True, slots=True)
