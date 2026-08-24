@@ -9,13 +9,20 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
+from ._bounded_process import (
+    BoundedProcessCancelled,
+    BoundedProcessDrainError,
+    BoundedProcessLaunchError,
+    BoundedProcessOutputLimit,
+    BoundedProcessTimeout,
+    run_bounded_process,
+)
 from .artifact import (
     InputShape,
     PAArtifact,
@@ -38,6 +45,7 @@ from .logic_ast import (
 )
 from .logic_consolidation import LogicProgram32
 from .pa import PortSemantic
+from .prolog_resources import PrologResourceError, resolve_prolog_module
 
 
 _RESULT_PATTERN = re.compile(
@@ -47,6 +55,7 @@ _RESULT_PATTERN = re.compile(
 )
 _NO_SOLUTION_PATTERN = re.compile(r"^PTM_RESULT v1 no_solution$", re.MULTILINE)
 MAX_SEARCH_CANDIDATES = 1_000_000
+MAX_PROLOG_OUTPUT_BYTES = 262_144
 
 
 class PrologBridgeError(RuntimeError):
@@ -211,15 +220,10 @@ def _default_gprolog_path() -> Path | None:
 
 
 def _default_prolog_source(filename: str) -> Path:
-    candidates = (
-        Path(__file__).resolve().parents[2] / "prolog" / filename,
-        Path(sys.prefix)
-        / "share"
-        / "prolog-tsetlin-machine"
-        / "prolog"
-        / filename,
-    )
-    return next((path for path in candidates if path.is_file()), candidates[0])
+    try:
+        return resolve_prolog_module(filename)
+    except PrologResourceError as exc:
+        raise PrologBridgeError(str(exc)) from exc
 
 
 def _prolog_process_environment(
@@ -249,62 +253,56 @@ def _run_prolog_process(
     timeout_seconds: float,
     cancel: Callable[[], bool] | None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run GNU Prolog with a deadline and an optional cooperative cancel poll."""
+    """Run GNU Prolog through PTM's shared process-tree boundary."""
 
-    process = subprocess.Popen(
-        list(command),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=_prolog_process_environment(),
-        creationflags=(
-            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-        ),
-    )
-    deadline = time.monotonic() + timeout_seconds
+    def diagnostic(error: object) -> str:
+        stdout = getattr(error, "stdout", b"")
+        stderr = getattr(error, "stderr", b"")
+        return (stdout + b"\n" + stderr)[-2_000:].decode(
+            "utf-8", errors="replace"
+        )
+
     try:
-        while True:
-            if cancel is not None and cancel():
-                process.terminate()
-                try:
-                    stdout, stderr = process.communicate(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    stdout, stderr = process.communicate()
-                raise PrologSearchCancelled(
-                    "bounded Prolog search cancelled\n"
-                    + (stdout + "\n" + stderr)[-2000:]
-                )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                process.terminate()
-                try:
-                    stdout, stderr = process.communicate(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    stdout, stderr = process.communicate()
-                raise PrologBridgeError(
-                    f"bounded Prolog search timed out after {timeout_seconds:g}s\n"
-                    + (stdout + "\n" + stderr)[-2000:]
-                )
-            try:
-                stdout, stderr = process.communicate(timeout=min(0.05, remaining))
-            except subprocess.TimeoutExpired:
-                continue
-            return subprocess.CompletedProcess(
-                list(command), process.returncode, stdout, stderr
-            )
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.communicate(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate()
+        completed = run_bounded_process(
+            command,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=MAX_PROLOG_OUTPUT_BYTES,
+            cancel=cancel,
+            env=_prolog_process_environment(),
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            ),
+        )
+    except BoundedProcessCancelled as exc:
+        raise PrologSearchCancelled(
+            "bounded Prolog search cancelled\n" + diagnostic(exc)
+        ) from exc
+    except BoundedProcessTimeout as exc:
+        raise PrologBridgeError(
+            f"bounded Prolog search timed out after {timeout_seconds:g}s\n"
+            + diagnostic(exc)
+        ) from exc
+    except BoundedProcessOutputLimit as exc:
+        raise PrologBridgeError(
+            "bounded Prolog search output exceeded its byte budget\n"
+            + diagnostic(exc)
+        ) from exc
+    except (BoundedProcessLaunchError, BoundedProcessDrainError) as exc:
+        raise PrologBridgeError(
+            f"bounded Prolog process boundary failed: {exc}\n" + diagnostic(exc)
+        ) from exc
+
+    def decoded(stream: bytes) -> str:
+        return stream.decode("utf-8", errors="replace").replace(
+            "\r\n", "\n"
+        ).replace("\r", "\n")
+
+    return subprocess.CompletedProcess(
+        list(command),
+        completed.returncode,
+        decoded(completed.stdout),
+        decoded(completed.stderr),
+    )
 
 
 class GNUPrologThresholdSearch:
@@ -1285,10 +1283,27 @@ class GNUPrologSearch(GNUPrologThresholdSearch):
     ) -> DecisionTreeRepairResult:
         if not 1 <= max_iterations <= 256:
             raise ValueError("max_iterations must be between 1 and 256")
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be finite and positive")
         if not parent.is_read_once() or any(
             feature >= problem.slot_count for feature in parent.feature_indices
         ):
             raise ValueError("repair parent is incompatible with the problem slot domain")
+        deadline = time.monotonic() + float(timeout_seconds)
+
+        def remaining_time() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PrologBridgeError(
+                    f"bounded Prolog repair timed out after {timeout_seconds:g}s"
+                )
+            return remaining
+
         iteration_limit = min(max_iterations, len(problem.examples))
         parent_predictions = tuple(parent.evaluate(row) for row in problem.examples)
         mismatches_before = sum(
@@ -1301,6 +1316,7 @@ class GNUPrologSearch(GNUPrologThresholdSearch):
         for _ in range(iteration_limit):
             if cancel is not None and cancel():
                 raise PrologSearchCancelled("bounded Prolog repair cancelled")
+            remaining_time()
             mismatch = next(
                 (
                     index
@@ -1312,6 +1328,7 @@ class GNUPrologSearch(GNUPrologThresholdSearch):
                 None,
             )
             if mismatch is None:
+                remaining_time()
                 return DecisionTreeRepairResult(
                     parent,
                     guard,
@@ -1341,10 +1358,11 @@ class GNUPrologSearch(GNUPrologThresholdSearch):
                     for index in constrained_indices
                 ),
             )
+            remaining_seconds = remaining_time()
             try:
                 guard = self.search_decision_tree(
                     repair_problem,
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=remaining_seconds,
                     cancel=cancel,
                 ).tree
             except NoDecisionTreeSolution as error:
@@ -1356,6 +1374,7 @@ class GNUPrologSearch(GNUPrologThresholdSearch):
             for row, expected in zip(problem.examples, problem.labels)
         )
         if remaining == 0:
+            remaining_time()
             return DecisionTreeRepairResult(
                 parent,
                 guard,
@@ -1363,6 +1382,7 @@ class GNUPrologSearch(GNUPrologThresholdSearch):
                 mismatches_before,
                 0,
             )
+        remaining_time()
         raise RepairDidNotConverge(
             f"counterexample repair stopped after {iteration_limit} iterations with "
             f"{remaining} mismatches"

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from prolog_tsetlin import prolog_bridge
 from prolog_tsetlin import (
@@ -24,6 +26,7 @@ from prolog_tsetlin import (
     NoFeatureTemplateSolution,
     NoTAClauseSolution,
     PortSemantic,
+    PrologBridgeError,
     RestorationHandle,
     SlotBinding,
     SourceKind,
@@ -60,6 +63,21 @@ class BoundedStructureProblemTests(unittest.TestCase):
         self.assertEqual(child, parent)
         self.assertIsNot(child, parent)
 
+    def test_bridge_rejects_a_child_output_flood_at_its_byte_ceiling(self) -> None:
+        command = [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'x' * 1000000); "
+            "sys.stdout.buffer.flush()",
+        ]
+
+        with self.assertRaisesRegex(PrologBridgeError, "output exceeded"):
+            prolog_bridge._run_prolog_process(
+                command,
+                timeout_seconds=1.0,
+                cancel=None,
+            )
+
     def test_typed_template_candidate_must_match_registry_type(self) -> None:
         with self.assertRaisesRegex(ValueError, "has type"):
             FeatureTemplateCandidate.create(
@@ -93,6 +111,60 @@ class BoundedStructureProblemTests(unittest.TestCase):
                 examples=[{0}, {0}],
                 labels=[0, 1],
             )
+
+    def test_repair_passes_only_the_remaining_request_deadline(self) -> None:
+        rows = [set(), {0}, {1}, {0, 1}]
+        problem = DecisionTreeSearchProblem.create(
+            slot_count=2,
+            max_depth=2,
+            examples=rows,
+            labels=[0, 1, 1, 0],
+        )
+        first_guard = BooleanDecisionTree.node(
+            0,
+            BooleanDecisionTree.leaf(False),
+            BooleanDecisionTree.leaf(True),
+        )
+        xor_guard = BooleanDecisionTree.node(
+            0,
+            BooleanDecisionTree.node(
+                1,
+                BooleanDecisionTree.leaf(False),
+                BooleanDecisionTree.leaf(True),
+            ),
+            BooleanDecisionTree.node(
+                1,
+                BooleanDecisionTree.leaf(True),
+                BooleanDecisionTree.leaf(False),
+            ),
+        )
+        guards = iter((first_guard, xor_guard))
+        observed_timeouts: list[float] = []
+
+        def fake_search(*args: object, timeout_seconds: float, **kwargs: object):
+            observed_timeouts.append(timeout_seconds)
+            return mock.Mock(tree=next(guards))
+
+        search = object.__new__(GNUPrologSearch)
+        with (
+            mock.patch.object(search, "search_decision_tree", side_effect=fake_search),
+            mock.patch.object(
+                prolog_bridge.time,
+                "monotonic",
+                side_effect=(10.0, 10.05, 10.2, 10.7, 10.9, 10.95, 10.99),
+            ),
+        ):
+            result = search.repair_decision_tree(
+                BooleanDecisionTree.leaf(False),
+                problem,
+                max_iterations=4,
+                timeout_seconds=1.0,
+            )
+
+        self.assertEqual(result.mismatch_count, 0)
+        self.assertEqual(len(observed_timeouts), 2)
+        self.assertAlmostEqual(observed_timeouts[0], 0.8)
+        self.assertAlmostEqual(observed_timeouts[1], 0.1)
 
 
 @unittest.skipUnless(GPROLOG.is_file(), "GNU Prolog is not installed")

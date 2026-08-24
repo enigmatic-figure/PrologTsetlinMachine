@@ -132,4 +132,10 @@ Shared by Input/de-escalation/escalation PTAs; graph/regression/composite PTAs c
 12. PTA-assisted hyperparameter/resource allocation.
 13. Native parallel-training optimizations after semantics stabilize.
 
-Reference implementation: `python/prolog_tsetlin/pta/` — typed proposal dataclass, lowerability checker, and Prolog ontology stub; exercises the `temperature 71–76 ∧ mode=manual ∧ previous=B → 104∧105∧231∧388` example without weakening artifact trust.
+Partial reference implementation: `python/prolog_tsetlin/pta/` contains the
+typed proposal model, target-specific fail-closed lowerers, bounded reasoning
+session, and an executable GNU Prolog collective. The Input PTA can derive
+threshold/interval insights from raw observations and labels and the collective
+can decode de-escalation insights and escalation proposals through a
+range-checked, completeness-reporting protocol. The end-to-end
+train → propose → oracle → shadow → publish → reopen loop remains proposed.

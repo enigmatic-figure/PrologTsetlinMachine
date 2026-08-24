@@ -40,7 +40,9 @@
       "id": "pta-control-plane",
       "maturity": "proposed",
       "evidence": [
-        "docs/rfcs/pta-control-plane.md"
+        "docs/rfcs/pta-control-plane.md",
+        "docs/developer/prolog-api.md",
+        "tests/python/test_pta_collective.py"
       ],
       "owner": "research"
     },
