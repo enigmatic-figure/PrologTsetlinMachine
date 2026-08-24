@@ -212,6 +212,39 @@ if(PTM_BUILD_TESTS)
         PTM_TEST_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME ptm_model_runtime_tests COMMAND ptm_model_runtime_tests)
 
+    if(PTM_BUILD_RUNTIME_CLI)
+        set(PTM_PTA_THRESHOLD_HEX_FIXTURE
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pta_threshold_clause_v1.hex")
+        set(PTM_PTA_THRESHOLD_FIXTURE
+            "${CMAKE_CURRENT_BINARY_DIR}/pta_threshold_clause_v1.ptm")
+        add_executable(ptm_test_fixture_materializer
+            tests/cpp/materialize_hex_fixture.cpp)
+        target_compile_features(ptm_test_fixture_materializer PRIVATE cxx_std_20)
+        add_test(NAME ptmrt_pta_threshold_fixture
+            COMMAND ptm_test_fixture_materializer
+                "${PTM_PTA_THRESHOLD_HEX_FIXTURE}"
+                "${PTM_PTA_THRESHOLD_FIXTURE}")
+        set_tests_properties(ptmrt_pta_threshold_fixture PROPERTIES
+            FIXTURES_SETUP ptmrt_pta_threshold_artifact)
+        add_test(NAME ptmrt_pta_threshold_verify
+            COMMAND ptmrt verify "${PTM_PTA_THRESHOLD_FIXTURE}")
+        set_tests_properties(ptmrt_pta_threshold_verify PROPERTIES
+            FIXTURES_REQUIRED ptmrt_pta_threshold_artifact
+            PASS_REGULAR_EXPRESSION "verified sha256:")
+        add_test(NAME ptmrt_pta_threshold_below
+            COMMAND ptmrt run-record "${PTM_PTA_THRESHOLD_FIXTURE}"
+                "temperature:float=74.5")
+        set_tests_properties(ptmrt_pta_threshold_below PROPERTIES
+            FIXTURES_REQUIRED ptmrt_pta_threshold_artifact
+            PASS_REGULAR_EXPRESSION "prediction.:0.*score.:0")
+        add_test(NAME ptmrt_pta_threshold_boundary
+            COMMAND ptmrt run-record "${PTM_PTA_THRESHOLD_FIXTURE}"
+                "temperature:float=75")
+        set_tests_properties(ptmrt_pta_threshold_boundary PROPERTIES
+            FIXTURES_REQUIRED ptmrt_pta_threshold_artifact
+            PASS_REGULAR_EXPRESSION "prediction.:1.*score.:1")
+    endif()
+
     add_executable(ptm_runtime_c_smoke tests/c/runtime_smoke.c)
     target_link_libraries(ptm_runtime_c_smoke PRIVATE PTM::runtime)
     target_compile_features(ptm_runtime_c_smoke PRIVATE c_std_11)

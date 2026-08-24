@@ -400,6 +400,91 @@ void test_raw_record_preprocessing() {
             "precomputed-only artifacts advertised raw preprocessing");
 }
 
+void test_pta_materialized_threshold_artifact() {
+    const auto bytes = read_fixture("pta_threshold_clause_v1.hex");
+    auto model = open_golden(bytes);
+    ptmrt_model_description description{};
+    require(ptmrt_model_describe(model.value, &description) ==
+                PTMRT_STATUS_OK,
+            "PTA threshold fixture description failed");
+    require(description.model_kind == PTMRT_MODEL_PACKED_TM_BINARY_V1 &&
+                description.number_of_clauses == 1 &&
+                description.number_of_features == 1 &&
+                description.threshold == 1,
+            "PTA threshold fixture has the wrong native model shape");
+    require(ptmrt_model_verify(model.value) == PTMRT_STATUS_OK,
+            "PTA threshold fixture failed native conformance verification");
+
+    std::uint64_t manifest_size = 0;
+    require(ptmrt_model_manifest_json(
+                model.value, nullptr, 0, &manifest_size) == PTMRT_STATUS_OK &&
+                manifest_size > 1,
+            "PTA threshold manifest size query failed");
+    std::vector<char> manifest(static_cast<std::size_t>(manifest_size));
+    require(ptmrt_model_manifest_json(
+                model.value, manifest.data(), manifest.size(),
+                &manifest_size) == PTMRT_STATUS_OK,
+            "PTA threshold manifest read failed");
+    const std::string_view manifest_view(manifest.data());
+    require(
+        manifest_view.find("origin_proposal_provenance_id") !=
+            std::string_view::npos &&
+        manifest_view.find("observations_digest") != std::string_view::npos &&
+        manifest_view.find("not a trained source-label classifier") !=
+            std::string_view::npos,
+        "PTA threshold artifact lost provenance or its semantic limitation");
+
+    const auto evaluate_record = [&model](double temperature) {
+        ptmrt_record_field field{};
+        field.name = "temperature";
+        field.kind = PTMRT_VALUE_FLOAT64;
+        field.number_value = temperature;
+        std::uint64_t required = 0;
+        require(ptmrt_model_preprocess_record(
+                    model.value, &field, 1, nullptr, 0, &required) ==
+                    PTMRT_STATUS_OK &&
+                    required == 1,
+                "PTA threshold preprocessing size query failed");
+        std::array<std::uint64_t, 1> features{};
+        require(ptmrt_model_preprocess_record(
+                    model.value, &field, 1, features.data(), features.size(),
+                    &required) == PTMRT_STATUS_OK,
+                "PTA threshold preprocessing failed");
+
+        std::uint64_t valid = 1;
+        std::uint64_t predictions = 0;
+        std::array<std::int32_t, 64> scores{};
+        std::array<ptmrt_tensor_view, 2> inputs{};
+        inputs[0] = {"features", features.data(), sizeof(features),
+                     PTMRT_DTYPE_UINT64, 1, {1, 0, 0, 0}};
+        inputs[1] = {"valid_mask", &valid, sizeof(valid),
+                     PTMRT_DTYPE_UINT64, 0, {0, 0, 0, 0}};
+        std::array<ptmrt_tensor_view, 2> outputs{};
+        outputs[0] = {"predictions", &predictions, sizeof(predictions),
+                      PTMRT_DTYPE_UINT64, 0, {0, 0, 0, 0}};
+        outputs[1] = {"scores", scores.data(), sizeof(scores),
+                      PTMRT_DTYPE_INT32, 1, {64, 0, 0, 0}};
+        require(ptmrt_model_run(model.value, inputs.data(), inputs.size(),
+                                outputs.data(), outputs.size()) ==
+                    PTMRT_STATUS_OK,
+                "PTA threshold native inference failed");
+        return std::array<std::int64_t, 3>{
+            static_cast<std::int64_t>(features[0]),
+            static_cast<std::int64_t>(predictions & 1U),
+            static_cast<std::int64_t>(scores[0])};
+    };
+
+    require(evaluate_record(74.5) ==
+                std::array<std::int64_t, 3>{0, 0, 0},
+            "PTA threshold artifact activated below its boundary");
+    require(evaluate_record(75.0) ==
+                std::array<std::int64_t, 3>{1, 1, 1},
+            "PTA threshold artifact rejected its inclusive boundary");
+    require(evaluate_record(90.0) ==
+                std::array<std::int64_t, 3>{1, 1, 1},
+            "PTA threshold artifact rejected an above-boundary record");
+}
+
 void test_all_portable_preprocessing_transforms() {
     const auto bytes = read_fixture("preprocessing_demo_v1.hex");
     auto model = open_golden(bytes);
@@ -973,6 +1058,7 @@ int main() {
         test_description_manifest_and_conformance();
         test_generic_tensor_run();
         test_raw_record_preprocessing();
+        test_pta_materialized_threshold_artifact();
         test_all_portable_preprocessing_transforms();
         test_logic_artifact_and_generic_tensor_run();
         test_masked_threshold_artifact_and_generic_tensor_run();

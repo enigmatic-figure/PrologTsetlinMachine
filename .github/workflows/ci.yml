@@ -176,6 +176,7 @@ jobs:
           python -m pytest
           tests/python/test_prolog_bridge.py
           tests/python/test_pta_collective.py
+          tests/python/test_pta_threshold_artifact.py
           tests/python/test_search_service.py
           tests/python/test_tui.py::test_tui_runs_repair_shows_counterexamples_and_exports
       - name: Verify installed-wheel PTA collective
@@ -187,7 +188,14 @@ jobs:
           PTM_GPROLOG=/usr/bin/gprolog /tmp/pta-wheel-venv/bin/python - <<'PY'
           from pathlib import Path
           from prolog_tsetlin.prolog_resources import resolve_prolog_module_set
-          from prolog_tsetlin.pta import PTACollectiveService, PTAReasoningSession
+          from prolog_tsetlin.pta import (
+              PTACollectiveService,
+              PTAReasoningSession,
+              compile_threshold_artifact,
+              materialize_threshold_clause,
+              review_threshold_proposal,
+          )
+          from prolog_tsetlin.representation import FeatureSchema, FieldKind, LiteralCatalog
 
           names = (
               "pta_ontology.pl",
@@ -215,6 +223,28 @@ jobs:
               85.0,
           }
           assert not result.truncated
+
+          proposal = next(
+              proposal
+              for proposal in result.proposals
+              if proposal.structure["threshold"] == 65.0
+          )
+          catalog = LiteralCatalog(
+              FeatureSchema.from_fields(temperature=FieldKind.NUMBER)
+          )
+          reviewed = review_threshold_proposal(
+              proposal, session=session, catalog=catalog
+          )
+          materialized = materialize_threshold_clause(
+              reviewed, session=session, catalog=catalog
+          )
+          artifact = compile_threshold_artifact(
+              materialized, session=session, catalog=catalog
+          ).artifact
+          assert artifact.verify_conformance()
+          assert artifact.predict_records(
+              ({"temperature": 60}, {"temperature": 70})
+          ) == (0, 1)
           PY
 
   sanitizers:
