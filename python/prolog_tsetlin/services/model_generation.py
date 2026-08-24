@@ -836,6 +836,14 @@ class ModelGenerationController:
             if self._active_generation_id != lineage.parent_generation_id:
                 raise ModelGenerationError("candidate parent is not the active generation")
             events = self.store.read_events()
+            if any(
+                event.kind is LifecycleEventKind.ACTIVATED
+                and event.generation_id == lineage.child_generation_id
+                for event in events
+            ):
+                raise ModelGenerationError(
+                    "candidate child generation has already been activated"
+                )
             if not events or events[-1].kind not in (
                 LifecycleEventKind.PARENT_REGISTERED,
                 LifecycleEventKind.CANDIDATE_REJECTED,
