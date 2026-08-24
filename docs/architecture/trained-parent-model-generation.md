@@ -81,6 +81,17 @@ exactly-one compatibility wrapper; generalized episodes use
 retains its legacy `PrologInventionEvidence` view and also exposes the complete
 candidate set separately.
 
+Because candidate-set identity includes that execution-environment
+attestation, independently replaying the same semantic episode with different
+GNU Prolog installations can produce different candidate-set, selection, and
+outer artifact IDs. This does not weaken artifact portability: either complete
+content-addressed artifact remains executable on every supported runtime, and
+its model payload, preprocessing contract, and conformance vectors remain
+portable. Cross-environment tests therefore compare the complete executable
+contract and all platform-neutral manifest fields while validating each local
+attestation against its own durable candidate set. Fixed golden artifact bytes
+are still verified independently by the native runtime.
+
 The original `threshold` proposal remains `NotRepresentable`.
 
 ## Bounded alternatives are selected before promotion

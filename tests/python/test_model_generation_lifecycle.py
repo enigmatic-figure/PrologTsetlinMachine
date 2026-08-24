@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 import shutil
@@ -37,6 +38,7 @@ from prolog_tsetlin.model_generation import (
     drift_requires_reopen,
     extend_parent_with_threshold,
 )
+from prolog_tsetlin.model_artifact import PackedTMInferenceArtifact
 from prolog_tsetlin.pta import (
     PTAEscalationProposal,
     PTAInsight,
@@ -62,6 +64,63 @@ from prolog_tsetlin.services.telemetry import TelemetrySession
 
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_CHILD_HEX = ROOT / "tests" / "data" / "trained_parent_child_v1.hex"
+
+
+def _assert_same_portable_artifact_contract(
+    actual: PackedTMInferenceArtifact,
+    expected: PackedTMInferenceArtifact,
+) -> None:
+    """Compare executable semantics while retaining environment attestations.
+
+    Candidate-set identity binds the measured GNU Prolog executable, version,
+    and packaged modules. Independently replaying the same episode with a
+    different attested GNU Prolog installation therefore produces a different
+    candidate-set ID, selection ID, and outer artifact digest even when the
+    portable model is otherwise byte-for-byte equivalent.
+    """
+
+    assert actual.number_of_clauses == expected.number_of_clauses
+    assert actual.number_of_features == expected.number_of_features
+    assert actual.threshold == expected.threshold
+    assert actual.positive_include_masks == expected.positive_include_masks
+    assert actual.negative_include_masks == expected.negative_include_masks
+    assert actual.conformance_cases == expected.conformance_cases
+
+    actual_manifest = deepcopy(dict(actual.manifest))
+    expected_manifest = deepcopy(dict(expected.manifest))
+    environment_bound_keys = (
+        "threshold_candidate_set_id",
+        "threshold_candidate_selection_id",
+    )
+    for manifest in (actual_manifest, expected_manifest):
+        signature = manifest["validation"]["signature"]
+        for key in environment_bound_keys:
+            del signature[key]
+    assert actual_manifest == expected_manifest
+
+
+def test_portable_artifact_contract_excludes_only_environment_attestations() -> None:
+    golden = PackedTMInferenceArtifact.from_bytes(
+        bytes.fromhex(GOLDEN_CHILD_HEX.read_text(encoding="ascii"))
+    )
+    environment_manifest = deepcopy(dict(golden.manifest))
+    environment_signature = environment_manifest["validation"]["signature"]
+    environment_signature["threshold_candidate_set_id"] = "sha256:" + "1" * 64
+    environment_signature["threshold_candidate_selection_id"] = (
+        "sha256:" + "2" * 64
+    )
+    environment_artifact = replace(golden, manifest=environment_manifest)
+
+    _assert_same_portable_artifact_contract(environment_artifact, golden)
+
+    semantic_manifest = deepcopy(environment_manifest)
+    semantic_manifest["validation"]["signature"]["adaptive_snapshot_id"] = (
+        "sha256:" + "3" * 64
+    )
+    with pytest.raises(AssertionError):
+        _assert_same_portable_artifact_contract(
+            replace(golden, manifest=semantic_manifest), golden
+        )
 
 
 def _ptmrt_path() -> Path | None:
@@ -1049,8 +1108,16 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
     assert result.invention_evidence == result.controller.store.load_invention_evidence(
         result.invention_evidence.evidence_id
     )
-    assert result.child_artifact.serialized == bytes.fromhex(
-        GOLDEN_CHILD_HEX.read_text(encoding="ascii")
+    golden_child = PackedTMInferenceArtifact.from_bytes(
+        bytes.fromhex(GOLDEN_CHILD_HEX.read_text(encoding="ascii"))
+    )
+    _assert_same_portable_artifact_contract(result.child_artifact, golden_child)
+    validation_signature = result.child_artifact.manifest["validation"]["signature"]
+    assert validation_signature["threshold_candidate_set_id"] == (
+        result.candidate_set.candidate_set_id
+    )
+    assert validation_signature["threshold_candidate_selection_id"] == (
+        result.candidate_selection.selection_id
     )
     assert result.controller.active_generation_id == result.child_generation.generation_id
     assert isinstance(result.controller.last_telemetry_error, RuntimeError)
