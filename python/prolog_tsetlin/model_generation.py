@@ -45,10 +45,12 @@ MODEL_GENERATION_SCHEMA_VERSION = 1
 ORDERED_LITERAL_MANIFEST_SCHEMA = "ptm.ordered-literal-manifest.v1"
 ADAPTIVE_SNAPSHOT_SCHEMA = "ptm.adaptive-snapshot.v1"
 RESTORATION_BUNDLE_SCHEMA = "ptm.adaptive-restoration-bundle.v1"
+ADAPTIVE_BEHAVIOR_SCHEMA = "ptm.adaptive-behavior.v2"
 INVENTION_EVIDENCE_SCHEMA = "ptm.gnu-prolog-invention-evidence.v1"
 GENERATION_SCHEMA = "ptm.model-generation.v1"
 PROMOTION_AUDIT_SCHEMA = "ptm.promotion-audit.v1"
-LINEAGE_SCHEMA = "ptm.model-generation-lineage.v1"
+LIVE_CONFORMANCE_SCHEMA = "ptm.live-runtime-conformance.v1"
+LINEAGE_SCHEMA = "ptm.model-generation-lineage.v3"
 TRAINING_SEMANTICS_VERSION = "ptm.scalar-binary-training.v1"
 PYTHON_RNG_ALGORITHM = "python.random-mt19937-state-v1"
 MAX_CORPUS_EXAMPLES = 2_048
@@ -798,6 +800,63 @@ class ModelGeneration:
 
 
 @dataclass(frozen=True, slots=True)
+class AdaptiveBehaviorIdentity:
+    snapshot_id: str
+    literal_manifest_id: str
+    preprocessing_contract_id: str
+    training_semantics_version: str = TRAINING_SEMANTICS_VERSION
+    schema: str = ADAPTIVE_BEHAVIOR_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != ADAPTIVE_BEHAVIOR_SCHEMA:
+            raise ModelGenerationError("adaptive behavior schema is unsupported")
+        if self.training_semantics_version != TRAINING_SEMANTICS_VERSION:
+            raise ModelGenerationError("adaptive behavior training semantics are unsupported")
+        for label, value in (
+            ("snapshot", self.snapshot_id),
+            ("literal manifest", self.literal_manifest_id),
+            ("preprocessing contract", self.preprocessing_contract_id),
+        ):
+            _require_digest(value, label)
+
+    @classmethod
+    def from_generation(cls, generation: ModelGeneration) -> "AdaptiveBehaviorIdentity":
+        if generation.kind is not GenerationKind.ADAPTED_CHILD:
+            raise ModelGenerationError("adaptive behavior requires an adapted child")
+        return cls(
+            generation.snapshot_id,
+            generation.literal_manifest_id,
+            generation.preprocessing_contract_id,
+        )
+
+    @classmethod
+    def from_child(
+        cls,
+        child: "AdaptedChild",
+        *,
+        preprocessing_contract_id: str,
+    ) -> "AdaptiveBehaviorIdentity":
+        return cls(
+            child.snapshot.snapshot_id,
+            child.manifest.manifest_id,
+            preprocessing_contract_id,
+        )
+
+    @property
+    def behavior_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "snapshot_id": self.snapshot_id,
+            "literal_manifest_id": self.literal_manifest_id,
+            "preprocessing_contract_id": self.preprocessing_contract_id,
+            "training_semantics_version": self.training_semantics_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AdaptiveRestorationBundle:
     parent_generation_id: str
     adaptive_snapshot_id: str
@@ -1093,6 +1152,56 @@ class PromotionAuditPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class DriftAuditPolicy:
+    minimum_observations: int
+    minimum_regressions: int
+    minimum_regression_rate: float
+    minimum_error_increase: int
+    minimum_observations_per_class: int
+
+    def __post_init__(self) -> None:
+        integer_fields = (
+            self.minimum_observations,
+            self.minimum_regressions,
+            self.minimum_error_increase,
+            self.minimum_observations_per_class,
+        )
+        if any(type(value) is not int or value <= 0 for value in integer_fields):
+            raise ModelGenerationError("drift policy count thresholds must be positive")
+        if (
+            type(self.minimum_regression_rate) not in (int, float)
+            or not math.isfinite(float(self.minimum_regression_rate))
+            or not 0.0 <= float(self.minimum_regression_rate) <= 1.0
+        ):
+            raise ModelGenerationError("drift policy regression rate is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "minimum_observations": self.minimum_observations,
+            "minimum_regressions": self.minimum_regressions,
+            "minimum_regression_rate": self.minimum_regression_rate,
+            "minimum_error_increase": self.minimum_error_increase,
+            "minimum_observations_per_class": self.minimum_observations_per_class,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "DriftAuditPolicy":
+        expected = {
+            "minimum_observations",
+            "minimum_regressions",
+            "minimum_regression_rate",
+            "minimum_error_increase",
+            "minimum_observations_per_class",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ModelGenerationError("drift policy is malformed")
+        try:
+            return cls(**value)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("drift policy is malformed") from error
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeConformanceReport:
     artifact_id: str
     case_count: int
@@ -1164,6 +1273,218 @@ class RuntimeConformanceReport:
 
 
 @dataclass(frozen=True, slots=True)
+class LiveRuntimeConformanceEvidence:
+    child_generation_id: str
+    artifact_id: str
+    snapshot_id: str
+    literal_manifest_id: str
+    corpus: LabeledCorpus
+    scalar_features: tuple[tuple[bool, ...], ...]
+    scalar_scores: tuple[int, ...]
+    scalar_predictions: tuple[int, ...]
+    packed_predictions: tuple[int, ...]
+    native_features: tuple[tuple[int, ...], ...]
+    native_scores: tuple[int, ...]
+    native_predictions: tuple[int, ...]
+    ptmrt_binary_digest: str
+    schema: str = LIVE_CONFORMANCE_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != LIVE_CONFORMANCE_SCHEMA:
+            raise ModelGenerationError("live conformance schema is unsupported")
+        for label, value in (
+            ("child generation", self.child_generation_id),
+            ("artifact", self.artifact_id),
+            ("snapshot", self.snapshot_id),
+            ("literal manifest", self.literal_manifest_id),
+            ("ptmrt executable", self.ptmrt_binary_digest),
+        ):
+            _require_digest(value, label)
+        if not isinstance(self.corpus, LabeledCorpus) or (
+            self.corpus.role is not CorpusRole.LIVE
+        ):
+            raise ModelGenerationError("live conformance requires a live corpus")
+        count = len(self.corpus.examples)
+        vectors = (
+            self.scalar_scores,
+            self.scalar_predictions,
+            self.packed_predictions,
+            self.native_scores,
+            self.native_predictions,
+        )
+        if (
+            type(self.scalar_features) is not tuple
+            or type(self.native_features) is not tuple
+            or any(type(vector) is not tuple for vector in vectors)
+            or len(self.scalar_features) != count
+            or len(self.native_features) != count
+            or any(len(vector) != count for vector in vectors)
+        ):
+            raise ModelGenerationError("live conformance vector lengths differ")
+        if (
+            not self.scalar_features
+            or any(
+                type(row) is not tuple
+                or not row
+                or any(type(value) is not bool for value in row)
+                for row in self.scalar_features
+            )
+            or len({len(row) for row in self.scalar_features}) != 1
+            or any(
+                type(row) is not tuple
+                or any(type(value) is not int or value not in (0, 1) for value in row)
+                for row in self.native_features
+            )
+            or tuple(tuple(int(value) for value in row) for row in self.scalar_features)
+            != self.native_features
+        ):
+            raise ModelGenerationError("live conformance feature vectors are invalid")
+        if any(type(value) is not int for value in (*self.scalar_scores, *self.native_scores)):
+            raise ModelGenerationError("live conformance scores must be integers")
+        if any(
+            type(value) is not int or value not in (0, 1)
+            for vector in (
+                self.scalar_predictions,
+                self.packed_predictions,
+                self.native_predictions,
+            )
+            for value in vector
+        ):
+            raise ModelGenerationError("live conformance predictions are invalid")
+        expected_predictions = tuple(int(score > 0) for score in self.scalar_scores)
+        if (
+            self.scalar_scores != self.native_scores
+            or self.scalar_predictions != expected_predictions
+            or self.packed_predictions != expected_predictions
+            or self.native_predictions != expected_predictions
+        ):
+            raise ModelGenerationError("live runtimes do not agree exactly")
+
+    @property
+    def evidence_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "child_generation_id": self.child_generation_id,
+            "artifact_id": self.artifact_id,
+            "snapshot_id": self.snapshot_id,
+            "literal_manifest_id": self.literal_manifest_id,
+            "corpus": self.corpus.canonical_payload(),
+            "corpus_digest": self.corpus.digest,
+            "scalar_features": [list(row) for row in self.scalar_features],
+            "scalar_scores": list(self.scalar_scores),
+            "scalar_predictions": list(self.scalar_predictions),
+            "packed_predictions": list(self.packed_predictions),
+            "native_features": [list(row) for row in self.native_features],
+            "native_scores": list(self.native_scores),
+            "native_predictions": list(self.native_predictions),
+            "ptmrt_binary_digest": self.ptmrt_binary_digest,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        result = self.canonical_payload()
+        result["evidence_id"] = self.evidence_id
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "LiveRuntimeConformanceEvidence":
+        expected = {
+            "schema",
+            "child_generation_id",
+            "artifact_id",
+            "snapshot_id",
+            "literal_manifest_id",
+            "corpus",
+            "corpus_digest",
+            "scalar_features",
+            "scalar_scores",
+            "scalar_predictions",
+            "packed_predictions",
+            "native_features",
+            "native_scores",
+            "native_predictions",
+            "ptmrt_binary_digest",
+            "evidence_id",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ModelGenerationError("live conformance evidence is malformed")
+        string_fields = (
+            "schema",
+            "child_generation_id",
+            "artifact_id",
+            "snapshot_id",
+            "literal_manifest_id",
+            "corpus_digest",
+            "ptmrt_binary_digest",
+            "evidence_id",
+        )
+        raw_corpus = value["corpus"]
+        matrix_fields = ("scalar_features", "native_features")
+        vector_fields = (
+            "scalar_scores",
+            "scalar_predictions",
+            "packed_predictions",
+            "native_scores",
+            "native_predictions",
+        )
+        if (
+            any(type(value[name]) is not str for name in string_fields)
+            or not isinstance(raw_corpus, Mapping)
+            or set(raw_corpus) != {"dataset_id", "role", "examples"}
+            or type(raw_corpus["dataset_id"]) is not str
+            or type(raw_corpus["role"]) is not str
+            or not isinstance(raw_corpus["examples"], list)
+            or any(not isinstance(value[name], list) for name in (*matrix_fields, *vector_fields))
+            or any(
+                not isinstance(row, list)
+                for name in matrix_fields
+                for row in value[name]
+            )
+        ):
+            raise ModelGenerationError("live conformance evidence types are malformed")
+        examples: list[CorpusExample] = []
+        for raw in raw_corpus["examples"]:
+            if not isinstance(raw, Mapping) or set(raw) != {
+                "example_id",
+                "record",
+                "label",
+            }:
+                raise ModelGenerationError("live conformance corpus is malformed")
+            examples.append(
+                CorpusExample(raw["example_id"], raw["record"], raw["label"])
+            )
+        try:
+            corpus = LabeledCorpus(
+                raw_corpus["dataset_id"],
+                CorpusRole(raw_corpus["role"]),
+                tuple(examples),
+            )
+            result = cls(
+                child_generation_id=value["child_generation_id"],
+                artifact_id=value["artifact_id"],
+                snapshot_id=value["snapshot_id"],
+                literal_manifest_id=value["literal_manifest_id"],
+                corpus=corpus,
+                scalar_features=tuple(tuple(row) for row in value["scalar_features"]),
+                scalar_scores=tuple(value["scalar_scores"]),
+                scalar_predictions=tuple(value["scalar_predictions"]),
+                packed_predictions=tuple(value["packed_predictions"]),
+                native_features=tuple(tuple(row) for row in value["native_features"]),
+                native_scores=tuple(value["native_scores"]),
+                native_predictions=tuple(value["native_predictions"]),
+                ptmrt_binary_digest=value["ptmrt_binary_digest"],
+                schema=value["schema"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ModelGenerationError("live conformance evidence is malformed") from error
+        if corpus.digest != value["corpus_digest"] or result.evidence_id != value["evidence_id"]:
+            raise ModelGenerationError("live conformance evidence digest mismatch")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class PromotionAuditSnapshot:
     corpus_role: CorpusRole
     corpus_digest: str
@@ -1226,6 +1547,10 @@ class PromotionAuditSnapshot:
             raise ModelGenerationError("promotion class strata are invalid")
         if not isinstance(self.conformance, RuntimeConformanceReport):
             raise TypeError("promotion audit conformance report is invalid")
+        if self.conformance.case_count != self.observations:
+            raise ModelGenerationError(
+                "promotion audit and conformance observation counts differ"
+            )
         if type(self.accepted) is not bool:
             raise TypeError("promotion audit decision must be boolean")
         if self.accepted and (
@@ -1347,10 +1672,29 @@ def audit_runtime_conformance(
     ptmrt_verified: bool,
     ptmrt_artifact_id: str | None,
 ) -> RuntimeConformanceReport:
-    catalog = child.manifest.build_catalog()
+    return audit_snapshot_runtime_conformance(
+        child.snapshot,
+        child.manifest,
+        artifact,
+        records,
+        ptmrt_verified=ptmrt_verified,
+        ptmrt_artifact_id=ptmrt_artifact_id,
+    )
+
+
+def audit_snapshot_runtime_conformance(
+    child_snapshot: AdaptiveSnapshotEnvelope,
+    child_manifest: OrderedLiteralManifest,
+    artifact: PackedTMInferenceArtifact,
+    records: Sequence[Mapping[str, object]],
+    *,
+    ptmrt_verified: bool,
+    ptmrt_artifact_id: str | None,
+) -> RuntimeConformanceReport:
+    catalog = child_manifest.build_catalog()
     batch = catalog.encode(records).ta
     rows = tuple(batch.row_values(index) for index in range(batch.row_count))
-    reference = _machine_from_snapshot(child.snapshot.snapshot).predict(rows)
+    reference = _machine_from_snapshot(child_snapshot.snapshot).predict(rows)
     packed = list(artifact.predict_records(records))
     mismatches = abs(len(reference) - len(packed)) + sum(
         left != right for left, right in zip(reference, packed)
@@ -1374,14 +1718,34 @@ def audit_parent_child(
     conformance: RuntimeConformanceReport,
     policy: PromotionAuditPolicy,
 ) -> PromotionAuditSnapshot:
+    return audit_parent_child_snapshots(
+        parent_snapshot,
+        parent_manifest,
+        child.snapshot,
+        child.manifest,
+        corpus,
+        conformance,
+        policy,
+    )
+
+
+def audit_parent_child_snapshots(
+    parent_snapshot: TMSnapshot,
+    parent_manifest: OrderedLiteralManifest,
+    child_snapshot: AdaptiveSnapshotEnvelope,
+    child_manifest: OrderedLiteralManifest,
+    corpus: LabeledCorpus,
+    conformance: RuntimeConformanceReport,
+    policy: PromotionAuditPolicy,
+) -> PromotionAuditSnapshot:
     if corpus.role not in (CorpusRole.PROMOTION, CorpusRole.LIVE):
         raise ModelGenerationError("paired audit requires promotion or live corpus")
     parent_catalog = parent_manifest.build_catalog()
-    child_catalog = child.manifest.build_catalog()
+    child_catalog = child_manifest.build_catalog()
     parent_batch = parent_catalog.encode(corpus.records).ta
     child_batch = child_catalog.encode(corpus.records).ta
     parent_machine = _machine_from_snapshot(parent_snapshot)
-    child_machine = _machine_from_snapshot(child.snapshot.snapshot)
+    child_machine = _machine_from_snapshot(child_snapshot.snapshot)
     parent_rows = tuple(
         parent_batch.row_values(index) for index in range(parent_batch.row_count)
     )
@@ -1453,15 +1817,25 @@ def audit_parent_child(
     )
 
 
-def drift_requires_reopen(report: PromotionAuditSnapshot) -> bool:
+def drift_requires_reopen(
+    report: PromotionAuditSnapshot, policy: DriftAuditPolicy
+) -> bool:
     """Request reopen only from labeled evidence that the child is worse."""
 
     if report.corpus_role is not CorpusRole.LIVE:
         raise ModelGenerationError("drift decisions require the live/drift corpus")
     return (
-        report.observations > 0
-        and report.child_errors > report.parent_errors
+        report.observations >= policy.minimum_observations
+        and report.child_errors - report.parent_errors
+        >= policy.minimum_error_increase
+        and report.regressions >= policy.minimum_regressions
+        and report.regressions / report.observations
+        >= float(policy.minimum_regression_rate)
         and report.regressions > report.improvements
+        and all(
+            counts.observed >= policy.minimum_observations_per_class
+            for counts in report.class_counts
+        )
     )
 
 
@@ -1470,6 +1844,7 @@ class ModelGenerationLineage:
     parent_generation_id: str
     extended_generation_id: str
     child_generation_id: str
+    adaptive_behavior_id: str
     restoration_bundle_id: str
     promotion_audit_id: str
     invention_evidence_id: str
@@ -1488,6 +1863,7 @@ class ModelGenerationLineage:
             ("parent generation", self.parent_generation_id),
             ("extended generation", self.extended_generation_id),
             ("child generation", self.child_generation_id),
+            ("adaptive behavior", self.adaptive_behavior_id),
             ("restoration bundle", self.restoration_bundle_id),
             ("promotion audit", self.promotion_audit_id),
             ("invention evidence", self.invention_evidence_id),
@@ -1511,6 +1887,7 @@ class ModelGenerationLineage:
             "parent_generation_id": self.parent_generation_id,
             "extended_generation_id": self.extended_generation_id,
             "child_generation_id": self.child_generation_id,
+            "adaptive_behavior_id": self.adaptive_behavior_id,
             "restoration_bundle_id": self.restoration_bundle_id,
             "promotion_audit_id": self.promotion_audit_id,
             "invention_evidence_id": self.invention_evidence_id,
@@ -1534,6 +1911,7 @@ class ModelGenerationLineage:
             "parent_generation_id",
             "extended_generation_id",
             "child_generation_id",
+            "adaptive_behavior_id",
             "restoration_bundle_id",
             "promotion_audit_id",
             "invention_evidence_id",
@@ -1559,6 +1937,7 @@ class ModelGenerationLineage:
                 parent_generation_id=value["parent_generation_id"],
                 extended_generation_id=value["extended_generation_id"],
                 child_generation_id=value["child_generation_id"],
+                adaptive_behavior_id=value["adaptive_behavior_id"],
                 restoration_bundle_id=value["restoration_bundle_id"],
                 promotion_audit_id=value["promotion_audit_id"],
                 invention_evidence_id=value["invention_evidence_id"],

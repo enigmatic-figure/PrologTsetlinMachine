@@ -146,6 +146,8 @@ typed proposal model, target-specific fail-closed lowerers, bounded reasoning
 session, and an executable GNU Prolog collective. The Input PTA can derive
 threshold/interval insights from raw observations and labels and the collective
 can decode de-escalation insights and escalation proposals through a
-range-checked, completeness-reporting protocol. The threshold-to-materialized
-literal-to-packed-artifact slice is executable across Python and `ptmrt`; the end-to-end
-train → propose → oracle → shadow → publish → reopen loop remains proposed.
+range-checked, completeness-reporting protocol. The scalar-binary Input-PTA
+threshold slice now experimentally executes trained parent → invention → exact
+extension → adaptation → conformance → promotion → publication → activation →
+labeled drift → bit-exact restoration across Python, GNU Prolog, and `ptmrt`.
+The recurrent, multi-proposal, multi-PTA general control plane remains proposed.
