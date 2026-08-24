@@ -43,6 +43,7 @@ from .model_generation import (
     invent_threshold_for_corpus,
     reopen_and_restore_for_drift,
     verify_artifact_with_ptmrt,
+    verify_records_with_ptmrt,
 )
 from .search import (
     BoundedSearchRequest,
@@ -98,4 +99,5 @@ __all__ = [
     "invent_threshold_for_corpus",
     "reopen_and_restore_for_drift",
     "verify_artifact_with_ptmrt",
+    "verify_records_with_ptmrt",
 ]

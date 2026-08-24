@@ -45,10 +45,11 @@ MODEL_GENERATION_SCHEMA_VERSION = 1
 ORDERED_LITERAL_MANIFEST_SCHEMA = "ptm.ordered-literal-manifest.v1"
 ADAPTIVE_SNAPSHOT_SCHEMA = "ptm.adaptive-snapshot.v1"
 RESTORATION_BUNDLE_SCHEMA = "ptm.adaptive-restoration-bundle.v1"
+ADAPTIVE_BEHAVIOR_SCHEMA = "ptm.adaptive-behavior.v1"
 INVENTION_EVIDENCE_SCHEMA = "ptm.gnu-prolog-invention-evidence.v1"
 GENERATION_SCHEMA = "ptm.model-generation.v1"
 PROMOTION_AUDIT_SCHEMA = "ptm.promotion-audit.v1"
-LINEAGE_SCHEMA = "ptm.model-generation-lineage.v1"
+LINEAGE_SCHEMA = "ptm.model-generation-lineage.v2"
 TRAINING_SEMANTICS_VERSION = "ptm.scalar-binary-training.v1"
 PYTHON_RNG_ALGORITHM = "python.random-mt19937-state-v1"
 MAX_CORPUS_EXAMPLES = 2_048
@@ -798,6 +799,89 @@ class ModelGeneration:
 
 
 @dataclass(frozen=True, slots=True)
+class AdaptiveBehaviorIdentity:
+    snapshot_id: str
+    literal_manifest_id: str
+    preprocessing_contract_id: str
+    extended_generation_id: str
+    adaptation_corpus_digest: str
+    origin_proposal_semantic_id: str
+    training_semantics_version: str = TRAINING_SEMANTICS_VERSION
+    schema: str = ADAPTIVE_BEHAVIOR_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != ADAPTIVE_BEHAVIOR_SCHEMA:
+            raise ModelGenerationError("adaptive behavior schema is unsupported")
+        if self.training_semantics_version != TRAINING_SEMANTICS_VERSION:
+            raise ModelGenerationError("adaptive behavior training semantics are unsupported")
+        for label, value in (
+            ("snapshot", self.snapshot_id),
+            ("literal manifest", self.literal_manifest_id),
+            ("preprocessing contract", self.preprocessing_contract_id),
+            ("extended generation", self.extended_generation_id),
+            ("adaptation corpus", self.adaptation_corpus_digest),
+            ("origin proposal semantic ID", self.origin_proposal_semantic_id),
+        ):
+            _require_digest(value, label)
+
+    @classmethod
+    def from_generation(cls, generation: ModelGeneration) -> "AdaptiveBehaviorIdentity":
+        if generation.kind is not GenerationKind.ADAPTED_CHILD:
+            raise ModelGenerationError("adaptive behavior requires an adapted child")
+        adaptation_digest = dict(generation.corpus_digests).get(
+            CorpusRole.ADAPTATION.value
+        )
+        if (
+            generation.parent_generation_id is None
+            or generation.origin_proposal_semantic_id is None
+            or adaptation_digest is None
+        ):
+            raise ModelGenerationError("adapted child lacks behavior identity inputs")
+        return cls(
+            generation.snapshot_id,
+            generation.literal_manifest_id,
+            generation.preprocessing_contract_id,
+            generation.parent_generation_id,
+            adaptation_digest,
+            generation.origin_proposal_semantic_id,
+        )
+
+    @classmethod
+    def from_child(
+        cls,
+        child: "AdaptedChild",
+        *,
+        preprocessing_contract_id: str,
+        extended_generation_id: str,
+        origin_proposal_semantic_id: str,
+    ) -> "AdaptiveBehaviorIdentity":
+        return cls(
+            child.snapshot.snapshot_id,
+            child.manifest.manifest_id,
+            preprocessing_contract_id,
+            extended_generation_id,
+            child.adaptation_corpus_digest,
+            origin_proposal_semantic_id,
+        )
+
+    @property
+    def behavior_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "snapshot_id": self.snapshot_id,
+            "literal_manifest_id": self.literal_manifest_id,
+            "preprocessing_contract_id": self.preprocessing_contract_id,
+            "extended_generation_id": self.extended_generation_id,
+            "adaptation_corpus_digest": self.adaptation_corpus_digest,
+            "origin_proposal_semantic_id": self.origin_proposal_semantic_id,
+            "training_semantics_version": self.training_semantics_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AdaptiveRestorationBundle:
     parent_generation_id: str
     adaptive_snapshot_id: str
@@ -1090,6 +1174,56 @@ class PromotionAuditPolicy:
             raise TypeError("require_strict_improvement must be boolean")
         if type(self.maximum_regressions) is not int or self.maximum_regressions < 0:
             raise ModelGenerationError("promotion regression budget cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class DriftAuditPolicy:
+    minimum_observations: int
+    minimum_regressions: int
+    minimum_regression_rate: float
+    minimum_error_increase: int
+    minimum_observations_per_class: int
+
+    def __post_init__(self) -> None:
+        integer_fields = (
+            self.minimum_observations,
+            self.minimum_regressions,
+            self.minimum_error_increase,
+            self.minimum_observations_per_class,
+        )
+        if any(type(value) is not int or value <= 0 for value in integer_fields):
+            raise ModelGenerationError("drift policy count thresholds must be positive")
+        if (
+            type(self.minimum_regression_rate) not in (int, float)
+            or not math.isfinite(float(self.minimum_regression_rate))
+            or not 0.0 <= float(self.minimum_regression_rate) <= 1.0
+        ):
+            raise ModelGenerationError("drift policy regression rate is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "minimum_observations": self.minimum_observations,
+            "minimum_regressions": self.minimum_regressions,
+            "minimum_regression_rate": self.minimum_regression_rate,
+            "minimum_error_increase": self.minimum_error_increase,
+            "minimum_observations_per_class": self.minimum_observations_per_class,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "DriftAuditPolicy":
+        expected = {
+            "minimum_observations",
+            "minimum_regressions",
+            "minimum_regression_rate",
+            "minimum_error_increase",
+            "minimum_observations_per_class",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ModelGenerationError("drift policy is malformed")
+        try:
+            return cls(**value)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("drift policy is malformed") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -1453,15 +1587,25 @@ def audit_parent_child(
     )
 
 
-def drift_requires_reopen(report: PromotionAuditSnapshot) -> bool:
+def drift_requires_reopen(
+    report: PromotionAuditSnapshot, policy: DriftAuditPolicy
+) -> bool:
     """Request reopen only from labeled evidence that the child is worse."""
 
     if report.corpus_role is not CorpusRole.LIVE:
         raise ModelGenerationError("drift decisions require the live/drift corpus")
     return (
-        report.observations > 0
-        and report.child_errors > report.parent_errors
+        report.observations >= policy.minimum_observations
+        and report.child_errors - report.parent_errors
+        >= policy.minimum_error_increase
+        and report.regressions >= policy.minimum_regressions
+        and report.regressions / report.observations
+        >= float(policy.minimum_regression_rate)
         and report.regressions > report.improvements
+        and all(
+            counts.observed >= policy.minimum_observations_per_class
+            for counts in report.class_counts
+        )
     )
 
 
@@ -1470,6 +1614,7 @@ class ModelGenerationLineage:
     parent_generation_id: str
     extended_generation_id: str
     child_generation_id: str
+    adaptive_behavior_id: str
     restoration_bundle_id: str
     promotion_audit_id: str
     invention_evidence_id: str
@@ -1488,6 +1633,7 @@ class ModelGenerationLineage:
             ("parent generation", self.parent_generation_id),
             ("extended generation", self.extended_generation_id),
             ("child generation", self.child_generation_id),
+            ("adaptive behavior", self.adaptive_behavior_id),
             ("restoration bundle", self.restoration_bundle_id),
             ("promotion audit", self.promotion_audit_id),
             ("invention evidence", self.invention_evidence_id),
@@ -1511,6 +1657,7 @@ class ModelGenerationLineage:
             "parent_generation_id": self.parent_generation_id,
             "extended_generation_id": self.extended_generation_id,
             "child_generation_id": self.child_generation_id,
+            "adaptive_behavior_id": self.adaptive_behavior_id,
             "restoration_bundle_id": self.restoration_bundle_id,
             "promotion_audit_id": self.promotion_audit_id,
             "invention_evidence_id": self.invention_evidence_id,
@@ -1534,6 +1681,7 @@ class ModelGenerationLineage:
             "parent_generation_id",
             "extended_generation_id",
             "child_generation_id",
+            "adaptive_behavior_id",
             "restoration_bundle_id",
             "promotion_audit_id",
             "invention_evidence_id",
@@ -1559,6 +1707,7 @@ class ModelGenerationLineage:
                 parent_generation_id=value["parent_generation_id"],
                 extended_generation_id=value["extended_generation_id"],
                 child_generation_id=value["child_generation_id"],
+                adaptive_behavior_id=value["adaptive_behavior_id"],
                 restoration_bundle_id=value["restoration_bundle_id"],
                 promotion_audit_id=value["promotion_audit_id"],
                 invention_evidence_id=value["invention_evidence_id"],

@@ -73,6 +73,14 @@ trains only on the declared adaptation corpus for a bounded epoch count. It
 never mutates P or P+. The resulting child carries a new content-addressed
 adaptive snapshot and uses the P+ ordered literal manifest.
 
+Adaptive behavior and deployment packaging have separate identities. An
+`AdaptiveBehaviorIdentity` binds the child snapshot, ordered manifest,
+preprocessing contract, P+ lineage, adaptation-corpus digest, proposal semantic
+identity, and versioned scalar training semantics. A `ModelGeneration` also
+binds the inference artifact, promotion evidence, and proposal provenance.
+Repackaging the same adaptive state against a new holdout can therefore produce
+a different generation ID without producing a different behavior ID.
+
 The lifecycle distinguishes these immutable corpora:
 
 | Corpus | May be inspected by | Purpose |
@@ -98,6 +106,10 @@ Runtime conformance asks whether the child snapshot and portable execution
 mean exactly the same thing. Scalar reference and packed Python predictions
 must have zero mismatches, the artifact's embedded oracle must pass, and
 `ptmrt verify` must return the same artifact identity. There is no tolerance.
+Before a live drift decision, the service additionally runs every bounded raw
+live record through `ptmrt run-record`. Native preprocessing outputs, score,
+prediction, and artifact identity must exactly match the scalar child and
+packed Python artifact on that live window.
 
 Promotion asks whether C is preferable to P on the independent labeled
 holdout. Each paired observation is classified as:
@@ -115,8 +127,12 @@ strictly fewer child errors, at least one improvement, zero regressions, and
 exact runtime conformance.
 
 Parent/child disagreement without ground truth is not proof of drift. Reopen
-requires labeled live evidence that the child has more errors and more
-regressions than improvements.
+uses an explicit `DriftAuditPolicy` with minimum observations, regressions,
+regression rate, error increase, and per-class coverage, and still requires
+more regressions than improvements. The exact policy is recorded with the
+durable reopen event and revalidated during restoration. The strict fixture
+policy rejects a single labeled regression; hysteresis and consecutive-window
+policies remain future generalization work.
 
 ## Model-generation lineage sits above Class II
 
@@ -131,10 +147,13 @@ The UI-neutral `ModelGenerationController` derives its active generation from
 an immutable SHA-256-chained event log. Candidate creation, promotion approval,
 activation, reopen request, and parent restoration are separate events; the
 content-addressed lineage node is never edited to carry lifecycle state.
-Activation consumes the child generation identity: once a generation appears
-in an `activated` event, it cannot be recorded as a candidate again. Restoration
-reopens the parent for newly adapted generations, not for replay of the child
-and promotion evidence that labeled drift already displaced.
+Activation consumes the adaptive behavior identity. Candidate recording scans
+the durable activation history and rejects any lineage whose behavior ID was
+previously activated, even if the same snapshot and manifest are repackaged as
+a new deployment generation with a new artifact or promotion holdout.
+Restoration reopens the parent for genuinely newly adapted behaviors. The
+experimental controller has no rehabilitation mechanism for a displaced
+behavior.
 
 ## Durability and restoration
 
@@ -162,11 +181,18 @@ newly committed log rather than claiming an assumed state. Store instances in
 one process share a root-scoped event lock; cross-process writers remain outside
 the experimental single-process contract.
 
+Before any parent or child is registered, activated, restored, or recovered as
+the active route, one deployability contract reloads and cross-validates its
+snapshot, ordered manifest, preprocessing, and inference artifact. It checks
+the artifact's feature order, exact TA-derived inclusion masks, threshold,
+embedded conformance cases, identity signature, and role-specific evidence.
+
 Before candidate recording, promotion, activation, and active-child recovery,
-the controller reloads and cross-validates the complete lineage graph. This
-includes generation links and kinds, P/P+/C manifests and snapshots, the
-appended invented literal, all corpus digests, proposal and invention-evidence
-IDs, preprocessing order, audit/artifact identity, and restoration parent.
+the controller additionally reloads and cross-validates the complete lineage
+graph. This includes generation links and kinds, P/P+/C manifests and
+snapshots, the appended invented literal, all corpus digests, proposal and
+invention-evidence IDs, preprocessing order, audit/artifact identity, and
+restoration parent.
 The child `.ptm` is opened as part of that graph validation: its embedded
 adaptive-snapshot, ordered-manifest, preprocessing, corpus/proposal, and
 restoration signatures must all agree with the durable child generation. A
@@ -215,6 +241,7 @@ durable lifecycle transition.
 - the `ptmrt_trained_parent_*` CTest cases
 - the required `Trained-parent GNU Prolog / native lifecycle` CI job
 
-The next PTA work should generalize policies and service integration from this
-vertical slice. CoTM/shared weights, regression, graph, patch/CTM, and other
-families remain outside the implemented exact target set.
+The next PTA work should make model-generation adaptation recurrent, including
+durable cross-generation evidence-use accounting, before proving a
+De-escalation PTA lifecycle. CoTM/shared weights, regression, graph, patch/CTM,
+and other families remain outside the implemented exact target set.
