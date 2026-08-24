@@ -116,7 +116,10 @@ by supplying a preconstructed conformance report or verification Boolean. The
 controller publishes a content-addressed `LiveRuntimeConformanceEvidence`
 receipt containing the exact labeled live corpus, child state/artifact
 identities, scalar feature/score/prediction vectors, packed predictions, native
-feature/score/prediction vectors, and the `ptmrt` executable digest.
+feature/score/prediction vectors, and the `ptmrt` executable digest. That digest
+is not treated as self-authenticating metadata: recovery and restoration hash
+the controller's trusted `ptmrt` executable and rerun it over the receipt's
+exact corpus before accepting the durable authorization.
 
 Promotion asks whether C is preferable to P on the independent labeled
 holdout. Each paired observation is classified as:
@@ -197,8 +200,12 @@ drift satisfies its recorded policy. A hash-valid but impossible event makes
 controller construction fail closed. Reopen replay and restoration also reload
 the live-conformance receipt, reconstruct scalar features and scores and packed
 predictions from the durable child and exact corpus, require the native vectors
-to agree, and reconstruct the complete paired drift audit. A self-asserted
-`ptmrt_verified` Boolean without that evidence cannot authorize restoration.
+to agree, verify the configured `ptmrt` bytes against the receipt digest, rerun
+native inference, and reconstruct the complete paired drift audit. Controllers
+recovering a history that contains a reopen therefore require the trusted
+`ptmrt` path at construction. A self-asserted `ptmrt_verified` Boolean or a
+structurally valid receipt fabricated from scalar outputs cannot authorize
+restoration.
 
 Before any parent or child is registered, activated, restored, or recovered as
 the active route, one deployability contract reloads and cross-validates its

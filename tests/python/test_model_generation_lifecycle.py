@@ -16,6 +16,7 @@ from prolog_tsetlin.model_generation import (
     DriftAuditPolicy,
     GenerationKind,
     LabeledCorpus,
+    LiveRuntimeConformanceEvidence,
     LifecycleCorpora,
     ModelGeneration,
     ModelGenerationError,
@@ -828,6 +829,57 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
     with pytest.raises(ModelGenerationError, match="conformance evidence"):
         ModelGenerationController(forged_reopen_store)
 
+    forged_receipt_root = tmp_path / "forged-receipt-store"
+    shutil.copytree(store.root, forged_receipt_root)
+    forged_receipt_store = ModelGenerationStore(forged_receipt_root)
+    child_batch = result.child.manifest.build_catalog().encode(live.records).ta
+    child_rows = tuple(
+        child_batch.row_values(index) for index in range(child_batch.row_count)
+    )
+    forged_machine = ScalarBinaryTsetlinMachine(
+        result.child.snapshot.snapshot.number_of_clauses,
+        result.child.snapshot.snapshot.number_of_features,
+        states_per_action=result.child.snapshot.snapshot.states_per_action,
+        specificity=result.child.snapshot.snapshot.specificity,
+        threshold=result.child.snapshot.snapshot.threshold,
+        seed=0,
+    )
+    forged_machine.restore(result.child.snapshot.snapshot)
+    forged_scores = tuple(forged_machine.score(row) for row in child_rows)
+    forged_predictions = tuple(int(score > 0) for score in forged_scores)
+    forged_receipt = LiveRuntimeConformanceEvidence(
+        result.child_generation.generation_id,
+        result.child_artifact.artifact_id,
+        result.child.snapshot.snapshot_id,
+        result.child.manifest.manifest_id,
+        live,
+        child_rows,
+        forged_scores,
+        forged_predictions,
+        result.child_artifact.predict_records(live.records),
+        tuple(tuple(int(value) for value in row) for row in child_rows),
+        forged_scores,
+        forged_predictions,
+        "sha256:" + "0" * 64,
+    )
+    forged_receipt_store.put_live_conformance(forged_receipt)
+    forged_receipt_store.put_audit(forged_drift)
+    forged_receipt_store.append_event(
+        LifecycleEventKind.REOPEN_REQUESTED,
+        result.child_generation.generation_id,
+        drift_audit_id=forged_drift.audit_id,
+        lineage_id=result.lineage.lineage_id,
+        restoration_bundle_id=result.restoration_bundle.bundle_id,
+        parent_errors=forged_drift.parent_errors,
+        child_errors=forged_drift.child_errors,
+        drift_policy=STRICT_DRIFT_POLICY.to_dict(),
+        live_conformance_evidence_id=forged_receipt.evidence_id,
+    )
+    with pytest.raises(ModelGenerationError, match="executable digest"):
+        ModelGenerationController(
+            forged_receipt_store, ptmrt_executable=_ptmrt_path()
+        )
+
     def block_native_verification(*args, **kwargs):
         del args, kwargs
         raise ModelGenerationError("injected native verification requirement")
@@ -887,7 +939,9 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
     replay.update(rows[0], parent_training.labels[0])
     restored.machine.update(rows[0], parent_training.labels[0])
     assert restored.machine.snapshot() == replay.snapshot()
-    assert ModelGenerationController(store).active_generation_id == (
+    assert ModelGenerationController(
+        store, ptmrt_executable=_ptmrt_path()
+    ).active_generation_id == (
         result.parent_generation.generation_id
     )
 
@@ -1053,7 +1107,9 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         audit_id=rejected_audit.audit_id,
     )
     with pytest.raises(ModelGenerationError, match="promotion approval"):
-        ModelGenerationController(rejected_recovery_store)
+        ModelGenerationController(
+            rejected_recovery_store, ptmrt_executable=_ptmrt_path()
+        )
 
     fresh_promotion = _corpus(
         CorpusRole.PROMOTION,
@@ -1079,7 +1135,9 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         "candidate_rejected",
         "candidate_created",
     ]
-    assert ModelGenerationController(store).active_generation_id == (
+    assert ModelGenerationController(
+        store, ptmrt_executable=_ptmrt_path()
+    ).active_generation_id == (
         result.parent_generation.generation_id
     )
 

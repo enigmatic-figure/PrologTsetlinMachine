@@ -569,6 +569,7 @@ class ModelGenerationController:
         self,
         store: ModelGenerationStore,
         *,
+        ptmrt_executable: str | Path | None = None,
         telemetry: TelemetrySession | None = None,
         event_sink: TelemetrySink | None = None,
     ) -> None:
@@ -577,6 +578,9 @@ class ModelGenerationController:
         self.event_sink = event_sink
         self._control_lock = RLock()
         self._last_telemetry_error: Exception | None = None
+        self._ptmrt_executable: Path | None = None
+        if ptmrt_executable is not None:
+            self._bind_ptmrt_executable(ptmrt_executable)
         self._active_generation_id: str | None = None
         self._active_generation_id = self._replay_lifecycle()
 
@@ -603,6 +607,32 @@ class ModelGenerationController:
             # transition into a reported lifecycle failure.
             with self._control_lock:
                 self._last_telemetry_error = error
+
+    def _bind_ptmrt_executable(
+        self, executable: str | Path | None = None
+    ) -> Path:
+        if executable is not None:
+            try:
+                candidate = Path(executable).resolve(strict=True)
+            except OSError as error:
+                raise ModelGenerationError(
+                    "trusted ptmrt executable is unavailable"
+                ) from error
+            if not candidate.is_file():
+                raise ModelGenerationError("trusted ptmrt executable is not a file")
+            if (
+                self._ptmrt_executable is not None
+                and candidate != self._ptmrt_executable
+            ):
+                raise ModelGenerationError(
+                    "reopen requested a different ptmrt executable"
+                )
+            self._ptmrt_executable = candidate
+        if self._ptmrt_executable is None:
+            raise ModelGenerationError(
+                "durable live conformance requires a trusted ptmrt executable"
+            )
+        return self._ptmrt_executable
 
     def _validate_deployable_generation(
         self, generation: ModelGeneration
@@ -885,6 +915,41 @@ class ModelGenerationController:
             or scalar_predictions != evidence.native_predictions
         ):
             raise ModelGenerationError("live conformance evidence cannot be reconstructed")
+        ptmrt_executable = self._bind_ptmrt_executable()
+        executable_digest = _file_digest(
+            ptmrt_executable,
+            maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
+        )
+        if executable_digest != evidence.ptmrt_binary_digest:
+            raise ModelGenerationError(
+                "live conformance ptmrt executable digest does not match"
+            )
+        native = _verify_snapshot_records_with_ptmrt(
+            ptmrt_executable,
+            self.store.artifact_path(artifact.artifact_id),
+            child_snapshot,
+            child_manifest,
+            artifact,
+            evidence.corpus.records,
+        )
+        if (
+            _file_digest(
+                ptmrt_executable,
+                maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
+            )
+            != evidence.ptmrt_binary_digest
+            or native.artifact_id != evidence.artifact_id
+            or native.scalar_features != evidence.scalar_features
+            or native.scalar_scores != evidence.scalar_scores
+            or native.scalar_predictions != evidence.scalar_predictions
+            or native.packed_predictions != evidence.packed_predictions
+            or native.native_features != evidence.native_features
+            or native.native_scores != evidence.native_scores
+            or native.native_predictions != evidence.native_predictions
+        ):
+            raise ModelGenerationError(
+                "live conformance native execution cannot be reproduced"
+            )
         conformance = RuntimeConformanceReport(
             artifact.artifact_id,
             len(rows),
@@ -1354,6 +1419,7 @@ class ModelGenerationController:
         if live_corpus.role is not CorpusRole.LIVE:
             raise ModelGenerationError("reopen evaluation requires the live/drift corpus")
         with self._control_lock:
+            trusted_ptmrt = self._bind_ptmrt_executable(ptmrt_executable)
             if self._active_generation_id != child_generation_id:
                 raise ModelGenerationError("reopen target is not the active generation")
             events = self.store.read_events()
@@ -1376,7 +1442,7 @@ class ModelGenerationController:
             parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
             parent_manifest = self.store.load_manifest(parent.literal_manifest_id)
             vectors = _verify_snapshot_records_with_ptmrt(
-                ptmrt_executable,
+                trusted_ptmrt,
                 self.store.artifact_path(child_artifact.artifact_id),
                 child_snapshot,
                 child_manifest,
@@ -1397,7 +1463,7 @@ class ModelGenerationController:
                 vectors.native_scores,
                 vectors.native_predictions,
                 _file_digest(
-                    Path(ptmrt_executable),
+                    trusted_ptmrt,
                     maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
                 ),
             )
@@ -1903,7 +1969,10 @@ def execute_trained_parent_lifecycle(
     )
     store.put_restoration_bundle(restoration_bundle)
     controller = ModelGenerationController(
-        store, telemetry=telemetry, event_sink=event_sink
+        store,
+        ptmrt_executable=ptmrt_executable,
+        telemetry=telemetry,
+        event_sink=event_sink,
     )
     if controller.active_generation_id is None:
         controller.register_parent(parent_generation)
