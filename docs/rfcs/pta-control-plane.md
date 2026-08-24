@@ -63,7 +63,7 @@ are not coerced into integers or strings.
 | --- | --- | --- |
 | `binary_clause` | `ExecutableBinaryClause` over canonical, materialized literal descriptors | conjunction activation over the Booleanized substrate |
 | `logic_program` | validated `LogicProgram32` | exhaustive comparison over all 32 A–E assignments |
-| `threshold` | none yet; a materialized threshold literal may participate in `binary_clause` | fail closed |
+| `threshold` | none; the target remains fail closed | fail closed |
 | `shared_weighted_clause` | none until CoTM execution exists | fail closed |
 | `regression_clause` | none until executable RTM semantics exist | fail closed |
 | `graph_clause` | none | fail closed |
@@ -73,6 +73,14 @@ are not coerced into integers or strings.
 `ClauseConfiguration` remains an analysis/configuration record and is not an
 exact lowering result. Adding a target to the executable set requires both a
 constructor and an independent behavioral oracle.
+
+One deliberately explicit promotion path is now implemented. A GNU
+Prolog-invented threshold can be independently reviewed against its reasoning
+session, previewed without catalog mutation, approved as a canonical
+`numeric_ge` literal, and used to derive an exact `binary_clause` proposal.
+That derived clause—not the original threshold target—can cross `lower_exact()`
+and compile to a one-clause packed-TM artifact. See the current
+[PTA threshold materialization contract](../architecture/pta-threshold-materialization.md).
 
 ## What each PTA class owns
 
@@ -138,5 +146,6 @@ typed proposal model, target-specific fail-closed lowerers, bounded reasoning
 session, and an executable GNU Prolog collective. The Input PTA can derive
 threshold/interval insights from raw observations and labels and the collective
 can decode de-escalation insights and escalation proposals through a
-range-checked, completeness-reporting protocol. The end-to-end
+range-checked, completeness-reporting protocol. The threshold-to-materialized
+literal-to-packed-artifact slice is executable across Python and `ptmrt`; the end-to-end
 train → propose → oracle → shadow → publish → reopen loop remains proposed.

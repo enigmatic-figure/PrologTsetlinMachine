@@ -29,6 +29,9 @@ and releases use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   counterexamples and fixed-Logic export.
 - Shared conceptual help topics, `ptm help TOPIC`, generated workbench control
   reference, and contextual TUI help sourced from the application bindings.
+- Reviewed Input-PTA threshold materialization into canonical literals, exact
+  binary clauses, and provenance-carrying packed artifacts verified by Python,
+  the C++ runtime, and `ptmrt` raw-record execution.
 
 ### Changed
 

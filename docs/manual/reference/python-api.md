@@ -146,6 +146,22 @@ The `prolog_tsetlin` package re-exports the public surface from the modules belo
    :no-index:
 ```
 
+## PTA control plane and artifact publication
+
+```{eval-rst}
+.. automodule:: prolog_tsetlin.pta.threshold_artifact
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :no-index:
+
+.. automodule:: prolog_tsetlin.services.artifacts
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :no-index:
+```
+
 ## Adapters and graph extensions
 
 ```{eval-rst}

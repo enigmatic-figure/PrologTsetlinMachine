@@ -136,6 +136,15 @@ threshold/interval midpoint is computed by GNU Prolog, not duplicated in the
 collective service. A typed proposal is still only a proposal: it must pass the
 target-specific exact-lowering and behavioral-oracle gates before publication.
 
+For threshold products, `review_threshold_proposal()` performs a non-mutating
+review against the originating `PTAReasoningSession`.
+`materialize_threshold_clause()` is the explicit approval boundary: it creates
+the canonical numeric literal and derives a `binary_clause` proposal.
+`compile_threshold_artifact()` then produces a deterministic
+`packed_tm_binary_v1` clause-activation artifact whose origin and boundary
+evidence remain in the manifest. The original `threshold` target continues to
+fail closed in `lower_exact()`.
+
 ## Validation trust boundary
 
 Python re-evaluates every Prolog candidate rather than trusting syntax:
