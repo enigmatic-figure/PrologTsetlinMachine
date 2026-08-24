@@ -22,6 +22,7 @@ from prolog_tsetlin.model_generation import (
     ModelGenerationLineage,
     OrderedLiteralManifest,
     PromotionAuditPolicy,
+    PromotionAuditSnapshot,
     RuntimeConformanceReport,
     adapt_extended_parent,
     audit_parent_child,
@@ -355,12 +356,19 @@ def test_promotion_is_paired_and_requires_exact_runtime_conformance() -> None:
         CorpusRole.PROMOTION,
         unchanged_examples,
     )
+    unchanged_conformance = audit_runtime_conformance(
+        child,
+        artifact,
+        unchanged.records,
+        ptmrt_verified=True,
+        ptmrt_artifact_id=artifact.artifact_id,
+    )
     equal = audit_parent_child(
         parent.snapshot(),
         manifest,
         child,
         unchanged,
-        exact,
+        unchanged_conformance,
         PromotionAuditPolicy(
             len(unchanged_examples), require_strict_improvement=False
         ),
@@ -370,7 +378,7 @@ def test_promotion_is_paired_and_requires_exact_runtime_conformance() -> None:
         manifest,
         child,
         unchanged,
-        exact,
+        unchanged_conformance,
         PromotionAuditPolicy(len(unchanged_examples)),
     )
     assert equal.parent_errors == equal.child_errors
@@ -449,6 +457,7 @@ def test_disagreement_alone_is_not_a_drift_reopen_decision() -> None:
         both_wrong=0,
         parent_scores=(1,),
         child_scores=(-1,),
+        conformance=replace(live.conformance, case_count=1),
         class_counts=(
             replace(
                 live.class_counts[0],
@@ -614,7 +623,9 @@ def _has_gprolog() -> bool:
     not _has_gprolog() or _ptmrt_path() is None,
     reason="live GNU Prolog and a built ptmrt are required",
 )
-def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> None:
+def test_live_trained_parent_loop_restores_bit_exact_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     parent_training, corpora, live = _fixture_corpora()
     parent, manifest = _parent()
     original_snapshot = parent.snapshot()
@@ -769,6 +780,39 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
     with pytest.raises(ModelGenerationError, match="object graph"):
         result.controller.record_candidate(alternate_lineage)
 
+    unauthorized_restore_root = tmp_path / "unauthorized-restore-store"
+    shutil.copytree(store.root, unauthorized_restore_root)
+    unauthorized_restore_store = ModelGenerationStore(unauthorized_restore_root)
+    unauthorized_restore_store.append_event(
+        LifecycleEventKind.PARENT_RESTORED,
+        result.parent_generation.generation_id,
+        restoration_bundle_id=result.restoration_bundle.bundle_id,
+        previous_generation_id=result.child_generation.generation_id,
+        lineage_id=result.lineage.lineage_id,
+        drift_audit_id=result.promotion_audit.audit_id,
+    )
+    with pytest.raises(ModelGenerationError, match="reopen request"):
+        ModelGenerationController(unauthorized_restore_store)
+
+    def block_native_verification(*args, **kwargs):
+        del args, kwargs
+        raise ModelGenerationError("injected native verification requirement")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            model_generation_service,
+            "_verify_snapshot_records_with_ptmrt",
+            block_native_verification,
+        )
+        with pytest.raises(ModelGenerationError, match="native verification"):
+            result.controller.request_reopen(
+                result.child_generation.generation_id,
+                live,
+                STRICT_DRIFT_POLICY,
+                _ptmrt_path(),
+            )
+    assert store.read_events()[-1].kind is LifecycleEventKind.ACTIVATED
+
     drift, restored = reopen_and_restore_for_drift(
         result, live, STRICT_DRIFT_POLICY
     )
@@ -811,15 +855,22 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
         promotion_corpus: LabeledCorpus,
         *,
         name: str,
-    ) -> tuple[ModelGeneration, ModelGenerationLineage]:
+        claimed_adaptation_digest: str | None = None,
+        require_accepted: bool = True,
+    ) -> tuple[
+        ModelGeneration,
+        ModelGenerationLineage,
+        PromotionAuditSnapshot,
+    ]:
         preprocessing_id = result.child_generation.preprocessing_contract_id
+        adaptation_digest = (
+            adapted_child.adaptation_corpus_digest
+            if claimed_adaptation_digest is None
+            else claimed_adaptation_digest
+        )
         behavior = AdaptiveBehaviorIdentity.from_child(
             adapted_child,
             preprocessing_contract_id=preprocessing_id,
-            extended_generation_id=result.extended_generation.generation_id,
-            origin_proposal_semantic_id=(
-                result.lineage.origin_proposal_semantic_id
-            ),
         )
         preprocessing, artifact = compile_generation_artifact(
             adapted_child.snapshot.snapshot,
@@ -831,7 +882,7 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
                 "adaptive_behavior_id": behavior.behavior_id,
                 "invention_corpus_digest": corpora.invention.digest,
                 "adaptation_corpus_digest": (
-                    adapted_child.adaptation_corpus_digest
+                    adaptation_digest
                 ),
                 "promotion_corpus_digest": promotion_corpus.digest,
                 "origin_proposal_semantic_id": (
@@ -860,7 +911,7 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
                 (CorpusRole.INVENTION.value, corpora.invention.digest),
                 (
                     CorpusRole.ADAPTATION.value,
-                    adapted_child.adaptation_corpus_digest,
+                    adaptation_digest,
                 ),
                 (CorpusRole.PROMOTION.value, promotion_corpus.digest),
             ),
@@ -886,7 +937,7 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
             conformance,
             PromotionAuditPolicy(len(promotion_corpus.examples)),
         )
-        assert audit.accepted
+        assert audit.accepted is require_accepted
         store.put_audit(audit)
         lineage = ModelGenerationLineage(
             result.parent_generation.generation_id,
@@ -898,13 +949,13 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
             result.invention_evidence.evidence_id,
             result.lineage.invented_literal_id,
             corpora.invention.digest,
-            adapted_child.adaptation_corpus_digest,
+            adaptation_digest,
             promotion_corpus.digest,
             result.lineage.origin_proposal_semantic_id,
             result.lineage.origin_proposal_provenance_id,
         )
         store.put_lineage(lineage)
-        return generation, lineage
+        return generation, lineage, audit
 
     repackaged_promotion = _corpus(
         CorpusRole.PROMOTION,
@@ -912,10 +963,18 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
         (60, 67, 70, 74, 77, 80, 90, 96),
         (0, 0, 0, 0, 1, 1, 1, 1),
     )
-    repackaged_generation, repackaged_lineage = package_candidate(
+    forged_adaptation_digest = _corpus(
+        CorpusRole.ADAPTATION,
+        600,
+        (56, 63, 70, 72, 78, 85, 93, 101),
+        (0, 0, 0, 0, 1, 1, 1, 1),
+    ).digest
+    assert forged_adaptation_digest != result.child.adaptation_corpus_digest
+    repackaged_generation, repackaged_lineage, _ = package_candidate(
         result.child,
         repackaged_promotion,
         name="same adaptive behavior with fresh promotion evidence",
+        claimed_adaptation_digest=forged_adaptation_digest,
     )
     assert repackaged_generation.generation_id != result.child_generation.generation_id
     assert repackaged_lineage.adaptive_behavior_id == result.lineage.adaptive_behavior_id
@@ -925,13 +984,43 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
     genuinely_readapted = adapt_extended_parent(
         result.extended_parent, corpora.adaptation, epochs=6
     )
+    rejected_promotion = _corpus(
+        CorpusRole.PROMOTION,
+        800,
+        (59, 63, 69, 72, 78, 83, 88, 94),
+        (1, 1, 1, 1, 0, 0, 0, 0),
+    )
+    rejected_generation, rejected_lineage, rejected_audit = package_candidate(
+        genuinely_readapted,
+        rejected_promotion,
+        name="readapted child with rejected promotion evidence",
+        require_accepted=False,
+    )
+    result.controller.record_candidate(rejected_lineage)
+    result.controller.reject_candidate(
+        rejected_generation.generation_id, rejected_audit
+    )
+    rejected_recovery_root = tmp_path / "rejected-activation-store"
+    shutil.copytree(store.root, rejected_recovery_root)
+    rejected_recovery_store = ModelGenerationStore(rejected_recovery_root)
+    rejected_recovery_store.append_event(
+        LifecycleEventKind.ACTIVATED,
+        rejected_generation.generation_id,
+        previous_generation_id=result.parent_generation.generation_id,
+        lineage_id=rejected_lineage.lineage_id,
+        adaptive_behavior_id=rejected_lineage.adaptive_behavior_id,
+        audit_id=rejected_audit.audit_id,
+    )
+    with pytest.raises(ModelGenerationError, match="promotion approval"):
+        ModelGenerationController(rejected_recovery_store)
+
     fresh_promotion = _corpus(
         CorpusRole.PROMOTION,
         700,
         (57, 65, 69, 72, 78, 84, 91, 99),
         (0, 0, 0, 0, 1, 1, 1, 1),
     )
-    _, readapted_lineage = package_candidate(
+    _, readapted_lineage, _ = package_candidate(
         genuinely_readapted,
         fresh_promotion,
         name="genuinely readapted child",
@@ -946,7 +1035,12 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
         "reopen_requested",
         "parent_restored",
         "candidate_created",
+        "candidate_rejected",
+        "candidate_created",
     ]
+    assert ModelGenerationController(store).active_generation_id == (
+        result.parent_generation.generation_id
+    )
 
 
 def test_event_log_tampering_fails_closed(tmp_path: Path) -> None:

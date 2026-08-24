@@ -75,11 +75,12 @@ adaptive snapshot and uses the P+ ordered literal manifest.
 
 Adaptive behavior and deployment packaging have separate identities. An
 `AdaptiveBehaviorIdentity` binds the child snapshot, ordered manifest,
-preprocessing contract, P+ lineage, adaptation-corpus digest, proposal semantic
-identity, and versioned scalar training semantics. A `ModelGeneration` also
-binds the inference artifact, promotion evidence, and proposal provenance.
-Repackaging the same adaptive state against a new holdout can therefore produce
-a different generation ID without producing a different behavior ID.
+preprocessing contract, and versioned scalar training semantics. P+ lineage,
+adaptation evidence, proposal identity and provenance, promotion evidence, and
+the inference artifact remain deployment/lineage claims. They cannot change the
+consumed identity of an unchanged adaptive state. Repackaging that state against
+a new holdout—or claiming a different adaptation corpus—can therefore produce a
+different generation ID without producing a different behavior ID.
 
 The lifecycle distinguishes these immutable corpora:
 
@@ -109,7 +110,9 @@ must have zero mismatches, the artifact's embedded oracle must pass, and
 Before a live drift decision, the service additionally runs every bounded raw
 live record through `ptmrt run-record`. Native preprocessing outputs, score,
 prediction, and artifact identity must exactly match the scalar child and
-packed Python artifact on that live window.
+packed Python artifact on that live window. This execution is owned by
+`ModelGenerationController.request_reopen()`; callers cannot authorize reopen
+by supplying a preconstructed conformance report or verification Boolean.
 
 Promotion asks whether C is preferable to P on the independent labeled
 holdout. Each paired observation is classified as:
@@ -180,6 +183,14 @@ durable append fails, it immediately reconstructs routing from the previous or
 newly committed log rather than claiming an assumed state. Store instances in
 one process share a root-scoped event lock; cross-process writers remain outside
 the experimental single-process contract.
+
+Recovery replays the complete lifecycle state machine rather than selecting the
+last routing-shaped event. Every frame must consume its required predecessor
+with matching lineage, audit, behavior, bundle, policy, error counts, and active
+route. In particular, activation requires an immediately valid accepted exact
+promotion, and parent restoration requires a valid reopen request whose labeled
+drift satisfies its recorded policy. A hash-valid but impossible event makes
+controller construction fail closed.
 
 Before any parent or child is registered, activated, restored, or recovered as
 the active route, one deployability contract reloads and cross-validates its

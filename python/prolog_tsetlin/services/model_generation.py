@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+import math
 import os
+import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-import math
 from pathlib import Path
-import subprocess
 from threading import RLock
-import time
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
@@ -38,7 +38,9 @@ from ..model_generation import (
     RuntimeConformanceReport,
     adapt_extended_parent,
     audit_parent_child,
+    audit_parent_child_snapshots,
     audit_runtime_conformance,
+    audit_snapshot_runtime_conformance,
     canonical_json_bytes,
     content_digest,
     drift_requires_reopen,
@@ -512,18 +514,6 @@ class ModelGenerationStore:
                 raise
             return event
 
-    def recover_active_generation(self) -> str | None:
-        active: str | None = None
-        for event in self.read_events():
-            if event.kind in (
-                LifecycleEventKind.PARENT_REGISTERED,
-                LifecycleEventKind.ACTIVATED,
-                LifecycleEventKind.PARENT_RESTORED,
-            ):
-                active = event.generation_id
-        return active
-
-
 TelemetrySink = Callable[[TelemetryEvent], None]
 
 
@@ -552,8 +542,8 @@ class ModelGenerationController:
         self.event_sink = event_sink
         self._control_lock = RLock()
         self._last_telemetry_error: Exception | None = None
-        self._active_generation_id = store.recover_active_generation()
-        self._validate_recovered_state()
+        self._active_generation_id: str | None = None
+        self._active_generation_id = self._replay_lifecycle()
 
     @property
     def active_generation_id(self) -> str | None:
@@ -812,43 +802,206 @@ class ModelGenerationController:
         self._resolve_restoration_bundle(bundle)
         return parent, extended, child, bundle, audit, evidence
 
-    def _validate_recovered_state(self) -> None:
-        if self._active_generation_id is None:
-            return
-        generation = self.store.load_generation(self._active_generation_id)
-        self._validate_deployable_generation(generation)
+    def _replay_lifecycle(self) -> str | None:
+        """Replay and validate every durable transition before deriving routing."""
+
         events = self.store.read_events()
-        route = next(
-            (
-                event
-                for event in reversed(events)
-                if event.kind
-                in (
-                    LifecycleEventKind.PARENT_REGISTERED,
-                    LifecycleEventKind.ACTIVATED,
-                    LifecycleEventKind.PARENT_RESTORED,
-                )
-            ),
-            None,
-        )
-        if route is None or route.generation_id != generation.generation_id:
-            raise ModelGenerationError("durable active-generation route is inconsistent")
-        if generation.kind is GenerationKind.ADAPTED_CHILD:
-            lineage_id = route.details.get("lineage_id")
-            if route.kind is not LifecycleEventKind.ACTIVATED or type(lineage_id) is not str:
-                raise ModelGenerationError("recovered child lacks its activation lineage")
-            lineage = self.store.load_lineage(lineage_id)
-            self._validate_lineage_graph(lineage)
-        elif generation.kind is not GenerationKind.TRAINED_PARENT:
-            raise ModelGenerationError("durable routing targets a non-deployable generation")
-        elif route.kind is LifecycleEventKind.PARENT_RESTORED:
-            bundle_id = route.details.get("restoration_bundle_id")
-            if type(bundle_id) is not str:
-                raise ModelGenerationError("recovered parent lacks its restoration bundle")
-            bundle = self.store.load_restoration_bundle(bundle_id)
-            if bundle.parent_generation_id != generation.generation_id:
-                raise ModelGenerationError("recovered parent route names a different bundle")
-            self._resolve_restoration_bundle(bundle)
+        if not events:
+            return None
+        active: str | None = None
+        candidate: ModelGenerationLineage | None = None
+        approved: ModelGenerationLineage | None = None
+        activated: ModelGenerationLineage | None = None
+        reopen: tuple[
+            ModelGenerationLineage,
+            AdaptiveRestorationBundle,
+            PromotionAuditSnapshot,
+        ] | None = None
+        activated_behaviors: set[str] = set()
+        graph_cache: dict[
+            str,
+            tuple[
+                ModelGeneration,
+                ModelGeneration,
+                ModelGeneration,
+                AdaptiveRestorationBundle,
+                PromotionAuditSnapshot,
+                PrologInventionEvidence,
+            ],
+        ] = {}
+
+        def graph(lineage_id: object):
+            if type(lineage_id) is not str:
+                raise ModelGenerationError("lifecycle event lacks a lineage identity")
+            if lineage_id not in graph_cache:
+                lineage = self.store.load_lineage(lineage_id)
+                graph_cache[lineage_id] = self._validate_lineage_graph(lineage)
+            return self.store.load_lineage(lineage_id), graph_cache[lineage_id]
+
+        for index, event in enumerate(events):
+            details = dict(event.details)
+            if event.kind is LifecycleEventKind.PARENT_REGISTERED:
+                if index != 0 or active is not None or details:
+                    raise ModelGenerationError("invalid parent registration transition")
+                parent = self.store.load_generation(event.generation_id)
+                if parent.kind is not GenerationKind.TRAINED_PARENT:
+                    raise ModelGenerationError("registered route is not a trained parent")
+                self._validate_deployable_generation(parent)
+                active = parent.generation_id
+                continue
+
+            if event.kind is LifecycleEventKind.CANDIDATE_CREATED:
+                lineage, values = graph(details.get("lineage_id"))
+                parent, extended, child, _, _, _ = values
+                expected = {
+                    "lineage_id": lineage.lineage_id,
+                    "parent_generation_id": parent.generation_id,
+                    "extended_generation_id": extended.generation_id,
+                }
+                if (
+                    active != parent.generation_id
+                    or candidate is not None
+                    or approved is not None
+                    or activated is not None
+                    or reopen is not None
+                    or event.generation_id != child.generation_id
+                    or details != expected
+                    or lineage.adaptive_behavior_id in activated_behaviors
+                ):
+                    raise ModelGenerationError("invalid candidate-created transition")
+                candidate = lineage
+                continue
+
+            if event.kind is LifecycleEventKind.CANDIDATE_REJECTED:
+                if candidate is None:
+                    raise ModelGenerationError("candidate rejection lacks a candidate")
+                lineage, values = graph(details.get("lineage_id"))
+                _, _, child, _, audit, _ = values
+                expected = {
+                    "lineage_id": lineage.lineage_id,
+                    "audit_id": audit.audit_id,
+                    "parent_errors": audit.parent_errors,
+                    "child_errors": audit.child_errors,
+                    "improvements": audit.improvements,
+                    "regressions": audit.regressions,
+                }
+                if (
+                    lineage != candidate
+                    or event.generation_id != child.generation_id
+                    or audit.accepted
+                    or details != expected
+                ):
+                    raise ModelGenerationError("invalid candidate-rejected transition")
+                candidate = None
+                continue
+
+            if event.kind is LifecycleEventKind.PROMOTION_APPROVED:
+                if candidate is None:
+                    raise ModelGenerationError("promotion approval lacks a candidate")
+                lineage, values = graph(details.get("lineage_id"))
+                _, _, child, _, audit, _ = values
+                expected = {
+                    "lineage_id": lineage.lineage_id,
+                    "audit_id": audit.audit_id,
+                }
+                if (
+                    lineage != candidate
+                    or event.generation_id != child.generation_id
+                    or not audit.accepted
+                    or not audit.conformance.exact
+                    or details != expected
+                ):
+                    raise ModelGenerationError("invalid promotion-approved transition")
+                candidate = None
+                approved = lineage
+                continue
+
+            if event.kind is LifecycleEventKind.ACTIVATED:
+                if approved is None:
+                    raise ModelGenerationError("activation lacks promotion approval")
+                lineage, values = graph(details.get("lineage_id"))
+                parent, _, child, _, audit, _ = values
+                expected = {
+                    "previous_generation_id": parent.generation_id,
+                    "lineage_id": lineage.lineage_id,
+                    "adaptive_behavior_id": lineage.adaptive_behavior_id,
+                    "audit_id": audit.audit_id,
+                }
+                if (
+                    lineage != approved
+                    or active != parent.generation_id
+                    or event.generation_id != child.generation_id
+                    or not audit.accepted
+                    or not audit.conformance.exact
+                    or lineage.adaptive_behavior_id in activated_behaviors
+                    or details != expected
+                ):
+                    raise ModelGenerationError("invalid activated transition")
+                active = child.generation_id
+                activated_behaviors.add(lineage.adaptive_behavior_id)
+                approved = None
+                activated = lineage
+                continue
+
+            if event.kind is LifecycleEventKind.REOPEN_REQUESTED:
+                if activated is None or reopen is not None:
+                    raise ModelGenerationError("reopen request lacks an active child")
+                lineage, values = graph(details.get("lineage_id"))
+                _, _, child, bundle, _, _ = values
+                drift_id = details.get("drift_audit_id")
+                raw_policy = details.get("drift_policy")
+                if type(drift_id) is not str or not isinstance(raw_policy, Mapping):
+                    raise ModelGenerationError("reopen request lacks durable evidence")
+                drift = self.store.load_audit(drift_id)
+                policy = DriftAuditPolicy.from_dict(raw_policy)
+                expected = {
+                    "drift_audit_id": drift.audit_id,
+                    "lineage_id": lineage.lineage_id,
+                    "restoration_bundle_id": bundle.bundle_id,
+                    "parent_errors": drift.parent_errors,
+                    "child_errors": drift.child_errors,
+                    "drift_policy": policy.to_dict(),
+                }
+                if (
+                    lineage != activated
+                    or active != child.generation_id
+                    or event.generation_id != child.generation_id
+                    or drift.corpus_role is not CorpusRole.LIVE
+                    or not drift.conformance.exact
+                    or drift.conformance.artifact_id != child.inference_artifact_id
+                    or not drift_requires_reopen(drift, policy)
+                    or details != expected
+                ):
+                    raise ModelGenerationError("invalid reopen-requested transition")
+                reopen = lineage, bundle, drift
+                continue
+
+            if event.kind is LifecycleEventKind.PARENT_RESTORED:
+                if reopen is None or activated is None:
+                    raise ModelGenerationError("parent restoration lacks a reopen request")
+                lineage, bundle, drift = reopen
+                expected = {
+                    "restoration_bundle_id": bundle.bundle_id,
+                    "previous_generation_id": active,
+                    "lineage_id": lineage.lineage_id,
+                    "drift_audit_id": drift.audit_id,
+                }
+                if (
+                    event.generation_id != bundle.parent_generation_id
+                    or details != expected
+                ):
+                    raise ModelGenerationError("invalid parent-restored transition")
+                self._resolve_restoration_bundle(bundle)
+                active = bundle.parent_generation_id
+                activated = None
+                reopen = None
+                continue
+
+            raise ModelGenerationError("unsupported lifecycle event transition")
+
+        if active is None:
+            raise ModelGenerationError("lifecycle history has no active parent")
+        return active
 
     def _resolve_restoration_bundle(
         self, bundle: AdaptiveRestorationBundle
@@ -918,7 +1071,7 @@ class ModelGenerationController:
                     LifecycleEventKind.PARENT_REGISTERED, generation.generation_id
                 )
             except Exception:
-                self._active_generation_id = self.store.recover_active_generation()
+                self._active_generation_id = self._replay_lifecycle()
                 raise
         self._emit("parent_registered", generation_id=generation.generation_id)
 
@@ -1068,7 +1221,7 @@ class ModelGenerationController:
                     audit_id=audit.audit_id,
                 )
             except Exception:
-                self._active_generation_id = self.store.recover_active_generation()
+                self._active_generation_id = self._replay_lifecycle()
                 raise
         self._emit(
             "artifact_published",
@@ -1080,16 +1233,15 @@ class ModelGenerationController:
     def request_reopen(
         self,
         child_generation_id: str,
-        drift: PromotionAuditSnapshot,
+        live_corpus: LabeledCorpus,
         policy: DriftAuditPolicy,
-    ) -> None:
+        ptmrt_executable: str | Path,
+    ) -> PromotionAuditSnapshot:
+        if live_corpus.role is not CorpusRole.LIVE:
+            raise ModelGenerationError("reopen evaluation requires the live/drift corpus")
         with self._control_lock:
             if self._active_generation_id != child_generation_id:
                 raise ModelGenerationError("reopen target is not the active generation")
-            if self.store.load_audit(drift.audit_id) != drift:
-                raise ModelGenerationError("drift audit differs from durable evidence")
-            if not drift.conformance.exact or not drift_requires_reopen(drift, policy):
-                raise ModelGenerationError("labeled drift does not justify reopen")
             events = self.store.read_events()
             if (
                 not events
@@ -1101,12 +1253,42 @@ class ModelGenerationController:
             if type(lineage_id) is not str:
                 raise ModelGenerationError("active child lacks durable lineage")
             lineage = self.store.load_lineage(lineage_id)
-            _, _, child, bundle, _, _ = self._validate_lineage_graph(lineage)
-            if (
-                child.generation_id != child_generation_id
-                or child.inference_artifact_id != drift.conformance.artifact_id
-            ):
-                raise ModelGenerationError("drift audit is not tied to the active child")
+            parent, _, child, bundle, _, _ = self._validate_lineage_graph(lineage)
+            if child.generation_id != child_generation_id:
+                raise ModelGenerationError("active lineage names a different child")
+            child_snapshot, child_manifest, _, child_artifact = (
+                self._validate_deployable_generation(child)
+            )
+            parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
+            parent_manifest = self.store.load_manifest(parent.literal_manifest_id)
+            verified_id = _verify_snapshot_records_with_ptmrt(
+                ptmrt_executable,
+                self.store.artifact_path(child_artifact.artifact_id),
+                child_snapshot,
+                child_manifest,
+                child_artifact,
+                live_corpus.records,
+            )
+            conformance = audit_snapshot_runtime_conformance(
+                child_snapshot,
+                child_manifest,
+                child_artifact,
+                live_corpus.records,
+                ptmrt_verified=True,
+                ptmrt_artifact_id=verified_id,
+            )
+            drift = audit_parent_child_snapshots(
+                parent_snapshot,
+                parent_manifest,
+                child_snapshot,
+                child_manifest,
+                live_corpus,
+                conformance,
+                PromotionAuditPolicy(minimum_observations=1),
+            )
+            if not drift.conformance.exact or not drift_requires_reopen(drift, policy):
+                raise ModelGenerationError("labeled drift does not justify reopen")
+            self.store.put_audit(drift)
             self.store.append_event(
                 LifecycleEventKind.REOPEN_REQUESTED,
                 child_generation_id,
@@ -1122,6 +1304,7 @@ class ModelGenerationController:
             generation_id=child_generation_id,
             drift_audit_id=drift.audit_id,
         )
+        return drift
 
     def restore_parent(
         self, bundle: AdaptiveRestorationBundle
@@ -1154,6 +1337,7 @@ class ModelGenerationController:
             if (
                 child.generation_id != active_child_id
                 or graph_bundle != bundle
+                or not drift.conformance.exact
                 or not drift_requires_reopen(drift, policy)
                 or drift.conformance.artifact_id != child.inference_artifact_id
             ):
@@ -1170,7 +1354,7 @@ class ModelGenerationController:
                     drift_audit_id=drift.audit_id,
                 )
             except Exception:
-                self._active_generation_id = self.store.recover_active_generation()
+                self._active_generation_id = self._replay_lifecycle()
                 raise
         self._emit(
             "artifact_reopened",
@@ -1356,22 +1540,45 @@ def verify_records_with_ptmrt(
 ) -> str:
     """Run raw live records through ptmrt and require exact child semantics."""
 
+    return _verify_snapshot_records_with_ptmrt(
+        executable,
+        artifact_path,
+        child.snapshot,
+        child.manifest,
+        artifact,
+        records,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _verify_snapshot_records_with_ptmrt(
+    executable: str | Path,
+    artifact_path: str | Path,
+    child_snapshot: AdaptiveSnapshotEnvelope,
+    child_manifest: OrderedLiteralManifest,
+    artifact: PackedTMInferenceArtifact,
+    records: Sequence[Mapping[str, object]],
+    *,
+    timeout_seconds: float = 30.0,
+) -> str:
+    """Run raw records through ptmrt against one durable child state."""
+
     if not records:
         raise ModelGenerationError("live ptmrt conformance requires records")
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ModelGenerationError("live ptmrt timeout must be positive and finite")
-    catalog = child.manifest.build_catalog()
+    catalog = child_manifest.build_catalog()
     batch = catalog.encode(records).ta
     rows = tuple(batch.row_values(index) for index in range(batch.row_count))
     machine = ScalarBinaryTsetlinMachine(
-        child.snapshot.snapshot.number_of_clauses,
-        child.snapshot.snapshot.number_of_features,
-        states_per_action=child.snapshot.snapshot.states_per_action,
-        specificity=child.snapshot.snapshot.specificity,
-        threshold=child.snapshot.snapshot.threshold,
+        child_snapshot.snapshot.number_of_clauses,
+        child_snapshot.snapshot.number_of_features,
+        states_per_action=child_snapshot.snapshot.states_per_action,
+        specificity=child_snapshot.snapshot.specificity,
+        threshold=child_snapshot.snapshot.threshold,
         seed=0,
     )
-    machine.restore(child.snapshot.snapshot)
+    machine.restore(child_snapshot.snapshot)
     packed_predictions = artifact.predict_records(records)
     deadline = time.monotonic() + timeout_seconds
     for record, row, packed_prediction in zip(records, rows, packed_predictions):
@@ -1582,8 +1789,6 @@ def execute_trained_parent_lifecycle(
     behavior = AdaptiveBehaviorIdentity.from_child(
         child,
         preprocessing_contract_id=expected_child_preprocessing_id,
-        extended_generation_id=extended_generation.generation_id,
-        origin_proposal_semantic_id=proposal.semantic_id(),
     )
     child_preprocessing, child_artifact = compile_generation_artifact(
         child.snapshot.snapshot,
@@ -1701,31 +1906,11 @@ def reopen_and_restore_for_drift(
         example.example_id for example in live_corpus.examples
     }:
         raise ModelGenerationError("live/drift example IDs overlap pre-activation evidence")
-    verified_id = verify_records_with_ptmrt(
-        result.ptmrt_executable,
-        result.controller.store.artifact_path(result.child_artifact.artifact_id),
-        result.child,
-        result.child_artifact,
-        live_corpus.records,
-    )
-    live_conformance = audit_runtime_conformance(
-        result.child,
-        result.child_artifact,
-        live_corpus.records,
-        ptmrt_verified=True,
-        ptmrt_artifact_id=verified_id,
-    )
-    drift = audit_parent_child(
-        result.extended_parent.parent_snapshot.snapshot,
-        result.extended_parent.parent_manifest,
-        result.child,
+    drift = result.controller.request_reopen(
+        result.child_generation.generation_id,
         live_corpus,
-        live_conformance,
-        PromotionAuditPolicy(minimum_observations=1),
-    )
-    result.controller.store.put_audit(drift)
-    result.controller.request_reopen(
-        result.child_generation.generation_id, drift, drift_policy
+        drift_policy,
+        result.ptmrt_executable,
     )
     restored = result.controller.restore_parent(result.restoration_bundle)
     return drift, restored

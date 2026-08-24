@@ -45,11 +45,11 @@ MODEL_GENERATION_SCHEMA_VERSION = 1
 ORDERED_LITERAL_MANIFEST_SCHEMA = "ptm.ordered-literal-manifest.v1"
 ADAPTIVE_SNAPSHOT_SCHEMA = "ptm.adaptive-snapshot.v1"
 RESTORATION_BUNDLE_SCHEMA = "ptm.adaptive-restoration-bundle.v1"
-ADAPTIVE_BEHAVIOR_SCHEMA = "ptm.adaptive-behavior.v1"
+ADAPTIVE_BEHAVIOR_SCHEMA = "ptm.adaptive-behavior.v2"
 INVENTION_EVIDENCE_SCHEMA = "ptm.gnu-prolog-invention-evidence.v1"
 GENERATION_SCHEMA = "ptm.model-generation.v1"
 PROMOTION_AUDIT_SCHEMA = "ptm.promotion-audit.v1"
-LINEAGE_SCHEMA = "ptm.model-generation-lineage.v2"
+LINEAGE_SCHEMA = "ptm.model-generation-lineage.v3"
 TRAINING_SEMANTICS_VERSION = "ptm.scalar-binary-training.v1"
 PYTHON_RNG_ALGORITHM = "python.random-mt19937-state-v1"
 MAX_CORPUS_EXAMPLES = 2_048
@@ -803,9 +803,6 @@ class AdaptiveBehaviorIdentity:
     snapshot_id: str
     literal_manifest_id: str
     preprocessing_contract_id: str
-    extended_generation_id: str
-    adaptation_corpus_digest: str
-    origin_proposal_semantic_id: str
     training_semantics_version: str = TRAINING_SEMANTICS_VERSION
     schema: str = ADAPTIVE_BEHAVIOR_SCHEMA
 
@@ -818,9 +815,6 @@ class AdaptiveBehaviorIdentity:
             ("snapshot", self.snapshot_id),
             ("literal manifest", self.literal_manifest_id),
             ("preprocessing contract", self.preprocessing_contract_id),
-            ("extended generation", self.extended_generation_id),
-            ("adaptation corpus", self.adaptation_corpus_digest),
-            ("origin proposal semantic ID", self.origin_proposal_semantic_id),
         ):
             _require_digest(value, label)
 
@@ -828,22 +822,10 @@ class AdaptiveBehaviorIdentity:
     def from_generation(cls, generation: ModelGeneration) -> "AdaptiveBehaviorIdentity":
         if generation.kind is not GenerationKind.ADAPTED_CHILD:
             raise ModelGenerationError("adaptive behavior requires an adapted child")
-        adaptation_digest = dict(generation.corpus_digests).get(
-            CorpusRole.ADAPTATION.value
-        )
-        if (
-            generation.parent_generation_id is None
-            or generation.origin_proposal_semantic_id is None
-            or adaptation_digest is None
-        ):
-            raise ModelGenerationError("adapted child lacks behavior identity inputs")
         return cls(
             generation.snapshot_id,
             generation.literal_manifest_id,
             generation.preprocessing_contract_id,
-            generation.parent_generation_id,
-            adaptation_digest,
-            generation.origin_proposal_semantic_id,
         )
 
     @classmethod
@@ -852,16 +834,11 @@ class AdaptiveBehaviorIdentity:
         child: "AdaptedChild",
         *,
         preprocessing_contract_id: str,
-        extended_generation_id: str,
-        origin_proposal_semantic_id: str,
     ) -> "AdaptiveBehaviorIdentity":
         return cls(
             child.snapshot.snapshot_id,
             child.manifest.manifest_id,
             preprocessing_contract_id,
-            extended_generation_id,
-            child.adaptation_corpus_digest,
-            origin_proposal_semantic_id,
         )
 
     @property
@@ -874,9 +851,6 @@ class AdaptiveBehaviorIdentity:
             "snapshot_id": self.snapshot_id,
             "literal_manifest_id": self.literal_manifest_id,
             "preprocessing_contract_id": self.preprocessing_contract_id,
-            "extended_generation_id": self.extended_generation_id,
-            "adaptation_corpus_digest": self.adaptation_corpus_digest,
-            "origin_proposal_semantic_id": self.origin_proposal_semantic_id,
             "training_semantics_version": self.training_semantics_version,
         }
 
@@ -1360,6 +1334,10 @@ class PromotionAuditSnapshot:
             raise ModelGenerationError("promotion class strata are invalid")
         if not isinstance(self.conformance, RuntimeConformanceReport):
             raise TypeError("promotion audit conformance report is invalid")
+        if self.conformance.case_count != self.observations:
+            raise ModelGenerationError(
+                "promotion audit and conformance observation counts differ"
+            )
         if type(self.accepted) is not bool:
             raise TypeError("promotion audit decision must be boolean")
         if self.accepted and (
@@ -1481,10 +1459,29 @@ def audit_runtime_conformance(
     ptmrt_verified: bool,
     ptmrt_artifact_id: str | None,
 ) -> RuntimeConformanceReport:
-    catalog = child.manifest.build_catalog()
+    return audit_snapshot_runtime_conformance(
+        child.snapshot,
+        child.manifest,
+        artifact,
+        records,
+        ptmrt_verified=ptmrt_verified,
+        ptmrt_artifact_id=ptmrt_artifact_id,
+    )
+
+
+def audit_snapshot_runtime_conformance(
+    child_snapshot: AdaptiveSnapshotEnvelope,
+    child_manifest: OrderedLiteralManifest,
+    artifact: PackedTMInferenceArtifact,
+    records: Sequence[Mapping[str, object]],
+    *,
+    ptmrt_verified: bool,
+    ptmrt_artifact_id: str | None,
+) -> RuntimeConformanceReport:
+    catalog = child_manifest.build_catalog()
     batch = catalog.encode(records).ta
     rows = tuple(batch.row_values(index) for index in range(batch.row_count))
-    reference = _machine_from_snapshot(child.snapshot.snapshot).predict(rows)
+    reference = _machine_from_snapshot(child_snapshot.snapshot).predict(rows)
     packed = list(artifact.predict_records(records))
     mismatches = abs(len(reference) - len(packed)) + sum(
         left != right for left, right in zip(reference, packed)
@@ -1508,14 +1505,34 @@ def audit_parent_child(
     conformance: RuntimeConformanceReport,
     policy: PromotionAuditPolicy,
 ) -> PromotionAuditSnapshot:
+    return audit_parent_child_snapshots(
+        parent_snapshot,
+        parent_manifest,
+        child.snapshot,
+        child.manifest,
+        corpus,
+        conformance,
+        policy,
+    )
+
+
+def audit_parent_child_snapshots(
+    parent_snapshot: TMSnapshot,
+    parent_manifest: OrderedLiteralManifest,
+    child_snapshot: AdaptiveSnapshotEnvelope,
+    child_manifest: OrderedLiteralManifest,
+    corpus: LabeledCorpus,
+    conformance: RuntimeConformanceReport,
+    policy: PromotionAuditPolicy,
+) -> PromotionAuditSnapshot:
     if corpus.role not in (CorpusRole.PROMOTION, CorpusRole.LIVE):
         raise ModelGenerationError("paired audit requires promotion or live corpus")
     parent_catalog = parent_manifest.build_catalog()
-    child_catalog = child.manifest.build_catalog()
+    child_catalog = child_manifest.build_catalog()
     parent_batch = parent_catalog.encode(corpus.records).ta
     child_batch = child_catalog.encode(corpus.records).ta
     parent_machine = _machine_from_snapshot(parent_snapshot)
-    child_machine = _machine_from_snapshot(child.snapshot.snapshot)
+    child_machine = _machine_from_snapshot(child_snapshot.snapshot)
     parent_rows = tuple(
         parent_batch.row_values(index) for index in range(parent_batch.row_count)
     )
