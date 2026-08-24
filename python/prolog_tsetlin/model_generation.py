@@ -640,7 +640,10 @@ class AdaptiveSnapshotEnvelope:
                 number_of_clauses=raw["number_of_clauses"],
                 number_of_features=raw["number_of_features"],
                 states_per_action=raw["states_per_action"],
-                specificity=float(raw["specificity"]),
+                # Preserve the serialized numeric type. Canonical JSON (and
+                # therefore the content address) intentionally distinguishes
+                # an integer specificity from its floating-point spelling.
+                specificity=raw["specificity"],
                 threshold=raw["threshold"],
                 states=tuple(tuple(row) for row in raw["states"]),  # type: ignore[arg-type]
                 rng_state=_tuple_tree(raw["rng_state"]),
@@ -1416,12 +1419,16 @@ def audit_parent_child(
             per_class[truth]["regressions"] += 1
     parent_errors = improvements + both_wrong
     child_errors = regressions + both_wrong
+    error_policy_satisfied = (
+        child_errors < parent_errors
+        if policy.require_strict_improvement
+        else child_errors <= parent_errors
+    )
     accepted = (
         corpus.role is CorpusRole.PROMOTION
         and len(corpus.examples) >= policy.minimum_observations
-        and child_errors < parent_errors
+        and error_policy_satisfied
         and regressions <= policy.maximum_regressions
-        and (not policy.require_strict_improvement or improvements > 0)
         and conformance.exact
     )
     class_counts = tuple(

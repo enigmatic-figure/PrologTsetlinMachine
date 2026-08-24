@@ -57,7 +57,9 @@ from .telemetry import TelemetryEvent, TelemetrySession
 
 
 _EVENT_ANCHOR = "sha256:" + "0" * 64
+_EVENT_HEAD_SCHEMA = "ptm.model-generation-event-head.v1"
 _MAX_EVENT_LOG_BYTES = 16 * 1024 * 1024
+_MAX_EVENT_HEAD_BYTES = 4 * 1024
 _MAX_STORED_JSON_BYTES = 4 * 1024 * 1024
 _MAX_ATTESTED_EXECUTABLE_BYTES = 128 * 1024 * 1024
 _STORE_LOCKS_GUARD = RLock()
@@ -390,10 +392,30 @@ class ModelGenerationStore:
     def event_log_path(self) -> Path:
         return self.root / "lifecycle" / "events.jsonl"
 
+    @property
+    def event_head_path(self) -> Path:
+        return self.root / "lifecycle" / "events.head.json"
+
+    @staticmethod
+    def _event_head_bytes(
+        data: bytes, events: Sequence[GenerationLifecycleEvent]
+    ) -> bytes:
+        return canonical_json_bytes(
+            {
+                "schema": _EVENT_HEAD_SCHEMA,
+                "sequence": len(events),
+                "event_id": events[-1].event_id if events else _EVENT_ANCHOR,
+                "log_digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+            }
+        )
+
     def read_events(self) -> tuple[GenerationLifecycleEvent, ...]:
         path = self.event_log_path
-        if not path.exists():
+        head_path = self.event_head_path
+        if not path.exists() and not head_path.exists():
             return ()
+        if not path.is_file() or not head_path.is_file():
+            raise ModelGenerationError("model-generation event checkpoint is incomplete")
         data = path.read_bytes()
         if len(data) > _MAX_EVENT_LOG_BYTES:
             raise ModelGenerationError("model-generation event log is too large")
@@ -413,6 +435,24 @@ class ModelGenerationStore:
                 raise ModelGenerationError("model-generation event chain is discontinuous")
             events.append(event)
             previous = event.event_id
+        head_data = head_path.read_bytes()
+        if len(head_data) > _MAX_EVENT_HEAD_BYTES:
+            raise ModelGenerationError("model-generation event head is too large")
+        try:
+            head = json.loads(head_data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ModelGenerationError("model-generation event head is corrupt") from error
+        if (
+            head_data != canonical_json_bytes(head)
+            or not isinstance(head, Mapping)
+            or set(head) != {"schema", "sequence", "event_id", "log_digest"}
+            or head.get("schema") != _EVENT_HEAD_SCHEMA
+            or type(head.get("sequence")) is not int
+            or type(head.get("event_id")) is not str
+            or type(head.get("log_digest")) is not str
+            or head_data != self._event_head_bytes(data, events)
+        ):
+            raise ModelGenerationError("model-generation event head does not match the log")
         return tuple(events)
 
     def append_event(
@@ -423,6 +463,12 @@ class ModelGenerationStore:
     ) -> GenerationLifecycleEvent:
         with self._event_lock:
             events = self.read_events()
+            previous_data = (
+                self.event_log_path.read_bytes()
+                if self.event_log_path.is_file()
+                else b""
+            )
+            previous_head = self._event_head_bytes(previous_data, events)
             previous = events[-1].event_id if events else _EVENT_ANCHOR
             event = GenerationLifecycleEvent(
                 len(events) + 1,
@@ -441,7 +487,25 @@ class ModelGenerationStore:
             if len(encoded) > _MAX_EVENT_LOG_BYTES:
                 raise ModelGenerationError("model-generation event log is too large")
             self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
-            publish_bytes(self.event_log_path, encoded, overwrite=True)
+            try:
+                publish_bytes(self.event_log_path, encoded, overwrite=True)
+                publish_bytes(
+                    self.event_head_path,
+                    self._event_head_bytes(encoded, (*events, event)),
+                    overwrite=True,
+                )
+            except Exception:
+                # Restore the prior complete checkpoint when an ordinary write
+                # fails. A process/power loss between these publications leaves
+                # a detectable log/head mismatch and therefore fails closed.
+                try:
+                    publish_bytes(self.event_log_path, previous_data, overwrite=True)
+                    publish_bytes(
+                        self.event_head_path, previous_head, overwrite=True
+                    )
+                except Exception:
+                    pass
+                raise
             return event
 
     def recover_active_generation(self) -> str | None:
@@ -483,6 +547,7 @@ class ModelGenerationController:
         self.telemetry = telemetry
         self.event_sink = event_sink
         self._control_lock = RLock()
+        self._last_telemetry_error: Exception | None = None
         self._active_generation_id = store.recover_active_generation()
         self._validate_recovered_state()
 
@@ -491,12 +556,24 @@ class ModelGenerationController:
         with self._control_lock:
             return self._active_generation_id
 
+    @property
+    def last_telemetry_error(self) -> Exception | None:
+        with self._control_lock:
+            return self._last_telemetry_error
+
     def _emit(self, kind: str, **payload: object) -> None:
         if self.telemetry is None:
             return
-        event = self.telemetry.emit("generation", kind, **payload)
-        if self.event_sink is not None:
-            self.event_sink(event)
+        try:
+            event = self.telemetry.emit("generation", kind, **payload)
+            if self.event_sink is not None:
+                self.event_sink(event)
+        except Exception as error:
+            # Telemetry is observational. In particular, a sink failure after
+            # ACTIVATED or PARENT_RESTORED must not turn a committed control
+            # transition into a reported lifecycle failure.
+            with self._control_lock:
+                self._last_telemetry_error = error
 
     def _validate_lineage_graph(
         self, lineage: ModelGenerationLineage
@@ -756,6 +833,15 @@ class ModelGenerationController:
     def record_candidate(self, lineage: ModelGenerationLineage) -> None:
         with self._control_lock:
             self._validate_lineage_graph(lineage)
+            if self._active_generation_id != lineage.parent_generation_id:
+                raise ModelGenerationError("candidate parent is not the active generation")
+            events = self.store.read_events()
+            if not events or events[-1].kind not in (
+                LifecycleEventKind.PARENT_REGISTERED,
+                LifecycleEventKind.CANDIDATE_REJECTED,
+                LifecycleEventKind.PARENT_RESTORED,
+            ):
+                raise ModelGenerationError("candidate creation is invalid in the current state")
             self.store.append_event(
                 LifecycleEventKind.CANDIDATE_CREATED,
                 lineage.child_generation_id,
@@ -773,11 +859,32 @@ class ModelGenerationController:
         self, generation_id: str, audit: PromotionAuditSnapshot
     ) -> None:
         with self._control_lock:
+            if audit.accepted:
+                raise ModelGenerationError("an accepted promotion audit cannot be rejected")
             if self.store.load_audit(audit.audit_id) != audit:
                 raise ModelGenerationError("rejection audit differs from durable evidence")
+            events = self.store.read_events()
+            lineage_id = events[-1].details.get("lineage_id") if events else None
+            if (
+                not events
+                or events[-1].kind is not LifecycleEventKind.CANDIDATE_CREATED
+                or events[-1].generation_id != generation_id
+                or type(lineage_id) is not str
+            ):
+                raise ModelGenerationError("candidate rejection is invalid in the current state")
+            lineage = self.store.load_lineage(lineage_id)
+            *_, stored_audit, _ = self._validate_lineage_graph(lineage)
+            if (
+                self._active_generation_id != lineage.parent_generation_id
+                or lineage.child_generation_id != generation_id
+                or lineage.promotion_audit_id != audit.audit_id
+                or stored_audit != audit
+            ):
+                raise ModelGenerationError("candidate rejection differs from its durable state")
             self.store.append_event(
                 LifecycleEventKind.CANDIDATE_REJECTED,
                 generation_id,
+                lineage_id=lineage.lineage_id,
                 audit_id=audit.audit_id,
                 parent_errors=audit.parent_errors,
                 child_errors=audit.child_errors,
@@ -801,6 +908,15 @@ class ModelGenerationController:
             *_, stored_audit, _ = self._validate_lineage_graph(lineage)
             if stored_audit != audit:
                 raise ModelGenerationError("promotion audit differs from durable audit")
+            events = self.store.read_events()
+            if (
+                self._active_generation_id != lineage.parent_generation_id
+                or not events
+                or events[-1].kind is not LifecycleEventKind.CANDIDATE_CREATED
+                or events[-1].generation_id != lineage.child_generation_id
+                or events[-1].details.get("lineage_id") != lineage.lineage_id
+            ):
+                raise ModelGenerationError("promotion approval is invalid in the current state")
             self.store.append_event(
                 LifecycleEventKind.PROMOTION_APPROVED,
                 lineage.child_generation_id,

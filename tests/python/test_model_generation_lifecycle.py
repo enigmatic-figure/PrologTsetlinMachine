@@ -6,6 +6,7 @@ import shutil
 from itertools import product
 
 import pytest
+import prolog_tsetlin.services.model_generation as model_generation_service
 
 from prolog_tsetlin.model_generation import (
     AdaptiveSnapshotEnvelope,
@@ -41,6 +42,7 @@ from prolog_tsetlin.services.model_generation import (
     reopen_and_restore_for_drift,
     verify_artifact_with_ptmrt,
 )
+from prolog_tsetlin.services.telemetry import TelemetrySession
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -265,6 +267,21 @@ def test_snapshot_extension_rejects_invalid_width_and_does_not_consume_rng() -> 
         extend_snapshot_features(snapshot, 0)
 
 
+def test_snapshot_envelope_round_trip_preserves_integer_specificity(
+    tmp_path: Path,
+) -> None:
+    parent, _ = _parent()
+    envelope = AdaptiveSnapshotEnvelope(replace(parent.snapshot(), specificity=3))
+    store = ModelGenerationStore(tmp_path / "store")
+
+    store.put_snapshot(envelope)
+    restored = store.load_snapshot(envelope.snapshot_id)
+
+    assert restored == envelope
+    assert type(restored.snapshot.specificity) is int
+    assert restored.snapshot_id == envelope.snapshot_id
+
+
 def test_promotion_is_paired_and_requires_exact_runtime_conformance() -> None:
     _, corpora, parent, manifest, _, _, _, child, artifact = _candidate()
     unverified = audit_runtime_conformance(
@@ -309,6 +326,42 @@ def test_promotion_is_paired_and_requires_exact_runtime_conformance() -> None:
     signature = artifact.manifest["validation"]["signature"]
     assert signature["adaptive_snapshot_id"] == child.snapshot.snapshot_id
     assert signature["ordered_literal_manifest_id"] == child.manifest.manifest_id
+
+    unchanged_examples = tuple(
+        example
+        for example, parent_score, child_score in zip(
+            corpora.promotion.examples,
+            accepted.parent_scores,
+            accepted.child_scores,
+        )
+        if (parent_score > 0) == (child_score > 0)
+    )
+    unchanged = LabeledCorpus(
+        corpora.promotion.dataset_id,
+        CorpusRole.PROMOTION,
+        unchanged_examples,
+    )
+    equal = audit_parent_child(
+        parent.snapshot(),
+        manifest,
+        child,
+        unchanged,
+        exact,
+        PromotionAuditPolicy(
+            len(unchanged_examples), require_strict_improvement=False
+        ),
+    )
+    strict_equal = audit_parent_child(
+        parent.snapshot(),
+        manifest,
+        child,
+        unchanged,
+        exact,
+        PromotionAuditPolicy(len(unchanged_examples)),
+    )
+    assert equal.parent_errors == equal.child_errors
+    assert equal.accepted
+    assert not strict_equal.accepted
 
 
 def test_disagreement_alone_is_not_a_drift_reopen_decision() -> None:
@@ -450,6 +503,11 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
     parent, manifest = _parent()
     original_snapshot = parent.snapshot()
     store = ModelGenerationStore(tmp_path / "generation-store")
+
+    def fail_activated_telemetry(event) -> None:
+        if event.kind == "activated":
+            raise RuntimeError("injected telemetry sink failure")
+
     result = execute_trained_parent_lifecycle(
         parent_snapshot=original_snapshot,
         parent_manifest=manifest,
@@ -460,6 +518,8 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
         promotion_policy=PromotionAuditPolicy(8),
         store=store,
         ptmrt_executable=_ptmrt_path(),
+        telemetry=TelemetrySession(),
+        event_sink=fail_activated_telemetry,
     )
 
     assert result.conformance.exact
@@ -482,6 +542,10 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
         GOLDEN_CHILD_HEX.read_text(encoding="ascii")
     )
     assert result.controller.active_generation_id == result.child_generation.generation_id
+    assert isinstance(result.controller.last_telemetry_error, RuntimeError)
+    assert str(result.controller.last_telemetry_error) == (
+        "injected telemetry sink failure"
+    )
     # A process restart derives routing from the durable event chain.
     assert ModelGenerationController(store).active_generation_id == (
         result.child_generation.generation_id
@@ -489,6 +553,14 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
 
     with pytest.raises(ModelGenerationError, match="reopen request"):
         result.controller.restore_parent(result.restoration_bundle)
+
+    with pytest.raises(ModelGenerationError, match="active generation"):
+        result.controller.record_candidate(result.lineage)
+    with pytest.raises(ModelGenerationError, match="current state"):
+        result.controller.approve_promotion(
+            result.lineage, result.promotion_audit
+        )
+    assert store.read_events()[-1].kind is LifecycleEventKind.ACTIVATED
 
     overlapping_live = LabeledCorpus(
         live.dataset_id,
@@ -629,6 +701,48 @@ def test_event_log_tampering_fails_closed(tmp_path: Path) -> None:
     store.event_log_path.write_bytes(data.replace(b"parent_registered", b"parent_tampered__"))
     with pytest.raises(ModelGenerationError):
         store.read_events()
+
+
+def test_event_head_detects_complete_tail_truncation(tmp_path: Path) -> None:
+    store = ModelGenerationStore(tmp_path / "store")
+    parent_id = "sha256:" + "1" * 64
+    child_id = "sha256:" + "2" * 64
+    store.append_event(LifecycleEventKind.PARENT_REGISTERED, parent_id)
+    store.append_event(LifecycleEventKind.CANDIDATE_CREATED, child_id)
+    complete = store.event_log_path.read_bytes()
+
+    store.event_log_path.write_bytes(complete.splitlines(keepends=True)[0])
+    with pytest.raises(ModelGenerationError, match="head"):
+        store.read_events()
+
+    store.event_log_path.write_bytes(b"")
+    with pytest.raises(ModelGenerationError, match="head"):
+        store.read_events()
+
+
+def test_event_head_publication_failure_restores_previous_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ModelGenerationStore(tmp_path / "store")
+    parent_id = "sha256:" + "1" * 64
+    child_id = "sha256:" + "2" * 64
+    store.append_event(LifecycleEventKind.PARENT_REGISTERED, parent_id)
+    previous = store.read_events()
+    publish = model_generation_service.publish_bytes
+    fail_head_once = True
+
+    def injected_publish(path, data, *, overwrite):
+        nonlocal fail_head_once
+        if Path(path) == store.event_head_path and fail_head_once:
+            fail_head_once = False
+            raise OSError("injected event-head failure")
+        return publish(path, data, overwrite=overwrite)
+
+    monkeypatch.setattr(model_generation_service, "publish_bytes", injected_publish)
+    with pytest.raises(OSError, match="injected event-head failure"):
+        store.append_event(LifecycleEventKind.CANDIDATE_CREATED, child_id)
+
+    assert store.read_events() == previous
 
 
 @pytest.mark.skipif(

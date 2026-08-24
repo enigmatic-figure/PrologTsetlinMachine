@@ -146,12 +146,17 @@ Every object is content addressed. Atomic publication synchronizes the
 temporary file and, on POSIX, the containing directory after link or rename.
 Typed loads recompute the object's identity and require it to equal the
 requested address; a different valid object placed at that path fails closed.
-The lifecycle event log is atomically replaced as a complete hash chain. The
-controller changes its in-memory generation before appending the activation or
-restoration event; if that durable append fails, it immediately reconstructs
-routing from the previous or newly committed log rather than claiming an
-assumed state. Store instances in one process share a root-scoped event lock;
-cross-process writers remain outside the experimental single-process contract.
+The lifecycle event log is atomically replaced as a complete hash chain and a
+separate durable head binds its terminal event ID, sequence, and complete-log
+digest. Removing even a complete valid suffix therefore fails closed. The log
+is published before its head; a process or power loss between them leaves a
+detectable mismatch, while an ordinary publication exception attempts to
+restore the prior complete checkpoint. The controller changes its in-memory
+generation before appending the activation or restoration event; if that
+durable append fails, it immediately reconstructs routing from the previous or
+newly committed log rather than claiming an assumed state. Store instances in
+one process share a root-scoped event lock; cross-process writers remain outside
+the experimental single-process contract.
 
 Before candidate recording, promotion, activation, and active-child recovery,
 the controller reloads and cross-validates the complete lineage graph. This
@@ -193,6 +198,9 @@ The service emits lifecycle events such as `parent_registered`,
 `reopen_requested`, and `artifact_reopened` through the existing telemetry
 envelope. Existing workbench Events and related projections can consume them
 without reconstructing private state or adding another lifecycle engine.
+Telemetry is observational: a caller-supplied sink failure is retained on the
+controller for inspection but cannot reverse or report failure for an already
+durable lifecycle transition.
 
 ## Evidence
 
