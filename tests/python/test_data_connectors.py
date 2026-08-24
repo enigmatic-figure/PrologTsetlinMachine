@@ -37,13 +37,32 @@ def test_token_adapter_is_versioned_normalized_and_bounded() -> None:
     ).tokenize("one two") == ("one",)
 
 
-def test_token_adapter_rejects_backtracking_amplification() -> None:
-    hostile = r"(a+)+$"
-    with pytest.raises(ValueError, match="nested quantifiers"):
+@pytest.mark.parametrize(
+    ("hostile", "message"),
+    [
+        (r"(a+)+$", "nested quantifiers"),
+        (r"a*a*a*a*b", "adjacent quantifiers"),
+        (r"a+b", "must terminate its branch"),
+    ],
+)
+def test_token_adapter_rejects_backtracking_amplification(
+    hostile: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
         TokenAdapter("message", pattern=hostile)
     descriptor = {**TokenAdapter("message").to_dict(), "pattern": hostile}
     with pytest.raises(ValueError, match="descriptor is invalid"):
         TokenAdapter.from_dict(descriptor)
+
+
+def test_token_adapter_accepts_audited_and_bounded_quantified_patterns() -> None:
+    assert TokenAdapter("message").tokenize("alpha don't beta") == (
+        "alpha",
+        "don't",
+        "beta",
+    )
+    bounded = TokenAdapter("message", pattern=r"[0-9]{1,4}|[a-z]+")
+    assert bounded.tokenize("abc 12345 67") == ("abc", "1234", "5", "67")
 
 
 def test_image_adapter_materializes_stable_scalar_pixel_fields() -> None:

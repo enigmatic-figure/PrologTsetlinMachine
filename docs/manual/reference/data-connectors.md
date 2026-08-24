@@ -111,13 +111,17 @@ does not require hidden cross-record state.
 
 Configurable regexes use a validated subset of Python's Unicode `re` syntax.
 Literals, character classes, categories, anchors, groups, top-level alternation,
-and greedy or lazy quantifiers are supported. Lookaround, backreferences,
-conditionals, nested quantifiers, and quantified alternation are rejected when
-an adapter or transform descriptor is constructed or deserialized. In
-particular, patterns such as `(a+)+$` are never evaluated. This structural rule
-prevents backtracking amplification; the existing pattern, input, token, and
-match ceilings remain defense in depth. Invalid descriptors raise `ValueError`,
-while failures processing a record raise `ConnectorError` or `TransformError`.
+and a deliberately narrow quantified form are supported. A general alternation
+branch may contain at most one unbounded quantifier, and it must be the final
+term. Finite repeats are capped at 64 occurrences and share a 256-choice branch
+budget. Repeated atoms must consume exactly one character; adjacent, nested,
+and alternation-containing quantifiers are rejected. The built-in Unicode word
+tokenizer is a separately audited delimiter-separated language with a fallback
+branch that consumes each word run. Lookaround, backreferences, and
+conditionals are also rejected. Thus patterns such as `(a+)+$`, `a*a*a*a*b`,
+and `a+b` are never evaluated. Pattern, input, token, and match ceilings remain
+defense in depth. Invalid descriptors raise `ValueError`, while failures
+processing a record raise `ConnectorError` or `TransformError`.
 
 Run the complete example with:
 

@@ -47,7 +47,9 @@ resource_bounds { literal_count, clause_count, graph_depth, patch_extent, int_ra
 lowering_version, validation_signature, support_trace
 ```
 
-Pure checker `lowerable(Candidate, Target) → YES|NO`. Pipeline:
+The Python `lower_exact(proposal)` service is the sole authority for exact
+representability. Prolog may propose a declared target, but does not assert
+that the target has an executable representation. Pipeline:
 
 `PTA reasoning → typed proposal → lowerability checker → native candidate → oracle validation → shadow audit → publish` and, on drift, `reopen → restore`.
 
@@ -76,7 +78,7 @@ constructor and an independent behavioral oracle.
 
 **Input PTAs — literal-invention layer.** See raw values (`temperature=73.4`, `category`, `timestamp`, `position`, graph relations, prior observations) while native TAs see only instantiated Booleans. Propose `x ≥ 7.3`, `7.3 ≤ x < 9.8`, categorical groups, intervals. Escalation tests coverage; de-escalation collapses `x≥7.1..7.4` to the surviving boundary — *learned Booleanization with provenance and retirement*.
 
-**De-escalation PTAs — Type III + reversible absorption.** Reason over `literal_redundant/2`, `literal_subsumed/2`, `clauses_equivalent/2`, `clause_subsumes/2`, `thresholds_equivalent/2`, `stable_inclusion/2` etc., then propose simplifications. With shadow auditing/maturity/restoration, PTM does `ordinary TA → candidate frozen → shadow audit → consolidated` and can `reopen` on drift — reversible absorbing states.
+**De-escalation PTAs — Type-III-inspired reasoning + reversible absorption.** Reason over `literal_redundant/2`, `literal_subsumed/2`, `clauses_equivalent/2`, `clause_subsumes/2`, `thresholds_equivalent/2`, `stable_inclusion/2` etc., then propose simplifications. With shadow auditing/maturity/restoration, PTM does `ordinary TA → candidate frozen → shadow audit → consolidated` and can `reopen` on drift — reversible absorbing states. These equivalence/subsumption rules are a PTM control-plane analogue, not an implementation of the published Type III feedback algorithm.
 
 **Escalation PTAs — structure inventors.** Question: *“current Boolean clause substrate fails here — what richer but lowerable structure fixes it?”* Answers: mutate clause, invent literal, join features, interval vs. threshold, share clause across outputs (CoTM), assign integer weight, add bounded graph-message condition, patch pattern, exception rule, specialist gate, simplification enabled by another PTA. Queries de-escalated knowledge — cumulative symbolic learning.
 
@@ -111,16 +113,15 @@ clause_conflict(clause, example).
 insight(source_pta, kind, subject, evidence).
 counterexample(model, example, expected, actual).
 proposal(pta, kind, candidate).
-lowerable(candidate, target).
 ```
 
-Shared by Input/de-escalation/escalation PTAs; graph/regression/composite PTAs consume cross-domain insights.
+Shared by Input/de-escalation/escalation PTAs; graph/regression/composite PTAs consume cross-domain insights. Exact representability is deliberately absent from this ontology and remains owned by Python's target-specific `lower_exact()` gate.
 
 ## Implementation order (extends roadmap M5–M6)
 
 1. **PTA proposal/message ontology + exact lowering contract + checker** — foundation.
 2. Input-PTA adaptive numeric thresholds/intervals + literal budget.
-3. De-escalation Type III pruning/subsumption + reversible absorption.
+3. Type-III-inspired de-escalation/subsumption + reversible absorption.
 4. Shared weighted clause bank / CoTM with PTA allocation.
 5. Multiclass/multilabel heads over that bank.
 6. Sparse/indexed lowering from de-escalation knowledge.

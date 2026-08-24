@@ -11,7 +11,7 @@ import re
 import unicodedata
 from typing import Any
 
-from ._safe_regex import compile_safe
+from ._safe_regex import UNICODE_WORD_TOKEN_PATTERN, compile_safe
 
 
 RECORD_CONNECTOR_SCHEMA = "ptm.records.v1"
@@ -24,7 +24,7 @@ MAX_TOKENS = 65_536
 MAX_TOKEN_CHARS = 1_024
 MAX_IMAGE_SOURCE_PIXELS = 16_777_216
 MAX_IMAGE_OUTPUT_VALUES = 65_536
-DEFAULT_TOKEN_PATTERN = r"[^\W_]+['’][^\W_]+|[^\W_]+"
+DEFAULT_TOKEN_PATTERN = UNICODE_WORD_TOKEN_PATTERN
 
 
 class ConnectorError(ValueError):

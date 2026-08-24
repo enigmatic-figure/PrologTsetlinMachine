@@ -1,4 +1,4 @@
-"""Tests for PTA control plane — Input invention, Type III pruning, CoTM."""
+"""Tests for PTA control plane — Input invention, de-escalation, and CoTM."""
 
 import pytest
 from prolog_tsetlin.representation import FeatureSchema, FieldKind, LiteralCatalog

@@ -1,8 +1,9 @@
-"""De-escalation PTA — Type III pruning + reversible absorption.
+"""De-escalation PTA — Type-III-inspired pruning + reversible absorption.
 
-Implements de-escalation as Type III feedback: identifies context-specific
-independence and removes unnecessary literals, but with PTM's shadow audit,
-maturity, and restoration lineage so absorbing actions are reversible.
+Implements a PTM control-plane analogue based on observed equivalence and
+subsumption. It is not an implementation of the published Type III feedback
+algorithm. Shadow audit, maturity, and restoration lineage keep consolidating
+actions reversible.
 
 Pipeline:
   ordinary TA
@@ -46,10 +47,10 @@ class DeescalationPTA:
       clause_support(Clause, Example)
       thresholds_equivalent(T1, T2)
 
-    Reference oracle for Prolog Type-III mechanism: identifies context-specific
-    independence via observed-column equivalence/subsumption plus utility-based
-    stability heuristics. Future Prolog backend will replace heuristics with
-    exact CS-IA Type III feedback via pta_deescalation.pl.
+    Reference oracle for the Prolog de-escalation mechanism: identifies
+    observed-column equivalence/subsumption plus utility-based stability
+    heuristics. It intentionally makes no claim of implementing the published
+    Type III feedback algorithm.
     """
 
     def __init__(self, pta_id: str = "de-escalation:prune") -> None:

@@ -33,6 +33,7 @@ from prolog_tsetlin.pta.collective import (
     PROTOCOL_END,
     _decode_protocol,
     _run_bounded_process,
+    _weight_proposal,
     _write_bounded_fact_lines,
 )
 
@@ -46,6 +47,68 @@ def _has_gprolog() -> bool:
 
 
 HAS_GPROLOG = _has_gprolog()
+
+
+def _collective_module_overrides(
+    tmp_path: Path,
+    *,
+    deescalation: str | None = None,
+    escalation: str | None = None,
+) -> dict[str, Path]:
+    destination = tmp_path / "collective-modules"
+    destination.mkdir()
+    resolved = resolve_prolog_module_set(
+        (
+            "pta_ontology.pl",
+            "pta_input.pl",
+            "pta_deescalation.pl",
+            "pta_escalation.pl",
+        )
+    )
+    modules: dict[str, Path] = {}
+    for name, source in resolved.items():
+        target = destination / name
+        target.write_bytes(source.read_bytes())
+        modules[name] = target
+    if deescalation is not None:
+        modules["pta_deescalation.pl"].write_text(
+            deescalation, encoding="utf-8", newline="\n"
+        )
+    if escalation is not None:
+        modules["pta_escalation.pl"].write_text(
+            escalation, encoding="utf-8", newline="\n"
+        )
+    return modules
+
+
+def _false_deescalation_session() -> PTAReasoningSession:
+    session = PTAReasoningSession("false-deescalation")
+    for literal, vector in ((10, (1, 0)), (20, (0, 1))):
+        for example, truth in enumerate(vector):
+            session.add_literal_truth(literal, example, truth)
+    session.add_clause_literal(100, 10)
+    session.add_clause_literal(100, 20)
+    session.add_clause_literal(200, 10)
+    for clause, vector in ((100, (1, 0)), (200, (0, 1))):
+        for example, truth in enumerate(vector):
+            session.add_clause_truth(clause, example, truth)
+    return session
+
+
+def _append_hostile_protocol_frame(
+    modules: dict[str, Path], record: str, completeness: str
+) -> None:
+    ontology = modules["pta_ontology.pl"]
+    source = ontology.read_text(encoding="utf-8")
+    ontology.write_text(
+        source
+        + "\nptm_main :- !,\n"
+        + f"    write('{PROTOCOL_BEGIN}'), nl,\n"
+        + f"    write('{record}'), nl,\n"
+        + f"    write('{PROTOCOL_END}|{completeness}'), nl, halt.\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def test_shared_module_resolver_finds_installed_wheel_layout(
@@ -275,6 +338,66 @@ def test_duplicate_truth_values_are_rejected_before_prolog() -> None:
         PTACollectiveService._validate_deescalation_truths(session)
 
 
+@pytest.mark.parametrize(
+    ("kind", "evidence", "message"),
+    [
+        ("literal_redundant", (10, 20), "literal redundancy"),
+        ("literal_subsumes", (10, 20), "literal subsumption"),
+        ("clause_subsumes", (100, 200), "clause subsumption"),
+    ],
+)
+def test_python_independently_rejects_false_deescalation_products(
+    kind: str, evidence: tuple[int, int], message: str
+) -> None:
+    session = _false_deescalation_session()
+    insight = PTAInsight(
+        "pta:deescalation",
+        kind,
+        f"{evidence[0]}->{evidence[1]}",
+        evidence,
+    )
+
+    with pytest.raises(PTACollectiveProtocolError, match=message):
+        PTACollectiveService._validate_deescalation_products(session, (insight,))
+
+
+@pytest.mark.parametrize(
+    ("kind", "evidence", "duplicate", "relation"),
+    [
+        ("literal_subsumes", (10, 20), (10, 0, 0), "literal_truth"),
+        ("clause_subsumes", (100, 200), (100, 0, 0), "clause_truth"),
+    ],
+)
+def test_product_revalidation_never_collapses_duplicate_truths(
+    kind: str,
+    evidence: tuple[int, int],
+    duplicate: tuple[int, int, int],
+    relation: str,
+) -> None:
+    session = _false_deescalation_session()
+    getattr(session, f"{relation}s").append(duplicate)
+    insight = PTAInsight(
+        "pta:deescalation",
+        kind,
+        f"{evidence[0]}->{evidence[1]}",
+        evidence,
+    )
+
+    with pytest.raises(PTACollectiveProtocolError, match=f"{relation}.*duplicate"):
+        PTACollectiveService._validate_deescalation_products(session, (insight,))
+
+
+def test_python_independently_rejects_false_weight_product() -> None:
+    session = PTAReasoningSession("false-weight")
+    session.add_class_support(50, 2, 1)
+    session.add_clause_class_score(70, 50, 0.5)
+
+    with pytest.raises(PTACollectiveProtocolError, match="CoTM weight"):
+        PTACollectiveService._validate_weight_products(
+            session, (_weight_proposal(70, 50, 999),)
+        )
+
+
 def test_selected_numeric_field_requires_exact_arithmetic_range() -> None:
     session = PTAReasoningSession("large-numeric")
     session.add_observation("pta:input", 0, "x", 1 << 53)
@@ -295,6 +418,90 @@ def test_subprocess_output_is_bounded_while_reading(tmp_path: Path) -> None:
             cwd=tmp_path,
             timeout_seconds=5,
             max_output_bytes=1_024,
+        )
+
+
+@pytest.mark.skipif(not HAS_GPROLOG, reason="GNU Prolog is not installed")
+def test_collective_rejects_plausible_false_deescalation_record(
+    tmp_path: Path,
+) -> None:
+    modules = _collective_module_overrides(
+        tmp_path,
+        deescalation="""\
+literals_equivalent(0, 1).
+literal_subsumes(_, _) :- fail.
+clause_subsumes(_, _) :- fail.
+stable_inclusion(_) :- fail.
+""",
+    )
+
+    with pytest.raises(PTACollectiveProtocolError, match="literal redundancy"):
+        PTACollectiveService(module_paths=modules).run(
+            _false_deescalation_session(),
+            query=PTACollectiveQuery(
+                numeric_fields=(),
+                discover_thresholds=False,
+                discover_intervals=False,
+                derive_escalation=False,
+            ),
+        )
+
+
+@pytest.mark.skipif(not HAS_GPROLOG, reason="GNU Prolog is not installed")
+def test_collective_rejects_plausible_false_weight_record(tmp_path: Path) -> None:
+    modules = _collective_module_overrides(
+        tmp_path,
+        escalation="""\
+exception_clause(_, _, _) :- fail.
+cotm_weight(0, 0, 999).
+""",
+    )
+    session = PTAReasoningSession("false-weight")
+    session.add_class_support(50, 2, 1)
+    session.add_clause_class_score(70, 50, 0.5)
+
+    with pytest.raises(PTACollectiveProtocolError, match="CoTM weight"):
+        PTACollectiveService(module_paths=modules).run(
+            session,
+            query=PTACollectiveQuery(
+                numeric_fields=(),
+                discover_thresholds=False,
+                discover_intervals=False,
+                derive_deescalation=False,
+            ),
+        )
+
+
+@pytest.mark.skipif(not HAS_GPROLOG, reason="GNU Prolog is not installed")
+@pytest.mark.parametrize(
+    ("record", "completeness", "duplicate", "collection"),
+    [
+        ("D|LS|0|1", "1|1|0|0|0|1|0|0|0", (10, 0, 0), "literal_truths"),
+        ("D|CS|0|1", "1|1|0|0|0|0|1|0|0", (100, 0, 0), "clause_truths"),
+    ],
+)
+def test_collective_rejects_hostile_products_disabled_by_query(
+    tmp_path: Path,
+    record: str,
+    completeness: str,
+    duplicate: tuple[int, int, int],
+    collection: str,
+) -> None:
+    modules = _collective_module_overrides(tmp_path)
+    _append_hostile_protocol_frame(modules, record, completeness)
+    session = _false_deescalation_session()
+    getattr(session, collection).append(duplicate)
+
+    with pytest.raises(PTACollectiveProtocolError, match="disabled by the query"):
+        PTACollectiveService(module_paths=modules).run(
+            session,
+            query=PTACollectiveQuery(
+                numeric_fields=(),
+                discover_thresholds=False,
+                discover_intervals=False,
+                derive_deescalation=False,
+                derive_escalation=False,
+            ),
         )
 
 
