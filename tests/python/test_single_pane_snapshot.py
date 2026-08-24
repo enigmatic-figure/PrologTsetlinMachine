@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from prolog_tsetlin.services.environment import Capability
-from prolog_tsetlin.tui.single_pane.app import SinglePaneApp
+from prolog_tsetlin.tui.single_pane.app import PTMWorkbenchApp
 
 
 @pytest.fixture(autouse=True)
@@ -13,7 +13,7 @@ def deterministic_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep snapshots independent of host tools and operating system."""
 
     monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.setattr(SinglePaneApp, "_tick_uptime", lambda self: None)
+    monkeypatch.setattr(PTMWorkbenchApp, "_tick_uptime", lambda self: None)
     monkeypatch.setattr(
         "prolog_tsetlin.tui.single_pane.app.inspect_environment",
         lambda workspace: (
@@ -24,10 +24,10 @@ def deterministic_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_single_pane_snapshot_compact(snap_compare):
-    app = SinglePaneApp()
+    app = PTMWorkbenchApp()
     assert snap_compare(app, terminal_size=(80, 24))
 
 
 def test_single_pane_snapshot_wide(snap_compare):
-    app = SinglePaneApp()
+    app = PTMWorkbenchApp()
     assert snap_compare(app, terminal_size=(120, 40))

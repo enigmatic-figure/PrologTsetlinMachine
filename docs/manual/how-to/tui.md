@@ -11,11 +11,16 @@ launch the built-in XOR session:
 ptm tui --demo xor
 ```
 
+This launches PTM's canonical workbench. The former screen-per-step interface
+remains available during the transition with `ptm tui --style classic`; the
+`single_pane` style name remains accepted as a compatibility alias for the
+canonical workbench.
+
 Use a terminal at least 80 columns wide and 24 rows high. Windows Terminal and
 current Linux and macOS terminal emulators provide the best color and keyboard
 support.
 
-The footer and contextual help show active controls. The generated
+The footer and help overlay show active controls. The generated
 [help-topic and keyboard reference](../reference/help-topics.md) comes from the
 same registry as Textual's bindings; this guide does not maintain a second key
 map.

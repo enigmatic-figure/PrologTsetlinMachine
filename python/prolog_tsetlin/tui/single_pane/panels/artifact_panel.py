@@ -8,7 +8,7 @@ class ArtifactPanel(VerticalScroll):
         yield Static("ARTIFACTS  .ptm export/verify/run-record", classes="card_title")
         yield Static("Last training snapshot can be exported. Load any .ptm to inspect and run a typed record.", classes="card_label")
         with Horizontal(id="artifact-controls"):
-            yield Input(placeholder="out/model.ptm", id="artifact-path", value="out/single-pane-xor.ptm")
+            yield Input(placeholder="out/model.ptm", id="artifact-path", value="out/ptm-workbench-xor.ptm")
             yield Button(
                 "Export [e]",
                 id="artifact-export",

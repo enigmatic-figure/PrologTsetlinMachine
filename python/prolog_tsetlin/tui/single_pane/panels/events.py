@@ -5,7 +5,7 @@ from textual.app import ComposeResult
 from ....services.telemetry import TelemetryEvent
 
 class EventsPanel(Vertical):
-    """Persistent telemetry log - the classic had a Log at the bottom, single-pane keeps it as a task view."""
+    """Persistent workbench telemetry log presented as a task view."""
 
     def compose(self) -> ComposeResult:
         yield Static("EVENTS  TelemetrySession  session/run/sequence  level/source/message", classes="card_title")

@@ -10,6 +10,7 @@ import pytest
 
 from prolog_tsetlin.cli import _parser, main as cli_main
 from prolog_tsetlin.help_topics import (
+    CANONICAL_TUI_BINDINGS,
     COMMAND_TOPICS,
     HELP_TOPICS,
     PARSER_TOPICS,
@@ -127,6 +128,22 @@ def test_tui_bindings_and_contexts_are_complete() -> None:
     expected = [
         (binding.key, binding.action, binding.label, binding.show)
         for binding in TUI_BINDINGS
+    ]
+    assert actual == expected
+
+
+def test_canonical_workbench_bindings_are_registered_once() -> None:
+    from prolog_tsetlin.tui.single_pane.app import PTMWorkbenchApp
+
+    keys = [binding.key for binding in CANONICAL_TUI_BINDINGS]
+    assert len(keys) == len(set(keys))
+    actual = [
+        (binding.key, binding.action, binding.description, binding.show)
+        for binding in PTMWorkbenchApp.BINDINGS
+    ]
+    expected = [
+        (binding.key, binding.action, binding.label, binding.show)
+        for binding in CANONICAL_TUI_BINDINGS
     ]
     assert actual == expected
 

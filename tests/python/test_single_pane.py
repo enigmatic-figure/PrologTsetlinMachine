@@ -925,9 +925,10 @@ async def test_single_pane_help_matches_shell_bindings(tmp_path: Path) -> None:
             str(widget.render()) for widget in app.screen.query(".card_label")
         )
 
-        assert "1 System" in copy
-        assert "2 Dashboard" in copy
-        assert "5 Literals" in copy
+        assert "Open System." in copy
+        assert "Open Dashboard." in copy
+        assert "Open Literals." in copy
+        assert "Start XOR training." in copy
         assert "1      Open Overview" not in copy
         assert "STUBS.md" not in copy
         assert "Dead clauses" not in copy

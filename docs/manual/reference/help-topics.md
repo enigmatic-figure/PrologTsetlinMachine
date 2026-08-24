@@ -9,9 +9,9 @@ controls below come from `prolog_tsetlin.help_topics`.
 
 Explore PTM through the keyboard-first Textual workbench.
 
-The workbench provides five views for environment status, deterministic XOR training, clause inspection, portable artifacts, and bounded symbolic search. The native runtime and GNU Prolog remain optional until a workflow needs them.
+The canonical workbench keeps system state and research telemetry visible while task views cover deterministic XOR training, clauses, TA populations, literals, temporal samples, portable artifacts, and bounded symbolic search. The native runtime and GNU Prolog remain optional until a workflow needs them.
 
-Use the footer for active shortcuts and open contextual help in any view for controls drawn from this shared registry.
+Use the footer for active shortcuts and open help for controls drawn from this shared registry. The former five-view interface remains available with `ptm tui --style classic`.
 
 ### Requirements
 
@@ -40,18 +40,31 @@ ptm help training
 
 | Key | Action |
 | --- | --- |
-| `1` | Open Overview. |
-| `2` | Open Train. |
-| `3` | Open Clauses. |
-| `4` | Open Artifacts. |
-| `5` | Open Search. |
 | `t` | Start XOR training. |
-| `o` | Open Overview. |
-| `c` | Open Clauses. |
-| `p` | Open the command palette. |
+| `x` | Cancel active training or search. |
+| `e` | Export the completed training run. |
+| `l` | Load and verify the artifact path. |
+| `r` | Run the typed record through the loaded artifact. |
+| `F5` | Run the bounded search request. |
+| `F6` | Cancel the active bounded search. |
 | `?` | Open contextual help. |
-| `Ctrl+L` | Collapse or expand the event dock. |
 | `q` | Quit the workbench. |
+| `1` | Open System. |
+| `2` | Open Dashboard. |
+| `3` | Open Clauses. |
+| `4` | Open TA States. |
+| `5` | Open Literals. |
+| `6` | Open Graphs. |
+| `7` | Open Artifacts. |
+| `v` | Open Timeline. |
+| `s` | Open Search. |
+| `c` | Open Config. |
+| `p` | Open Predictions. |
+| `Ctrl+L` | Open Events. |
+| `d` | Open Detail. |
+| `slash` | Filter clauses. |
+| `k` | Hide the selected clause locally. |
+| `enter` | Inspect the selected clause. |
 
 Authored guides:
 - [docs/manual/tutorials/first-tui-session.md](../tutorials/first-tui-session.md)
@@ -77,19 +90,10 @@ ptm tui --demo xor
 
 | Key | Action |
 | --- | --- |
-| `1` | Open Overview. |
-| `2` | Open Train. |
-| `3` | Open Clauses. |
-| `4` | Open Artifacts. |
-| `5` | Open Search. |
 | `t` | Start XOR training. |
 | `x` | Cancel active training or search. |
 | `e` | Export the completed training run. |
-| `o` | Open Overview. |
-| `c` | Open Clauses. |
-| `p` | Open the command palette. |
 | `?` | Open contextual help. |
-| `Ctrl+L` | Collapse or expand the event dock. |
 | `q` | Quit the workbench. |
 
 Authored guides:
@@ -135,19 +139,10 @@ ptm export snapshot.json model.ptm
 
 | Key | Action |
 | --- | --- |
-| `1` | Open Overview. |
-| `2` | Open Train. |
-| `3` | Open Clauses. |
-| `4` | Open Artifacts. |
-| `5` | Open Search. |
 | `e` | Export the completed training run. |
 | `l` | Load and verify the artifact path. |
 | `r` | Run the typed record through the loaded artifact. |
-| `o` | Open Overview. |
-| `c` | Open Clauses. |
-| `p` | Open the command palette. |
 | `?` | Open contextual help. |
-| `Ctrl+L` | Collapse or expand the event dock. |
 | `q` | Quit the workbench. |
 
 Authored guides:
@@ -188,19 +183,10 @@ ptm artifact run-record model.ptm --jsonl records.jsonl
 
 | Key | Action |
 | --- | --- |
-| `1` | Open Overview. |
-| `2` | Open Train. |
-| `3` | Open Clauses. |
-| `4` | Open Artifacts. |
-| `5` | Open Search. |
 | `e` | Export the completed training run. |
 | `l` | Load and verify the artifact path. |
 | `r` | Run the typed record through the loaded artifact. |
-| `o` | Open Overview. |
-| `c` | Open Clauses. |
-| `p` | Open the command palette. |
 | `?` | Open contextual help. |
-| `Ctrl+L` | Collapse or expand the event dock. |
 | `q` | Quit the workbench. |
 
 Authored guides:
@@ -244,19 +230,10 @@ ptm search repair --demo --output repair.ptm --pretty
 
 | Key | Action |
 | --- | --- |
-| `1` | Open Overview. |
-| `2` | Open Train. |
-| `3` | Open Clauses. |
-| `4` | Open Artifacts. |
-| `5` | Open Search. |
 | `x` | Cancel active training or search. |
 | `F5` | Run the bounded search request. |
 | `F6` | Cancel the active bounded search. |
-| `o` | Open Overview. |
-| `c` | Open Clauses. |
-| `p` | Open the command palette. |
 | `?` | Open contextual help. |
-| `Ctrl+L` | Collapse or expand the event dock. |
 | `q` | Quit the workbench. |
 
 Authored guides:

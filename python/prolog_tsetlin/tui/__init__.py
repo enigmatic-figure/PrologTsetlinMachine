@@ -6,12 +6,12 @@ from pathlib import Path
 
 
 def run(
-    *, workspace: Path | None = None, demo: str = "xor", style: str = "classic"
+    *, workspace: Path | None = None, demo: str = "xor", style: str = "workbench"
 ) -> None:
-    if style == "single_pane":
-        from .single_pane.app import SinglePaneApp
+    if style in ("workbench", "single_pane"):
+        from .single_pane.app import PTMWorkbenchApp
 
-        SinglePaneApp(workspace=workspace, demo=demo).run()
+        PTMWorkbenchApp(workspace=workspace, demo=demo).run()
     elif style == "classic":
         from .app import PTMApp
 

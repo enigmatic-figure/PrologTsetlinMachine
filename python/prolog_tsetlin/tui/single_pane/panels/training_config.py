@@ -5,7 +5,7 @@ from textual.app import ComposeResult
 from ....services.training import TrainingRequest
 
 class TrainingConfigPanel(Vertical):
-    """Dense single-pane training config: 6 inputs in a row, inline validation, stale detection via SessionState."""
+    """Dense workbench config with inline validation and stale-state detection."""
 
     def compose(self) -> ComposeResult:
         yield Static("TRAINING CONFIG  clauses/states/spec/T/epochs/seed  Enter to apply, t to train", classes="card_title")

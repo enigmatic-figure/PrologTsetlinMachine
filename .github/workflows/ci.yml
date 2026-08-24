@@ -344,7 +344,7 @@ jobs:
           out/wheel-smoke/bin/python -m pip install "${wheel}[tui]"
           out/wheel-smoke/bin/ptm --version
           out/wheel-smoke/bin/python -c "from prolog_tsetlin import TokenAdapter; assert TokenAdapter('text').tokenize('Hello') == ('hello',)"
-          out/wheel-smoke/bin/python -c "from importlib.resources import files; from prolog_tsetlin.tui.single_pane import SinglePaneApp; assert files('prolog_tsetlin.tui.single_pane').joinpath('ptm.tcss').is_file(); assert SinglePaneApp.CSS_PATH == 'ptm.tcss'"
+          out/wheel-smoke/bin/python -c "from importlib.resources import files; from prolog_tsetlin.tui.single_pane import PTMWorkbenchApp; assert files('prolog_tsetlin.tui.single_pane').joinpath('ptm.tcss').is_file(); assert PTMWorkbenchApp.CSS_PATH == 'ptm.tcss'"
           test -f out/wheel-smoke/share/prolog-tsetlin-machine/prolog/bounded_structure_search.pl
 
   required-ci:

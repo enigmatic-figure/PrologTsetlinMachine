@@ -8,29 +8,20 @@ from textual.binding import Binding
 class SinglePaneHelpScreen(ModalScreen[None]):
     BINDINGS = [Binding("escape", "dismiss", "Close"), Binding("question_mark", "dismiss", "Close", show=False)]
     def compose(self) -> ComposeResult:
-        from ....help_topics import TUI_SEMANTIC_BINDINGS
+        from ....help_topics import CANONICAL_TUI_BINDINGS
 
-        shared_commands = "\n".join(
+        commands = "\n".join(
             f'{binding.display_key:<6}{binding.description}'
-            for binding in TUI_SEMANTIC_BINDINGS
+            for binding in CANONICAL_TUI_BINDINGS
         )
-        navigation = (
-            '1 System  2 Dashboard  3 Clauses  4 TA States\n'
-            '5 Literals  6 Graphs  7 Artifacts\n'
-            'v Timeline  s Search  c Config  p Predictions\n'
-            'Ctrl+L Events  d Detail'
-        )
-        title = 'PTM WORKBENCH / SINGLE-PANE HELP'
+        title = 'PTM WORKBENCH HELP'
         with Vertical(id='help-dialog'):
             yield Static(title + '  ? to close  Esc to close', id='help-title')
             with Horizontal(id='help-columns'):
                 with VerticalScroll(classes='help-col'):
                     yield Static('COMMANDS', classes='card_title')
                     yield Static(
-                        navigation
-                        + '\n\n'
-                        + shared_commands
-                        + '\n/     Filter clauses\nk     Hide selected clause locally\nEnter Inspect selected clause',
+                        commands,
                         classes='card_label',
                     )
                 with VerticalScroll(classes='help-col'):

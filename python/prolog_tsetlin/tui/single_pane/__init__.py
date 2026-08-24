@@ -1,2 +1,3 @@
-from .app import SinglePaneApp
-__all__ = ['SinglePaneApp']
+from .app import PTMWorkbenchApp, SinglePaneApp
+
+__all__ = ["PTMWorkbenchApp", "SinglePaneApp"]

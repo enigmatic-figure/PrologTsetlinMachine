@@ -6,7 +6,7 @@ from textual.app import ComposeResult
 from ....services.search import SearchKind, demo_search_document
 
 class SearchPanel(VerticalScroll):
-    """Dense single-pane search: kind + timeout + JSON + result + counterexamples, reusing services/search."""
+    """Dense workbench search over the shared search service."""
 
     def compose(self) -> ComposeResult:
         yield Static("BOUNDED SEARCH  Prolog  threshold/template/clause/tree/repair  30s default", classes="card_title")

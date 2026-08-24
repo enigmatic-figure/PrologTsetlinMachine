@@ -64,33 +64,16 @@ from ..controllers import (
     TrainingSessionController,
 )
 from ...services.telemetry import TelemetrySession
-from ...help_topics import TUI_SEMANTIC_BINDINGS
+from ...help_topics import CANONICAL_TUI_BINDINGS
 
-class SinglePaneApp(App[None]):
-    TITLE = 'PTM Workbench single-pane mode'
+
+class PTMWorkbenchApp(App[None]):
+    TITLE = 'PTM Workbench'
     CSS_PATH = 'ptm.tcss'
     DIAGNOSTIC_SAMPLE_BUDGET = 25
-    # PTM commands are shared; numeric navigation belongs to this shell.
     BINDINGS = [
         Binding(binding.key, binding.action, binding.label, show=binding.show)
-        for binding in TUI_SEMANTIC_BINDINGS
-    ] + [
-        Binding('1', 'tab_1', 'System', show=False),
-        Binding('2', 'tab_2', 'Dashboard', show=False),
-        Binding('3', 'tab_3', 'Clauses', show=False),
-        Binding('4', 'tab_4', 'TA States', show=False),
-        Binding('5', 'tab_5', 'Literals', show=False),
-        Binding('6', 'tab_6', 'Graphs', show=False),
-        Binding('7', 'tab_7', 'Artifacts', show=False),
-        Binding('c', 'show_config', 'Config', show=False),
-        Binding('p', 'show_predictions', 'Predictions', show=False),
-        Binding('ctrl+l', 'show_events', 'Events', show=False),
-        Binding('d', 'show_detail', 'Detail', show=False),
-        Binding('v', 'show_timeline', 'Timeline', show=False),
-        Binding('s', 'show_search', 'Search', show=False),
-        Binding('slash', 'filter', 'Filter'),
-        Binding('k', 'prune', 'Mark hidden'),
-        Binding('enter', 'inspect', 'Inspect', show=False),
+        for binding in CANONICAL_TUI_BINDINGS
     ]
 
     def __init__(self, workspace: Path | None = None, demo: str = 'xor') -> None:
@@ -117,7 +100,7 @@ class SinglePaneApp(App[None]):
         self._inspection_generation = 0
 
     def compose(self) -> ComposeResult:
-        yield Static('PTM  prolog-tsetlin-machine  single-pane mode    TRAINING    epoch --/--', id='top-bar')
+        yield Static('PTM  prolog-tsetlin-machine  WORKBENCH    TRAINING    epoch --/--', id='top-bar')
         yield DashboardPanel(id='top-cards')
         yield TabBar(id='tab-bar', active=self._tab)
         yield TrainingGraphsPanel(id='graphs')
@@ -172,7 +155,7 @@ class SinglePaneApp(App[None]):
             '#config-panel', TrainingConfigPanel
         ).get_request()
         self._apply_breakpoint(self.size.width, self.size.height)
-        self._emit('session', 'session', message='single-pane ready; single PTM session model')
+        self._emit('session', 'session', message='workbench ready; single PTM session model')
         self.set_interval(0.5, self._tick_uptime)
 
     def on_resize(self, event: Resize) -> None:
@@ -270,7 +253,7 @@ class SinglePaneApp(App[None]):
             ),
         )
         self.query_one('#top-bar', Static).update(
-            f'PTM  single-pane mode  QUEUED  epoch --/{request.epochs}  '
+            f'PTM  WORKBENCH  QUEUED  epoch --/{request.epochs}  '
             f'{self._active_snapshot_tag()}'
         )
         self._start_training(request, self._cancel, run_id, gen)
@@ -284,7 +267,7 @@ class SinglePaneApp(App[None]):
         self._cancel.set()
         self._emit('training', 'job_state', message=f'cancellation requested run_id={self._current_run_id}')
         self.query_one('#top-bar', Static).update(
-            f'PTM  single-pane mode  CANCELLING  {self._active_snapshot_tag()}'
+            f'PTM  WORKBENCH  CANCELLING  {self._active_snapshot_tag()}'
         )
 
     def action_filter(self) -> None:
@@ -496,7 +479,7 @@ class SinglePaneApp(App[None]):
                 f'acc {inspection.accuracy * 100:.1f}%'
             )
         self.query_one('#top-bar', Static).update(
-            f'PTM  single-pane mode  {status}'
+            f'PTM  WORKBENCH  {status}'
         )
         self._emit(
             'training',
@@ -714,13 +697,13 @@ class SinglePaneApp(App[None]):
             return
         try:
             raw = panel.query_one('#artifact-path', Input).value.strip()
-            path = Path(raw or 'out/single-pane-xor.ptm')
+            path = Path(raw or 'out/ptm-workbench-xor.ptm')
             if not path.is_absolute():
                 path = self.workspace / path
             request = ArtifactExportRequest(
                 path=path,
-                name='single-pane-xor',
-                description='Single-pane XOR export',
+                name='ptm-workbench-xor',
+                description='PTM Workbench XOR export',
             )
             summary = self.training.export(current_request, request)
             panel.set_status(f'EXPORTED {summary.artifact_id[:8]}  {summary.byte_count} bytes  {summary.conformance_examples} cases  -> {path}')
@@ -735,7 +718,7 @@ class SinglePaneApp(App[None]):
         panel = self.query_one('#artifact-panel', ArtifactPanel)
         try:
             raw = panel.query_one('#artifact-path', Input).value.strip()
-            path = Path(raw or 'out/single-pane-xor.ptm')
+            path = Path(raw or 'out/ptm-workbench-xor.ptm')
             if not path.is_absolute():
                 path = self.workspace / path
             loaded = self.artifacts.load(path)
@@ -792,7 +775,7 @@ class SinglePaneApp(App[None]):
         panel = self.query_one('#artifact-panel', ArtifactPanel)
         try:
             raw_path = panel.query_one('#artifact-path', Input).value.strip()
-            displayed_path = Path(raw_path or 'out/single-pane-xor.ptm')
+            displayed_path = Path(raw_path or 'out/ptm-workbench-xor.ptm')
             if not displayed_path.is_absolute():
                 displayed_path = self.workspace / displayed_path
             values = {
@@ -1094,7 +1077,7 @@ class SinglePaneApp(App[None]):
         self.training.record_progress(p.epoch, p.accuracy)
         self._emit('training', 'progress', message=f'epoch {p.epoch}/{p.epochs} acc={p.accuracy:.0%}', epoch=p.epoch, run_id=run_id, gen=gen)
         self.query_one('#top-bar', Static).update(
-            f'PTM  single-pane mode  TRAINING  epoch {p.epoch}/{p.epochs}  '
+            f'PTM  WORKBENCH  TRAINING  epoch {p.epoch}/{p.epochs}  '
             f'acc {p.accuracy*100:.1f}%  {self._active_snapshot_tag()}'
         )
         self._update_training_graphs()
@@ -1204,7 +1187,7 @@ class SinglePaneApp(App[None]):
         inspection = self.training.inspect_completed_epoch()
         self._project_training_inspection(inspection)
         self.query_one('#top-bar', Static).update(
-            f'PTM  single-pane mode  TRAINED  FINAL SNAPSHOT '
+            f'PTM  WORKBENCH  TRAINED  FINAL SNAPSHOT '
             f'epoch {inspection.epoch}/{result.request.epochs}'
         )
         self._emit('training', 'job_state', message=f'training succeeded run_id={run_id} acc={result.accuracy:.0%}')
@@ -1226,9 +1209,9 @@ class SinglePaneApp(App[None]):
             self._restore_completed_diagnostic_summary()
             self._refresh_timeline()
         self.query_one('#top-bar', Static).update(
-            'PTM  single-pane mode  CANCELLED  MODEL PANELS LAST COMPLETED'
+            'PTM  WORKBENCH  CANCELLED  MODEL PANELS LAST COMPLETED'
             if self.session.last_completed_run is not None
-            else 'PTM  single-pane mode  CANCELLED  MODEL PANELS EMPTY'
+            else 'PTM  WORKBENCH  CANCELLED  MODEL PANELS EMPTY'
         )
         self._refresh_configuration_state()
         self._emit('training', 'job_state', message=f'cancelled run_id={run_id}: {msg}')
@@ -1249,9 +1232,9 @@ class SinglePaneApp(App[None]):
             self._restore_completed_diagnostic_summary()
             self._refresh_timeline()
         self.query_one('#top-bar', Static).update(
-            'PTM  single-pane mode  FAILED  MODEL PANELS LAST COMPLETED'
+            'PTM  WORKBENCH  FAILED  MODEL PANELS LAST COMPLETED'
             if self.session.last_completed_run is not None
-            else 'PTM  single-pane mode  FAILED  MODEL PANELS EMPTY'
+            else 'PTM  WORKBENCH  FAILED  MODEL PANELS EMPTY'
         )
         self._refresh_configuration_state()
         self._emit('training', 'failure', level='error', message=msg, run_id=run_id, gen=gen)
@@ -1295,3 +1278,7 @@ class SinglePaneApp(App[None]):
             self.call_from_thread(self.on_training_cancelled, str(e), run_id, gen)
         except (ValueError, RuntimeError) as e:
             self.call_from_thread(self.on_training_failed, str(e), run_id, gen)
+
+
+# Compatibility alias for integrations that adopted the prototype class name.
+SinglePaneApp = PTMWorkbenchApp

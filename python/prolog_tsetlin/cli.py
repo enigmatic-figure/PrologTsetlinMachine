@@ -386,9 +386,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     tui.add_argument(
         "--style",
-        choices=("classic", "single_pane"),
-        default="classic",
-        help="workbench style (classic screen-per-step or single-pane)",
+        choices=("workbench", "classic", "single_pane"),
+        default="workbench",
+        help=(
+            "workbench style (canonical workbench, classic compatibility shell, "
+            "or single_pane compatibility alias)"
+        ),
     )
     tui.set_defaults(handler=_tui)
 

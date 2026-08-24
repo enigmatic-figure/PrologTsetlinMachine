@@ -16,7 +16,7 @@ class SystemInfoPanel(Vertical):
         rows = [
             ('Host', platform.node() or 'localhost', platform.platform()),
             ('Python', platform.python_version(), sys.executable.split("\\")[-1] if "\\" in sys.executable else sys.executable.split("/")[-1]),
-            ('Textual', '8.2.8', 'single-pane'),
+            ('Textual', '8.2.8', 'canonical workbench'),
             ('PTM', '0.1.0', 'scalar oracle'),
             ('CPU', '--', 'n/a'),
             ('RAM', '--', 'n/a'),
@@ -35,4 +35,4 @@ class SystemInfoPanel(Vertical):
         t.add_row('Runtime', str(env.get('runtime','--')), str(env.get('backend','scalar')))
         t.add_row('GProlog', 'ok' if env.get('gprolog_available') else 'missing', str(env.get('gprolog_version','--')))
         t.add_row('Device', str(env.get('device','cpu')), str(env.get('cpu_features','--')))
-        t.add_row('Workspace', str(env.get('workspace','--')), 'ptm tui --style single_pane')
+        t.add_row('Workspace', str(env.get('workspace','--')), 'ptm tui')
