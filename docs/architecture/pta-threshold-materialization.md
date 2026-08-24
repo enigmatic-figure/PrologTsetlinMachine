@@ -113,6 +113,8 @@ opening in `ptmrt`.
 - `tests/cpp/model_runtime_tests.cpp`
 - the `ptmrt_pta_threshold_*` CTest cases
 
-The next control-plane milestone remains broader: incorporate a PTA-derived
-literal into a trained parent model, run a shadow audit, publish a lineage
-child, and prove reopen/restore under drift.
+The trained-parent continuation of this slice is specified by
+[Trained-parent PTA model generations](trained-parent-model-generation.md): it
+incorporates the derived literal through a behavior-preserving extended parent,
+adapts a separate child, runs exact and paired promotion audits, publishes
+model-generation lineage, and proves reopen/restore under labeled drift.

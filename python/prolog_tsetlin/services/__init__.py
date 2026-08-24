@@ -31,6 +31,19 @@ from .training import (
     TrainingRun,
     train_xor,
 )
+from .model_generation import (
+    GenerationLifecycleEvent,
+    LifecycleEventKind,
+    ModelGenerationController,
+    ModelGenerationStore,
+    RestoredAdaptiveParent,
+    TrainedParentLifecycleResult,
+    compile_generation_artifact,
+    execute_trained_parent_lifecycle,
+    invent_threshold_for_corpus,
+    reopen_and_restore_for_drift,
+    verify_artifact_with_ptmrt,
+)
 from .search import (
     BoundedSearchRequest,
     BoundedSearchResult,
@@ -74,4 +87,15 @@ __all__ = [
     "compare_training_samples",
     "train_xor",
     "verify_artifact",
+    "GenerationLifecycleEvent",
+    "LifecycleEventKind",
+    "ModelGenerationController",
+    "ModelGenerationStore",
+    "RestoredAdaptiveParent",
+    "TrainedParentLifecycleResult",
+    "compile_generation_artifact",
+    "execute_trained_parent_lifecycle",
+    "invent_threshold_for_corpus",
+    "reopen_and_restore_for_drift",
+    "verify_artifact_with_ptmrt",
 ]

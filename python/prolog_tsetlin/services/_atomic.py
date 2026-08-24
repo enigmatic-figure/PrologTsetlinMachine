@@ -7,6 +7,21 @@ from pathlib import Path
 import tempfile
 
 
+def _sync_parent_directory(target: Path) -> None:
+    """Persist a directory entry update on platforms that expose directory fsync."""
+
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(target.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def publish_bytes(
     destination: str | Path,
     data: bytes,
@@ -31,6 +46,7 @@ def publish_bytes(
         else:
             os.link(temporary, target)
             temporary.unlink()
+        _sync_parent_directory(target)
     finally:
         temporary.unlink(missing_ok=True)
     return target

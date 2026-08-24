@@ -66,6 +66,16 @@
       "owner": "research"
     },
     {
+      "id": "trained-parent-pta-lifecycle",
+      "maturity": "experimental",
+      "evidence": [
+        "docs/architecture/trained-parent-model-generation.md",
+        "tests/python/test_model_generation_lifecycle.py",
+        "tests/data/trained_parent_child_v1.hex"
+      ],
+      "owner": "research"
+    },
+    {
       "id": "tui-workbench",
       "maturity": "experimental",
       "evidence": [

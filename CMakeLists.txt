@@ -245,6 +245,39 @@ if(PTM_BUILD_TESTS)
         set_tests_properties(ptmrt_pta_threshold_boundary PROPERTIES
             FIXTURES_REQUIRED ptmrt_pta_threshold_artifact
             PASS_REGULAR_EXPRESSION "prediction.:1.*score.:1")
+
+        set(PTM_TRAINED_PARENT_HEX_FIXTURE
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/trained_parent_child_v1.hex")
+        set(PTM_TRAINED_PARENT_FIXTURE
+            "${CMAKE_CURRENT_BINARY_DIR}/trained_parent_child_v1.ptm")
+        add_test(NAME ptmrt_trained_parent_fixture
+            COMMAND ptm_test_fixture_materializer
+                "${PTM_TRAINED_PARENT_HEX_FIXTURE}"
+                "${PTM_TRAINED_PARENT_FIXTURE}")
+        set_tests_properties(ptmrt_trained_parent_fixture PROPERTIES
+            FIXTURES_SETUP ptmrt_trained_parent_artifact)
+        add_test(NAME ptmrt_trained_parent_verify
+            COMMAND ptmrt verify "${PTM_TRAINED_PARENT_FIXTURE}")
+        set_tests_properties(ptmrt_trained_parent_verify PROPERTIES
+            FIXTURES_REQUIRED ptmrt_trained_parent_artifact
+            PASS_REGULAR_EXPRESSION
+                "verified sha256:df8c5638d3855b20d2c23c6b66e6020b8037cadfd7c2902c089cced07ac7ce92")
+        add_test(NAME ptmrt_trained_parent_below
+            COMMAND ptmrt run-record "${PTM_TRAINED_PARENT_FIXTURE}"
+                "temperature:int=74"
+                "mode:string=heat"
+                "previous_state:bool=false")
+        set_tests_properties(ptmrt_trained_parent_below PROPERTIES
+            FIXTURES_REQUIRED ptmrt_trained_parent_artifact
+            PASS_REGULAR_EXPRESSION "prediction.:0.*score.:-7")
+        add_test(NAME ptmrt_trained_parent_above
+            COMMAND ptmrt run-record "${PTM_TRAINED_PARENT_FIXTURE}"
+                "temperature:int=76"
+                "mode:string=heat"
+                "previous_state:bool=false")
+        set_tests_properties(ptmrt_trained_parent_above PROPERTIES
+            FIXTURES_REQUIRED ptmrt_trained_parent_artifact
+            PASS_REGULAR_EXPRESSION "prediction.:1.*score.:6")
     endif()
 
     add_executable(ptm_runtime_c_smoke tests/c/runtime_smoke.c)
