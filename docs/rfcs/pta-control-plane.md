@@ -151,4 +151,8 @@ threshold slice now experimentally executes trained parent → invention → exa
 extension → adaptation → conformance → promotion → publication → activation →
 labeled drift → bit-exact restoration → fresh child activation across Python,
 GNU Prolog, and `ptmrt`, with durable cross-generation evidence-use accounting.
-The multi-proposal, multi-PTA general control plane remains proposed.
+That scalar-binary slice also supports complete bounded threshold candidate
+sets across several numeric fields, independent per-candidate review,
+adaptation-only deterministic comparison, and selection provenance that is
+sealed before promotion holdout inspection. Intervals, categorical groups,
+and the multi-PTA general control plane remain proposed.
