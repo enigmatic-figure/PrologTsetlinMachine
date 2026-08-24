@@ -73,9 +73,13 @@ accept a caller-supplied proposal that merely claims a Prolog origin. It
 publishes content-addressed invention evidence binding the exact invention
 corpus and reasoning session, collective query/protocol, GNU Prolog executable
 digest and version, packaged module digests, explicit query/budget, and every
-reviewed proposal identity. The original `invent_threshold_for_corpus()` API
-remains as an exactly-one compatibility wrapper; generalized episodes use
-`invent_threshold_candidates_for_corpus()`.
+reviewed proposal identity and canonical proposal payload. The executable and
+module image is measured before and after the collective run; a changing image
+fails closed. The original `invent_threshold_for_corpus()` API remains as an
+exactly-one compatibility wrapper; generalized episodes use
+`invent_threshold_candidates_for_corpus()`. The exactly-one lifecycle result
+retains its legacy `PrologInventionEvidence` view and also exposes the complete
+candidate set separately.
 
 The original `threshold` proposal remains `NotRepresentable`.
 
@@ -94,6 +98,11 @@ and is scored against P on the adaptation corpus. The durable outcome records
 both-correct, both-wrong, improvement, regression, disagreement, parent-error,
 and child-error counts together with the P+, child snapshot, ordered manifest,
 preprocessing, literal, proposal, and adaptive-behavior identities.
+These are derivational claims rather than trusted metadata: admission and
+recovery rerun the attested complete GNU Prolog query, independently review
+every replayed proposal, reconstruct every P+, replay the exact adaptation
+epoch count for every alternative, and require bit-exact snapshot and RNG
+identity before accepting the recorded metrics or winner.
 
 `ThresholdCandidateSelectionPolicy` first excludes alternatives that do not
 meet its observation and improvement rule. It ranks the remainder by child
@@ -310,10 +319,14 @@ attached to the child's adaptive lineage.
 
 New candidate-set lineages use `ptm.model-generation-lineage.v5` and bind the
 candidate selection ID. Recovery reloads the complete candidate set and
-selection, all alternative snapshots/manifests/preprocessing contracts,
-recomputes their paired metrics from the durably stored adaptation corpus, and
-requires the selected outcome to match the deployed child. Legacy v4 lineage
-objects remain readable for previously durable exactly-one episodes.
+selection, reconstructs the invention session from durable evidence, reruns
+the byte-attested GNU Prolog collective, repeats independent proposal review,
+and replays exact adaptation for all alternative snapshots/manifests and
+preprocessing contracts. It then recomputes paired metrics from the durable
+adaptation corpus and requires the selected outcome to match the deployed
+child. Legacy v4 lineage objects remain readable for previously durable
+exactly-one episodes, but `record_candidate()` rejects v4 for every new
+`candidate_created` transition; backward compatibility is recovery-only.
 
 An `AdaptiveRestorationBundle` binds the parent generation to:
 

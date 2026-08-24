@@ -8,7 +8,7 @@ import math
 import os
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -126,6 +126,34 @@ def _gprolog_version(executable: Path) -> str:
     if completed.returncode != 0 or not first_line:
         raise ModelGenerationError("GNU Prolog version attestation failed")
     return first_line
+
+
+def _collective_attestation(
+    service: PTACollectiveService,
+) -> tuple[str, str, tuple[tuple[str, str], ...]]:
+    """Measure one stable GNU Prolog collective implementation image."""
+
+    first_executable_digest = _file_digest(
+        service.executable, maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES
+    )
+    first_module_digests = tuple(
+        sorted((name, _file_digest(path)) for name, path in service.module_paths.items())
+    )
+    version = _gprolog_version(service.executable)
+    second_executable_digest = _file_digest(
+        service.executable, maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES
+    )
+    second_module_digests = tuple(
+        sorted((name, _file_digest(path)) for name, path in service.module_paths.items())
+    )
+    if (
+        first_executable_digest != second_executable_digest
+        or first_module_digests != second_module_digests
+    ):
+        raise ModelGenerationError(
+            "GNU Prolog collective changed during implementation attestation"
+        )
+    return version, second_executable_digest, second_module_digests
 
 
 def _content_path(root: Path, namespace: str, identifier: str, suffix: str) -> Path:
@@ -977,6 +1005,39 @@ class ModelGenerationController:
                 raise ModelGenerationError("child artifact names a different adaptive behavior")
         return snapshot, manifest, preprocessing, artifact
 
+    def _parent_training_corpus(
+        self, generation: ModelGeneration
+    ) -> LabeledCorpus:
+        registration = next(
+            (
+                event
+                for event in self.store.read_events()
+                if event.kind is LifecycleEventKind.PARENT_REGISTERED
+                and event.generation_id == generation.generation_id
+            ),
+            None,
+        )
+        usage_id = (
+            registration.details.get("evidence_usage_id")
+            if registration is not None
+            else None
+        )
+        if type(usage_id) is not str:
+            raise ModelGenerationError(
+                "trained parent lacks durable registration evidence"
+            )
+        usage = self.store.load_evidence_usage(usage_id)
+        if (
+            usage.purpose is not EvidenceUsagePurpose.PARENT_REGISTRATION
+            or usage.subject_generation_id != generation.generation_id
+            or len(usage.corpora) != 1
+            or usage.corpora[0].role is not CorpusRole.PARENT_TRAINING
+        ):
+            raise ModelGenerationError(
+                "trained parent registration evidence is inconsistent"
+            )
+        return usage.corpora[0]
+
     def _validate_lineage_graph(
         self, lineage: ModelGenerationLineage
     ) -> tuple[
@@ -1013,6 +1074,11 @@ class ModelGenerationController:
         parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
         extended_snapshot = self.store.load_snapshot(extended.snapshot_id).snapshot
         child_snapshot = self.store.load_snapshot(child.snapshot_id).snapshot
+        replayed_session: PTAReasoningSession | None = None
+        replayed_candidates: Mapping[
+            str, tuple[PTAEscalationProposal, ReviewedThresholdProposal]
+        ] = MappingProxyType({})
+        parent_training_corpus: LabeledCorpus | None = None
         if child.inference_artifact_id is None:
             raise ModelGenerationError("adapted child lacks an inference artifact")
         _, _, _, child_artifact = self._validate_deployable_generation(child)
@@ -1049,6 +1115,24 @@ class ModelGenerationController:
                 and child_signature_map.get("threshold_candidate_selection_id") is None
             )
         else:
+            invention_corpus = next(
+                (
+                    corpus
+                    for corpus in usage.corpora
+                    if corpus.role is CorpusRole.INVENTION
+                ),
+                None,
+            )
+            if invention_corpus is None:
+                raise ModelGenerationError(
+                    "threshold candidate selection lacks invention evidence"
+                )
+            replayed_session, replayed_candidates = (
+                _validate_threshold_candidate_derivation(
+                    evidence, invention_corpus, parent_manifest
+                )
+            )
+            parent_training_corpus = self._parent_training_corpus(parent)
             selected = selection.selected_outcome
             candidate_ids = {
                 (item.proposal_semantic_id, item.proposal_provenance_id)
@@ -1140,6 +1224,10 @@ class ModelGenerationController:
         ):
             raise ModelGenerationError("lineage object graph is inconsistent")
         if selection is not None:
+            if replayed_session is None or parent_training_corpus is None:
+                raise ModelGenerationError(
+                    "threshold candidate derivation replay is unavailable"
+                )
             adaptation_corpus = next(
                 corpus
                 for corpus in usage.corpora
@@ -1153,6 +1241,9 @@ class ModelGenerationController:
             )
             for outcome in selection.outcomes:
                 candidate = candidates_by_id[outcome.proposal_semantic_id]
+                proposal, reviewed = replayed_candidates[
+                    outcome.proposal_semantic_id
+                ]
                 alternative_extended = self.store.load_snapshot(
                     outcome.extended_snapshot_id
                 ).snapshot
@@ -1168,9 +1259,22 @@ class ModelGenerationController:
                 alternative_preprocessing = self.store.load_preprocessing(
                     outcome.child_preprocessing_id
                 )
+                replayed_extended = extend_parent_with_threshold(
+                    parent_snapshot,
+                    parent_manifest,
+                    reviewed,
+                    session=replayed_session,
+                    equivalence_records=parent_training_corpus.records,
+                )
+                replayed_child = adapt_extended_parent(
+                    replayed_extended,
+                    adaptation_corpus,
+                    epochs=selection.adaptation_epochs,
+                )
                 descriptor = alternative_manifest.literals[-1]
                 if (
-                    candidate.proposal_provenance_id
+                    proposal.semantic_id() != candidate.proposal_semantic_id
+                    or candidate.proposal_provenance_id
                     != outcome.proposal_provenance_id
                     or candidate.invented_literal_id != outcome.invented_literal_id
                     or len(alternative_manifest.literals)
@@ -1204,6 +1308,23 @@ class ModelGenerationController:
                     or alternative_child.specificity
                     != alternative_extended.specificity
                     or alternative_child.threshold != alternative_extended.threshold
+                    or replayed_extended.snapshot.snapshot_id
+                    != outcome.extended_snapshot_id
+                    or replayed_extended.manifest.manifest_id
+                    != outcome.extended_manifest_id
+                    or replayed_child.snapshot.snapshot_id
+                    != outcome.child_snapshot_id
+                    or replayed_child.manifest.manifest_id
+                    != outcome.child_manifest_id
+                    or replayed_child.adaptation_corpus_digest
+                    != selection.adaptation_corpus_digest
+                    or replayed_child.epochs != selection.adaptation_epochs
+                    or preprocessing_contract_id(
+                        PreprocessingContract.from_catalog(
+                            replayed_child.manifest.build_catalog()
+                        )
+                    )
+                    != outcome.child_preprocessing_id
                     or AdaptiveBehaviorIdentity(
                         outcome.child_snapshot_id,
                         outcome.child_manifest_id,
@@ -1908,6 +2029,10 @@ class ModelGenerationController:
         self._emit("parent_registered", generation_id=generation.generation_id)
 
     def record_candidate(self, lineage: ModelGenerationLineage) -> None:
+        if lineage.schema != LINEAGE_SCHEMA:
+            raise ModelGenerationError(
+                "new candidate admission requires the current lineage schema"
+            )
         with self._control_lock, self.store._event_lock:
             self._validate_lineage_graph(lineage)
             state = self._authoritative_state_under_event_lock()
@@ -2256,6 +2381,83 @@ def compile_generation_artifact(
     return preprocessing, artifact
 
 
+def _invention_session(corpus: LabeledCorpus) -> PTAReasoningSession:
+    session = PTAReasoningSession(corpus.dataset_id)
+    for example in corpus.examples:
+        for name in sorted(example.record):
+            session.add_observation(
+                "pta:input", example.example_id, name, example.record[name]
+            )
+        session.add_example_label(example.example_id, example.label)
+    return session
+
+
+def _run_complete_threshold_collective(
+    session: PTAReasoningSession,
+    numeric_fields: tuple[str, ...],
+    budget: ThresholdCandidateBudget,
+    *,
+    expected_evidence: PrologThresholdCandidateSet | None = None,
+) -> tuple[
+    tuple[PTAEscalationProposal, ...],
+    tuple[str, str, tuple[tuple[str, str], ...]],
+]:
+    """Run one stable, complete bounded threshold query and attest its bytes."""
+
+    service = PTACollectiveService()
+    before = _collective_attestation(service)
+    if expected_evidence is not None and before != (
+        expected_evidence.gprolog_version,
+        expected_evidence.gprolog_binary_digest,
+        expected_evidence.module_digests,
+    ):
+        raise ModelGenerationError(
+            "threshold candidate set names a different GNU Prolog implementation"
+        )
+    query = PTACollectiveQuery(
+        numeric_fields=numeric_fields,
+        discover_intervals=False,
+        derive_deescalation=False,
+        derive_escalation=True,
+    )
+    result = service.run(
+        session,
+        query=query,
+        budget=PTACollectiveBudget(max_results_per_product=budget.maximum_candidates),
+    )
+    after = _collective_attestation(service)
+    if after != before:
+        raise ModelGenerationError("GNU Prolog collective changed during execution")
+    proposals = tuple(
+        item
+        for item in result.proposals
+        if item.native_target == "threshold"
+        and item.structure.get("field") in numeric_fields
+    )
+    proposal_counts = result.product_counts["threshold_proposals"]
+    insight_counts = result.product_counts["threshold_insights"]
+    if (
+        proposal_counts.available > budget.maximum_candidates
+        or proposal_counts.truncated
+        or insight_counts.truncated
+    ):
+        raise ModelGenerationError(
+            "the complete threshold candidate set exceeds its explicit budget"
+        )
+    if (
+        not proposals
+        or proposal_counts.available != len(proposals)
+        or proposal_counts.emitted != len(proposals)
+        or insight_counts.available != len(proposals)
+        or insight_counts.emitted != len(proposals)
+        or len(proposals) != len(result.proposals)
+    ):
+        raise ModelGenerationError(
+            "the bounded collective returned an incomplete threshold candidate set"
+        )
+    return tuple(sorted(proposals, key=lambda item: item.semantic_id())), before
+
+
 @dataclass(frozen=True, slots=True)
 class ThresholdCandidateInvention:
     """In-memory reviewed candidates plus their durable collective attestation."""
@@ -2298,6 +2500,8 @@ class ThresholdCandidateInvention:
                 or reviewed.evidence.threshold != candidate.threshold
                 or content_digest(reviewed.evidence.to_dict())
                 != candidate.boundary_evidence_digest
+                or canonical_json_bytes(proposal.to_dict())
+                != canonical_json_bytes(candidate.proposal_payload)
             ):
                 raise ModelGenerationError(
                     "threshold candidate invention differs from its evidence"
@@ -2337,52 +2541,10 @@ def invent_threshold_candidates_for_corpus(
             ) from error
         if field.kind.value != "number":
             raise ModelGenerationError("threshold invention fields must be numeric")
-    session = PTAReasoningSession(corpus.dataset_id)
-    for example in corpus.examples:
-        for name, value in example.record.items():
-            session.add_observation("pta:input", example.example_id, name, value)
-        session.add_example_label(example.example_id, example.label)
-    service = PTACollectiveService()
-    query = PTACollectiveQuery(
-        numeric_fields=canonical_fields,
-        discover_intervals=False,
-        derive_deescalation=False,
-        derive_escalation=True,
+    session = _invention_session(corpus)
+    proposals, attestation = _run_complete_threshold_collective(
+        session, canonical_fields, budget
     )
-    result = service.run(
-        session,
-        query=query,
-        budget=PTACollectiveBudget(
-            max_results_per_product=budget.maximum_candidates
-        ),
-    )
-    proposals = tuple(
-        item
-        for item in result.proposals
-        if item.native_target == "threshold"
-        and item.structure.get("field") in canonical_fields
-    )
-    proposal_counts = result.product_counts["threshold_proposals"]
-    insight_counts = result.product_counts["threshold_insights"]
-    if (
-        proposal_counts.available > budget.maximum_candidates
-        or proposal_counts.truncated
-        or insight_counts.truncated
-    ):
-        raise ModelGenerationError(
-            "the complete threshold candidate set exceeds its explicit budget"
-        )
-    if (
-        not proposals
-        or proposal_counts.available != len(proposals)
-        or proposal_counts.emitted != len(proposals)
-        or insight_counts.available != len(proposals)
-        or insight_counts.emitted != len(proposals)
-        or len(proposals) != len(result.proposals)
-    ):
-        raise ModelGenerationError(
-            "the bounded collective returned an incomplete threshold candidate set"
-        )
     reviewed_pairs = tuple(
         (
             proposal,
@@ -2403,6 +2565,7 @@ def invent_threshold_candidates_for_corpus(
             threshold=reviewed.evidence.threshold,
             invented_literal_id=reviewed.descriptor.literal_id,
             boundary_evidence_digest=content_digest(reviewed.evidence.to_dict()),
+            proposal_payload=proposal.to_dict(),
         )
         for proposal, reviewed in ordered
     )
@@ -2411,19 +2574,12 @@ def invent_threshold_candidates_for_corpus(
         session_digest=content_digest(session.to_dict()),
         numeric_fields=canonical_fields,
         budget=budget,
-        available_candidates=proposal_counts.available,
+        available_candidates=len(proposals),
         candidates=summaries,
         collective_protocol="PTM_PTA_COLLECTIVE_V1",
-        gprolog_version=_gprolog_version(service.executable),
-        gprolog_binary_digest=_file_digest(
-            service.executable, maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES
-        ),
-        module_digests=tuple(
-            sorted(
-                (name, _file_digest(path))
-                for name, path in service.module_paths.items()
-            )
-        ),
+        gprolog_version=attestation[0],
+        gprolog_binary_digest=attestation[1],
+        module_digests=attestation[2],
     )
     return ThresholdCandidateInvention(
         session,
@@ -2431,6 +2587,64 @@ def invent_threshold_candidates_for_corpus(
         ordered_reviewed,
         evidence,
     )
+
+
+def _validate_threshold_candidate_derivation(
+    evidence: PrologThresholdCandidateSet,
+    corpus: LabeledCorpus,
+    parent_manifest: OrderedLiteralManifest,
+) -> tuple[
+    PTAReasoningSession,
+    Mapping[str, tuple[PTAEscalationProposal, ReviewedThresholdProposal]],
+]:
+    """Re-prove a v5 candidate population from its durable invention corpus."""
+
+    if (
+        corpus.role is not CorpusRole.INVENTION
+        or corpus.digest != evidence.invention_corpus_digest
+    ):
+        raise ModelGenerationError(
+            "threshold candidate set has different invention evidence"
+        )
+    session = _invention_session(corpus)
+    replayed, _ = _run_complete_threshold_collective(
+        session,
+        evidence.numeric_fields,
+        evidence.budget,
+        expected_evidence=evidence,
+    )
+    if content_digest(session.to_dict()) != evidence.session_digest:
+        raise ModelGenerationError(
+            "threshold candidate reasoning session digest is inconsistent"
+        )
+    if len(replayed) != evidence.available_candidates:
+        raise ModelGenerationError(
+            "threshold candidate count differs from deterministic GNU Prolog replay"
+        )
+    catalog = parent_manifest.build_catalog()
+    reviewed_by_id: dict[
+        str, tuple[PTAEscalationProposal, ReviewedThresholdProposal]
+    ] = {}
+    for proposal, candidate in zip(replayed, evidence.candidates):
+        reviewed = review_threshold_proposal(
+            proposal, session=session, catalog=catalog
+        )
+        if (
+            proposal.semantic_id() != candidate.proposal_semantic_id
+            or proposal.provenance_id() != candidate.proposal_provenance_id
+            or canonical_json_bytes(proposal.to_dict())
+            != canonical_json_bytes(candidate.proposal_payload)
+            or reviewed.evidence.field != candidate.field
+            or reviewed.evidence.threshold != candidate.threshold
+            or reviewed.descriptor.literal_id != candidate.invented_literal_id
+            or content_digest(reviewed.evidence.to_dict())
+            != candidate.boundary_evidence_digest
+        ):
+            raise ModelGenerationError(
+                "threshold candidate differs from deterministic GNU Prolog replay"
+            )
+        reviewed_by_id[proposal.semantic_id()] = (proposal, reviewed)
+    return session, MappingProxyType(reviewed_by_id)
 
 
 def invent_threshold_for_corpus(
@@ -2454,19 +2668,29 @@ def invent_threshold_for_corpus(
     )
     proposal = invention.proposals[0]
     reviewed = invention.reviewed[0]
-    candidate_set = invention.evidence
-    evidence = PrologInventionEvidence(
+    evidence = _legacy_invention_evidence(invention.evidence)
+    return invention.session, proposal, reviewed, evidence
+
+
+def _legacy_invention_evidence(
+    candidate_set: PrologThresholdCandidateSet,
+) -> PrologInventionEvidence:
+    if len(candidate_set.numeric_fields) != 1 or len(candidate_set.candidates) != 1:
+        raise ModelGenerationError(
+            "legacy invention evidence requires exactly one field and candidate"
+        )
+    candidate = candidate_set.candidates[0]
+    return PrologInventionEvidence(
         invention_corpus_digest=candidate_set.invention_corpus_digest,
         session_digest=candidate_set.session_digest,
-        numeric_field=numeric_field,
+        numeric_field=candidate_set.numeric_fields[0],
         collective_protocol=candidate_set.collective_protocol,
         gprolog_version=candidate_set.gprolog_version,
         gprolog_binary_digest=candidate_set.gprolog_binary_digest,
         module_digests=candidate_set.module_digests,
-        proposal_semantic_id=proposal.semantic_id(),
-        proposal_provenance_id=proposal.provenance_id(),
+        proposal_semantic_id=candidate.proposal_semantic_id,
+        proposal_provenance_id=candidate.proposal_provenance_id,
     )
-    return invention.session, proposal, reviewed, evidence
 
 
 def verify_artifact_with_ptmrt(
@@ -2657,7 +2881,8 @@ class TrainedParentLifecycleResult:
     conformance: RuntimeConformanceReport
     promotion_audit: PromotionAuditSnapshot
     lineage: ModelGenerationLineage
-    invention_evidence: PrologThresholdCandidateSet
+    invention_evidence: PrologInventionEvidence | PrologThresholdCandidateSet
+    candidate_set: PrologThresholdCandidateSet
     candidate_selection: ThresholdCandidateSelection
     dataset_id: str
     preactivation_example_ids: frozenset[str | int]
@@ -3106,6 +3331,7 @@ def _execute_trained_parent_lifecycle_once(
         promotion,
         lineage,
         invention.evidence,
+        invention.evidence,
         candidate_selection,
         parent_training_corpus.dataset_id,
         preactivation_example_ids,
@@ -3184,7 +3410,7 @@ def execute_trained_parent_lifecycle(
 ) -> TrainedParentLifecycleResult:
     """Compatibility entrypoint retaining the exactly-one threshold budget."""
 
-    return execute_trained_parent_lifecycle_with_candidates(
+    result = execute_trained_parent_lifecycle_with_candidates(
         parent_snapshot=parent_snapshot,
         parent_manifest=parent_manifest,
         parent_training_corpus=parent_training_corpus,
@@ -3201,6 +3427,9 @@ def execute_trained_parent_lifecycle(
         telemetry=telemetry,
         event_sink=event_sink,
     )
+    legacy_evidence = _legacy_invention_evidence(result.candidate_set)
+    store.put_invention_evidence(legacy_evidence)
+    return replace(result, invention_evidence=legacy_evidence)
 
 
 def reopen_and_restore_for_drift(

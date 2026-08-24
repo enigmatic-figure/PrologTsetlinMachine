@@ -651,6 +651,7 @@ class ThresholdCandidateProposal:
     threshold: int | float
     invented_literal_id: int
     boundary_evidence_digest: str
+    proposal_payload: Mapping[str, object]
 
     def __post_init__(self) -> None:
         _require_digest(self.proposal_semantic_id, "candidate proposal semantic")
@@ -665,6 +666,40 @@ class ThresholdCandidateProposal:
             or not 0 <= self.invented_literal_id < 1 << 64
         ):
             raise ModelGenerationError("threshold candidate literal ID is invalid")
+        expected_proposal_fields = {
+            "proposal_id",
+            "source_pta_ids",
+            "supporting_insights",
+            "counterexamples_addressed",
+            "required_literals",
+            "native_target",
+            "structure",
+            "weights",
+            "output_assignments",
+            "resource_bounds",
+            "lowering_version",
+            "validation_signature",
+            "support_trace",
+        }
+        if (
+            not isinstance(self.proposal_payload, Mapping)
+            or set(self.proposal_payload) != expected_proposal_fields
+            or self.proposal_payload.get("native_target") != "threshold"
+            or not isinstance(self.proposal_payload.get("structure"), Mapping)
+            or dict(self.proposal_payload["structure"])
+            != {
+                "field": self.field,
+                "operator": "ge",
+                "threshold": self.threshold,
+            }
+        ):
+            raise ModelGenerationError(
+                "threshold candidate canonical proposal payload is inconsistent"
+            )
+        frozen_payload = _freeze_json(self.proposal_payload)
+        if not isinstance(frozen_payload, Mapping):
+            raise TypeError("threshold candidate proposal payload is invalid")
+        object.__setattr__(self, "proposal_payload", frozen_payload)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -674,6 +709,7 @@ class ThresholdCandidateProposal:
             "threshold": self.threshold,
             "invented_literal_id": str(self.invented_literal_id),
             "boundary_evidence_digest": self.boundary_evidence_digest,
+            "proposal_payload": _thaw_json(self.proposal_payload),
         }
 
     @classmethod
@@ -685,15 +721,17 @@ class ThresholdCandidateProposal:
             "threshold",
             "invented_literal_id",
             "boundary_evidence_digest",
+            "proposal_payload",
         }
         if (
             not isinstance(value, Mapping)
             or set(value) != expected
             or any(
                 type(value[name]) is not str
-                for name in expected - {"threshold"}
+                for name in expected - {"threshold", "proposal_payload"}
             )
             or type(value["threshold"]) not in (int, float)
+            or not isinstance(value["proposal_payload"], Mapping)
             or not value["invented_literal_id"].isdigit()
         ):
             raise ModelGenerationError("threshold candidate proposal is malformed")
@@ -705,6 +743,7 @@ class ThresholdCandidateProposal:
                 value["threshold"],
                 int(value["invented_literal_id"]),
                 value["boundary_evidence_digest"],
+                value["proposal_payload"],
             )
         except (TypeError, ValueError) as error:
             raise ModelGenerationError("threshold candidate proposal is malformed") from error

@@ -450,6 +450,130 @@ def test_multi_candidate_lifecycle_selects_before_promotion_and_recovers(
     with pytest.raises(ModelGenerationError, match="deterministic"):
         ThresholdCandidateSelection.from_dict(forged)
 
+    legacy_lineage = replace(
+        result.lineage,
+        candidate_selection_id=None,
+        schema="ptm.model-generation-lineage.v4",
+    )
+    with pytest.raises(ModelGenerationError, match="current lineage schema"):
+        result.controller.record_candidate(legacy_lineage)
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_v5_candidate_admission_replays_prolog_and_independent_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_training, corpora, _ = _fixture_corpora()
+    parent, manifest = _parent()
+    real_invent = model_generation_service.invent_threshold_candidates_for_corpus
+
+    def self_authored_candidate_set(*args, **kwargs):
+        invention = real_invent(*args, **kwargs)
+        proposal = invention.proposals[0]
+        forged_proposal = replace(
+            proposal, proposal_id=proposal.proposal_id + ":self-authored"
+        )
+        forged_review = review_threshold_proposal(
+            forged_proposal,
+            session=invention.session,
+            catalog=manifest.build_catalog(),
+        )
+        candidate = invention.evidence.candidates[0]
+        forged_candidate = replace(
+            candidate,
+            proposal_semantic_id=forged_proposal.semantic_id(),
+            proposal_provenance_id=forged_proposal.provenance_id(),
+            proposal_payload=forged_proposal.to_dict(),
+        )
+        forged_evidence = replace(
+            invention.evidence, candidates=(forged_candidate,)
+        )
+        return model_generation_service.ThresholdCandidateInvention(
+            invention.session,
+            (forged_proposal,),
+            (forged_review,),
+            forged_evidence,
+        )
+
+    monkeypatch.setattr(
+        model_generation_service,
+        "invent_threshold_candidates_for_corpus",
+        self_authored_candidate_set,
+    )
+    store = ModelGenerationStore(tmp_path / "self-authored-candidate-store")
+    with pytest.raises(ModelGenerationError, match="GNU Prolog replay"):
+        execute_trained_parent_lifecycle_with_candidates(
+            parent_snapshot=parent.snapshot(),
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=corpora,
+            numeric_fields=("temperature",),
+            candidate_budget=ThresholdCandidateBudget(
+                maximum_fields=1, maximum_candidates=1
+            ),
+            selection_policy=ThresholdCandidateSelectionPolicy(),
+            adaptation_epochs=5,
+            promotion_policy=PromotionAuditPolicy(8),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+    assert store.read_events()[-1].kind is LifecycleEventKind.EVIDENCE_ABANDONED
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_v5_candidate_admission_replays_exact_adaptation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_training, corpora, _ = _fixture_corpora()
+    parent, manifest = _parent()
+    real_adapt = model_generation_service.adapt_extended_parent
+    adaptation_calls = 0
+
+    def inject_unattested_child(extended, corpus, *, epochs):
+        nonlocal adaptation_calls
+        adaptation_calls += 1
+        child = real_adapt(extended, corpus, epochs=epochs)
+        if adaptation_calls != 1:
+            return child
+        snapshot = child.snapshot.snapshot
+        states = [list(row) for row in snapshot.states]
+        states[0][0] = states[0][0] - 1 if states[0][0] > 1 else 2
+        forged_snapshot = replace(
+            snapshot, states=tuple(tuple(row) for row in states)
+        )
+        return replace(child, snapshot=AdaptiveSnapshotEnvelope(forged_snapshot))
+
+    monkeypatch.setattr(
+        model_generation_service,
+        "adapt_extended_parent",
+        inject_unattested_child,
+    )
+    store = ModelGenerationStore(tmp_path / "unattested-adaptation-store")
+    with pytest.raises(ModelGenerationError, match="alternative graph"):
+        execute_trained_parent_lifecycle_with_candidates(
+            parent_snapshot=parent.snapshot(),
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=corpora,
+            numeric_fields=("temperature",),
+            candidate_budget=ThresholdCandidateBudget(
+                maximum_fields=1, maximum_candidates=1
+            ),
+            selection_policy=ThresholdCandidateSelectionPolicy(),
+            adaptation_epochs=5,
+            promotion_policy=PromotionAuditPolicy(8),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+    assert adaptation_calls >= 2
+    assert store.read_events()[-1].kind is LifecycleEventKind.EVIDENCE_ABANDONED
+
 
 def test_representation_extension_appends_excluded_ta_pairs_without_rng_change() -> None:
     _, _, parent, _, _, _, extended, _, _ = _candidate()
@@ -914,6 +1038,8 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
     assert result.invention_evidence.invention_corpus_digest == (
         corpora.invention.digest
     )
+    assert isinstance(result.invention_evidence, PrologInventionEvidence)
+    assert len(result.candidate_set.candidates) == 1
     assert result.promotion_audit.accepted
     assert result.promotion_audit.improvements == 4
     assert result.promotion_audit.regressions == 0
@@ -1325,6 +1451,42 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             adapted_child,
             preprocessing_contract_id=preprocessing_id,
         )
+        selected_candidate = next(
+            candidate
+            for candidate in result.candidate_set.candidates
+            if candidate.proposal_semantic_id
+            == result.lineage.origin_proposal_semantic_id
+        )
+        outcome = model_generation_service._threshold_candidate_outcome(
+            original_snapshot,
+            manifest,
+            result.extended_parent.materialized.reviewed.proposal,
+            result.extended_parent.materialized.reviewed,
+            result.extended_parent,
+            adapted_child,
+            preprocessing_id,
+            adaptation_corpus,
+        )
+        selection = ThresholdCandidateSelection(
+            candidate_set_id=result.candidate_set.candidate_set_id,
+            parent_generation_id=result.parent_generation.generation_id,
+            parent_snapshot_id=result.parent_generation.snapshot_id,
+            parent_manifest_id=result.parent_generation.literal_manifest_id,
+            adaptation_corpus_digest=adaptation_digest,
+            adaptation_epochs=adapted_child.epochs,
+            policy=ThresholdCandidateSelectionPolicy(
+                minimum_observations=len(adaptation_corpus.examples),
+                require_strict_improvement=False,
+            ),
+            outcomes=(outcome,),
+            selected_proposal_semantic_id=(
+                selected_candidate.proposal_semantic_id
+            ),
+            selected_proposal_provenance_id=(
+                selected_candidate.proposal_provenance_id
+            ),
+        )
+        store.put_threshold_candidate_selection(selection)
         preprocessing, artifact = compile_generation_artifact(
             adapted_child.snapshot.snapshot,
             adapted_child.manifest,
@@ -1344,6 +1506,10 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
                 "origin_proposal_provenance_id": (
                     result.lineage.origin_proposal_provenance_id
                 ),
+                "threshold_candidate_set_id": (
+                    result.candidate_set.candidate_set_id
+                ),
+                "threshold_candidate_selection_id": selection.selection_id,
             },
             restoration_reference=result.restoration_bundle.to_dict(),
         )
@@ -1399,24 +1565,6 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             (corpora.invention, adaptation_corpus, promotion_corpus),
         )
         store.put_evidence_usage(usage)
-        selected_candidate = next(
-            candidate
-            for candidate in result.invention_evidence.candidates
-            if candidate.proposal_semantic_id
-            == result.lineage.origin_proposal_semantic_id
-        )
-        legacy_invention_evidence = PrologInventionEvidence(
-            invention_corpus_digest=result.invention_evidence.invention_corpus_digest,
-            session_digest=result.invention_evidence.session_digest,
-            numeric_field=selected_candidate.field,
-            collective_protocol=result.invention_evidence.collective_protocol,
-            gprolog_version=result.invention_evidence.gprolog_version,
-            gprolog_binary_digest=result.invention_evidence.gprolog_binary_digest,
-            module_digests=result.invention_evidence.module_digests,
-            proposal_semantic_id=result.lineage.origin_proposal_semantic_id,
-            proposal_provenance_id=result.lineage.origin_proposal_provenance_id,
-        )
-        store.put_invention_evidence(legacy_invention_evidence)
         lineage = ModelGenerationLineage(
             parent_generation_id=result.parent_generation.generation_id,
             extended_generation_id=result.extended_generation.generation_id,
@@ -1424,7 +1572,7 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             adaptive_behavior_id=behavior.behavior_id,
             restoration_bundle_id=result.restoration_bundle.bundle_id,
             promotion_audit_id=audit.audit_id,
-            invention_evidence_id=legacy_invention_evidence.evidence_id,
+            invention_evidence_id=result.candidate_set.candidate_set_id,
             evidence_usage_id=usage.usage_id,
             activation_sequence=2,
             previous_activated_lineage_id=result.lineage.lineage_id,
@@ -1438,6 +1586,8 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             origin_proposal_provenance_id=(
                 result.lineage.origin_proposal_provenance_id
             ),
+            candidate_selection_id=selection.selection_id,
+            schema="ptm.model-generation-lineage.v5",
         )
         store.put_lineage(lineage)
         return generation, lineage, audit
