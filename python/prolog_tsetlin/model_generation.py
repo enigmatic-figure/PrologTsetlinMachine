@@ -45,6 +45,7 @@ MODEL_GENERATION_SCHEMA_VERSION = 1
 ORDERED_LITERAL_MANIFEST_SCHEMA = "ptm.ordered-literal-manifest.v1"
 ADAPTIVE_SNAPSHOT_SCHEMA = "ptm.adaptive-snapshot.v1"
 RESTORATION_BUNDLE_SCHEMA = "ptm.adaptive-restoration-bundle.v1"
+INVENTION_EVIDENCE_SCHEMA = "ptm.gnu-prolog-invention-evidence.v1"
 GENERATION_SCHEMA = "ptm.model-generation.v1"
 PROMOTION_AUDIT_SCHEMA = "ptm.promotion-audit.v1"
 LINEAGE_SCHEMA = "ptm.model-generation-lineage.v1"
@@ -194,14 +195,12 @@ class LifecycleCorpora:
     invention: LabeledCorpus
     adaptation: LabeledCorpus
     promotion: LabeledCorpus
-    live: LabeledCorpus
 
     def __post_init__(self) -> None:
         expected = (
             (self.invention, CorpusRole.INVENTION),
             (self.adaptation, CorpusRole.ADAPTATION),
             (self.promotion, CorpusRole.PROMOTION),
-            (self.live, CorpusRole.LIVE),
         )
         if any(corpus.role is not role for corpus, role in expected):
             raise ModelGenerationError("lifecycle corpus role is misplaced")
@@ -215,8 +214,7 @@ class LifecycleCorpora:
                 raise ModelGenerationError("lifecycle corpus example IDs overlap")
             seen.update(identifiers)
         # Invention, adaptation, and promotion must not reuse identical labeled
-        # rows.  Live observations may intentionally revisit covariates after
-        # a concept change, but still carry distinct example IDs.
+        # rows. Live observations are deliberately absent until post-activation.
         fingerprints: set[str] = set()
         for corpus in (self.invention, self.adaptation, self.promotion):
             current = {
@@ -237,9 +235,157 @@ class LifecycleCorpora:
                 self.invention,
                 self.adaptation,
                 self.promotion,
-                self.live,
             )
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PrologInventionEvidence:
+    invention_corpus_digest: str
+    session_digest: str
+    numeric_field: str
+    collective_protocol: str
+    gprolog_version: str
+    gprolog_binary_digest: str
+    module_digests: tuple[tuple[str, str], ...]
+    proposal_semantic_id: str
+    proposal_provenance_id: str
+    schema: str = INVENTION_EVIDENCE_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != INVENTION_EVIDENCE_SCHEMA:
+            raise ModelGenerationError("GNU Prolog invention evidence schema is unsupported")
+        for label, value in (
+            ("invention corpus", self.invention_corpus_digest),
+            ("reasoning session", self.session_digest),
+            ("GNU Prolog executable", self.gprolog_binary_digest),
+            ("proposal semantic", self.proposal_semantic_id),
+            ("proposal provenance", self.proposal_provenance_id),
+        ):
+            _require_digest(value, label)
+        if type(self.numeric_field) is not str or not self.numeric_field:
+            raise ModelGenerationError("invention evidence numeric field is invalid")
+        if self.collective_protocol != "PTM_PTA_COLLECTIVE_V1":
+            raise ModelGenerationError("invention evidence collective protocol is unsupported")
+        if (
+            type(self.gprolog_version) is not str
+            or not self.gprolog_version
+            or len(self.gprolog_version) > 1_024
+            or any(ord(character) < 0x20 for character in self.gprolog_version)
+        ):
+            raise ModelGenerationError("GNU Prolog version evidence is invalid")
+        if (
+            type(self.module_digests) is not tuple
+            or not self.module_digests
+            or tuple(sorted(self.module_digests)) != self.module_digests
+            or len({name for name, _ in self.module_digests})
+            != len(self.module_digests)
+        ):
+            raise ModelGenerationError("Prolog module evidence is not canonical")
+        for name, digest in self.module_digests:
+            if type(name) is not str or not name:
+                raise ModelGenerationError("Prolog module name is invalid")
+            _require_digest(digest, f"{name} module")
+
+    @property
+    def query(self) -> Mapping[str, object]:
+        return MappingProxyType(
+            {
+                "numeric_fields": (self.numeric_field,),
+                "discover_thresholds": True,
+                "discover_intervals": False,
+                "derive_deescalation": False,
+                "derive_escalation": True,
+            }
+        )
+
+    @property
+    def evidence_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "invention_corpus_digest": self.invention_corpus_digest,
+            "session_digest": self.session_digest,
+            "query": _thaw_json(self.query),
+            "collective_protocol": self.collective_protocol,
+            "gprolog_version": self.gprolog_version,
+            "gprolog_binary_digest": self.gprolog_binary_digest,
+            "module_digests": [list(item) for item in self.module_digests],
+            "proposal_semantic_id": self.proposal_semantic_id,
+            "proposal_provenance_id": self.proposal_provenance_id,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        result = self.canonical_payload()
+        result["evidence_id"] = self.evidence_id
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "PrologInventionEvidence":
+        expected = {
+            "schema",
+            "invention_corpus_digest",
+            "session_digest",
+            "query",
+            "collective_protocol",
+            "gprolog_version",
+            "gprolog_binary_digest",
+            "module_digests",
+            "proposal_semantic_id",
+            "proposal_provenance_id",
+            "evidence_id",
+        }
+        string_fields = expected - {"query", "module_digests"}
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected
+            or any(type(value[key]) is not str for key in string_fields)
+            or not isinstance(value["query"], Mapping)
+            or not isinstance(value["module_digests"], list)
+            or any(
+                not isinstance(item, list)
+                or len(item) != 2
+                or any(type(part) is not str for part in item)
+                for item in value["module_digests"]
+            )
+        ):
+            raise ModelGenerationError("GNU Prolog invention evidence is malformed")
+        query = value["query"]
+        if (
+            set(query)
+            != {
+                "numeric_fields",
+                "discover_thresholds",
+                "discover_intervals",
+                "derive_deescalation",
+                "derive_escalation",
+            }
+            or not isinstance(query["numeric_fields"], list)
+            or len(query["numeric_fields"]) != 1
+            or type(query["numeric_fields"][0]) is not str
+            or query["discover_thresholds"] is not True
+            or query["discover_intervals"] is not False
+            or query["derive_deescalation"] is not False
+            or query["derive_escalation"] is not True
+        ):
+            raise ModelGenerationError("GNU Prolog invention query is malformed")
+        result = cls(
+            invention_corpus_digest=value["invention_corpus_digest"],
+            session_digest=value["session_digest"],
+            numeric_field=query["numeric_fields"][0],
+            collective_protocol=value["collective_protocol"],
+            gprolog_version=value["gprolog_version"],
+            gprolog_binary_digest=value["gprolog_binary_digest"],
+            module_digests=tuple(tuple(item) for item in value["module_digests"]),
+            proposal_semantic_id=value["proposal_semantic_id"],
+            proposal_provenance_id=value["proposal_provenance_id"],
+            schema=value["schema"],
+        )
+        if result.evidence_id != value["evidence_id"]:
+            raise ModelGenerationError("GNU Prolog invention evidence digest mismatch")
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -1319,6 +1465,7 @@ class ModelGenerationLineage:
     child_generation_id: str
     restoration_bundle_id: str
     promotion_audit_id: str
+    invention_evidence_id: str
     invented_literal_id: int
     invention_corpus_digest: str
     adaptation_corpus_digest: str
@@ -1336,6 +1483,7 @@ class ModelGenerationLineage:
             ("child generation", self.child_generation_id),
             ("restoration bundle", self.restoration_bundle_id),
             ("promotion audit", self.promotion_audit_id),
+            ("invention evidence", self.invention_evidence_id),
             ("invention corpus", self.invention_corpus_digest),
             ("adaptation corpus", self.adaptation_corpus_digest),
             ("promotion corpus", self.promotion_corpus_digest),
@@ -1358,6 +1506,7 @@ class ModelGenerationLineage:
             "child_generation_id": self.child_generation_id,
             "restoration_bundle_id": self.restoration_bundle_id,
             "promotion_audit_id": self.promotion_audit_id,
+            "invention_evidence_id": self.invention_evidence_id,
             "invented_literal_id": str(self.invented_literal_id),
             "invention_corpus_digest": self.invention_corpus_digest,
             "adaptation_corpus_digest": self.adaptation_corpus_digest,
@@ -1380,6 +1529,7 @@ class ModelGenerationLineage:
             "child_generation_id",
             "restoration_bundle_id",
             "promotion_audit_id",
+            "invention_evidence_id",
             "invented_literal_id",
             "invention_corpus_digest",
             "adaptation_corpus_digest",
@@ -1404,6 +1554,7 @@ class ModelGenerationLineage:
                 child_generation_id=value["child_generation_id"],
                 restoration_bundle_id=value["restoration_bundle_id"],
                 promotion_audit_id=value["promotion_audit_id"],
+                invention_evidence_id=value["invention_evidence_id"],
                 invented_literal_id=int(raw_literal_id),
                 invention_corpus_digest=value["invention_corpus_digest"],
                 adaptation_corpus_digest=value["adaptation_corpus_digest"],

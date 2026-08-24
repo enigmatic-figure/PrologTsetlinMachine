@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from ..model_generation import (
     OrderedLiteralManifest,
     PromotionAuditPolicy,
     PromotionAuditSnapshot,
+    PrologInventionEvidence,
     RuntimeConformanceReport,
     adapt_extended_parent,
     audit_parent_child,
@@ -40,6 +42,7 @@ from ..model_generation import (
     preprocessing_contract_id,
 )
 from ..preprocessing import PreprocessingContract
+from ..prolog_resources import prolog_process_environment
 from ..pta import (
     PTACollectiveQuery,
     PTACollectiveService,
@@ -56,6 +59,54 @@ from .telemetry import TelemetryEvent, TelemetrySession
 _EVENT_ANCHOR = "sha256:" + "0" * 64
 _MAX_EVENT_LOG_BYTES = 16 * 1024 * 1024
 _MAX_STORED_JSON_BYTES = 4 * 1024 * 1024
+_MAX_ATTESTED_EXECUTABLE_BYTES = 128 * 1024 * 1024
+_STORE_LOCKS_GUARD = RLock()
+_STORE_EVENT_LOCKS: dict[Path, RLock] = {}
+
+
+def _event_lock_for_root(root: Path) -> RLock:
+    with _STORE_LOCKS_GUARD:
+        return _STORE_EVENT_LOCKS.setdefault(root, RLock())
+
+
+def _file_digest(path: Path, *, maximum_bytes: int | None = None) -> str:
+    size = path.stat().st_size
+    if maximum_bytes is not None and size > maximum_bytes:
+        raise ModelGenerationError("attested executable exceeds its size bound")
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _gprolog_version(executable: Path) -> str:
+    completed = subprocess.run(
+        [str(executable), "--version"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10.0,
+        check=False,
+        env=prolog_process_environment(),
+        creationflags=(
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        ),
+    )
+    first_line = next(
+        (
+            line.strip()
+            for line in (completed.stdout + "\n" + completed.stderr).splitlines()
+            if line.strip()
+        ),
+        "",
+    )
+    if completed.returncode != 0 or not first_line:
+        raise ModelGenerationError("GNU Prolog version attestation failed")
+    return first_line
 
 
 def _content_path(root: Path, namespace: str, identifier: str, suffix: str) -> Path:
@@ -183,7 +234,7 @@ class ModelGenerationStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self._event_lock = RLock()
+        self._event_lock = _event_lock_for_root(self.root)
 
     def _put_bytes(
         self,
@@ -234,22 +285,35 @@ class ModelGenerationStore:
         return self._put_json("snapshots", value.snapshot_id, value.to_dict())
 
     def load_snapshot(self, identifier: str) -> AdaptiveSnapshotEnvelope:
-        return AdaptiveSnapshotEnvelope.from_dict(self._read_json("snapshots", identifier))
+        result = AdaptiveSnapshotEnvelope.from_dict(
+            self._read_json("snapshots", identifier)
+        )
+        if result.snapshot_id != identifier:
+            raise ModelGenerationError("snapshot content does not match its address")
+        return result
 
     def put_manifest(self, value: OrderedLiteralManifest) -> Path:
         return self._put_json("literal-manifests", value.manifest_id, value.to_dict())
 
     def load_manifest(self, identifier: str) -> OrderedLiteralManifest:
-        return OrderedLiteralManifest.from_dict(
+        result = OrderedLiteralManifest.from_dict(
             self._read_json("literal-manifests", identifier)
         )
+        if result.manifest_id != identifier:
+            raise ModelGenerationError("literal manifest does not match its address")
+        return result
 
     def put_preprocessing(self, value: PreprocessingContract) -> tuple[str, Path]:
         identifier = preprocessing_contract_id(value)
         return identifier, self._put_json("preprocessing", identifier, value.to_dict())
 
     def load_preprocessing(self, identifier: str) -> PreprocessingContract:
-        return PreprocessingContract.from_dict(self._read_json("preprocessing", identifier))
+        result = PreprocessingContract.from_dict(
+            self._read_json("preprocessing", identifier)
+        )
+        if preprocessing_contract_id(result) != identifier:
+            raise ModelGenerationError("preprocessing contract does not match its address")
+        return result
 
     def put_artifact(self, value: PackedTMInferenceArtifact) -> Path:
         if not value.verify_conformance():
@@ -273,27 +337,54 @@ class ModelGenerationStore:
         return self._put_json("generations", value.generation_id, value.to_dict())
 
     def load_generation(self, identifier: str) -> ModelGeneration:
-        return ModelGeneration.from_dict(self._read_json("generations", identifier))
+        result = ModelGeneration.from_dict(self._read_json("generations", identifier))
+        if result.generation_id != identifier:
+            raise ModelGenerationError("model generation does not match its address")
+        return result
 
     def put_restoration_bundle(self, value: AdaptiveRestorationBundle) -> Path:
         return self._put_json("restoration-bundles", value.bundle_id, value.to_dict())
 
     def load_restoration_bundle(self, identifier: str) -> AdaptiveRestorationBundle:
-        return AdaptiveRestorationBundle.from_dict(
+        result = AdaptiveRestorationBundle.from_dict(
             self._read_json("restoration-bundles", identifier)
         )
+        if result.bundle_id != identifier:
+            raise ModelGenerationError("restoration bundle does not match its address")
+        return result
+
+    def put_invention_evidence(self, value: PrologInventionEvidence) -> Path:
+        return self._put_json("invention-evidence", value.evidence_id, value.to_dict())
+
+    def load_invention_evidence(self, identifier: str) -> PrologInventionEvidence:
+        result = PrologInventionEvidence.from_dict(
+            self._read_json("invention-evidence", identifier)
+        )
+        if result.evidence_id != identifier:
+            raise ModelGenerationError("invention evidence does not match its address")
+        return result
 
     def put_audit(self, value: PromotionAuditSnapshot) -> Path:
         return self._put_json("audits", value.audit_id, value.to_dict())
 
     def load_audit(self, identifier: str) -> PromotionAuditSnapshot:
-        return PromotionAuditSnapshot.from_dict(self._read_json("audits", identifier))
+        result = PromotionAuditSnapshot.from_dict(
+            self._read_json("audits", identifier)
+        )
+        if result.audit_id != identifier:
+            raise ModelGenerationError("promotion audit does not match its address")
+        return result
 
     def put_lineage(self, value: ModelGenerationLineage) -> Path:
         return self._put_json("lineage", value.lineage_id, value.to_dict())
 
     def load_lineage(self, identifier: str) -> ModelGenerationLineage:
-        return ModelGenerationLineage.from_dict(self._read_json("lineage", identifier))
+        result = ModelGenerationLineage.from_dict(
+            self._read_json("lineage", identifier)
+        )
+        if result.lineage_id != identifier:
+            raise ModelGenerationError("model-generation lineage does not match its address")
+        return result
 
     @property
     def event_log_path(self) -> Path:
@@ -393,6 +484,7 @@ class ModelGenerationController:
         self.event_sink = event_sink
         self._control_lock = RLock()
         self._active_generation_id = store.recover_active_generation()
+        self._validate_recovered_state()
 
     @property
     def active_generation_id(self) -> str | None:
@@ -406,12 +498,220 @@ class ModelGenerationController:
         if self.event_sink is not None:
             self.event_sink(event)
 
+    def _validate_lineage_graph(
+        self, lineage: ModelGenerationLineage
+    ) -> tuple[
+        ModelGeneration,
+        ModelGeneration,
+        ModelGeneration,
+        AdaptiveRestorationBundle,
+        PromotionAuditSnapshot,
+        PrologInventionEvidence,
+    ]:
+        if self.store.load_lineage(lineage.lineage_id) != lineage:
+            raise ModelGenerationError("lineage differs from its durable object")
+        parent = self.store.load_generation(lineage.parent_generation_id)
+        extended = self.store.load_generation(lineage.extended_generation_id)
+        child = self.store.load_generation(lineage.child_generation_id)
+        bundle = self.store.load_restoration_bundle(lineage.restoration_bundle_id)
+        audit = self.store.load_audit(lineage.promotion_audit_id)
+        evidence = self.store.load_invention_evidence(lineage.invention_evidence_id)
+        parent_manifest = self.store.load_manifest(parent.literal_manifest_id)
+        extended_manifest = self.store.load_manifest(extended.literal_manifest_id)
+        child_manifest = self.store.load_manifest(child.literal_manifest_id)
+        parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
+        extended_snapshot = self.store.load_snapshot(extended.snapshot_id).snapshot
+        child_snapshot = self.store.load_snapshot(child.snapshot_id).snapshot
+        invention_digests = ((CorpusRole.INVENTION.value, lineage.invention_corpus_digest),)
+        child_digests = (
+            (CorpusRole.INVENTION.value, lineage.invention_corpus_digest),
+            (CorpusRole.ADAPTATION.value, lineage.adaptation_corpus_digest),
+            (CorpusRole.PROMOTION.value, lineage.promotion_corpus_digest),
+        )
+        if (
+            parent.kind is not GenerationKind.TRAINED_PARENT
+            or extended.kind is not GenerationKind.EXTENDED_PARENT
+            or child.kind is not GenerationKind.ADAPTED_CHILD
+            or extended.parent_generation_id != parent.generation_id
+            or child.parent_generation_id != extended.generation_id
+            or extended.restoration_bundle_id != bundle.bundle_id
+            or child.restoration_bundle_id != bundle.bundle_id
+            or bundle.parent_generation_id != parent.generation_id
+            or extended.corpus_digests != invention_digests
+            or child.corpus_digests != child_digests
+            or extended.origin_proposal_semantic_id
+            != lineage.origin_proposal_semantic_id
+            or extended.origin_proposal_provenance_id
+            != lineage.origin_proposal_provenance_id
+            or child.origin_proposal_semantic_id
+            != lineage.origin_proposal_semantic_id
+            or child.origin_proposal_provenance_id
+            != lineage.origin_proposal_provenance_id
+            or evidence.invention_corpus_digest != lineage.invention_corpus_digest
+            or evidence.proposal_semantic_id != lineage.origin_proposal_semantic_id
+            or evidence.proposal_provenance_id != lineage.origin_proposal_provenance_id
+            or audit.corpus_role is not CorpusRole.PROMOTION
+            or audit.corpus_digest != lineage.promotion_corpus_digest
+            or audit.conformance.artifact_id != child.inference_artifact_id
+        ):
+            raise ModelGenerationError("lineage object graph is inconsistent")
+        if (
+            len(extended_manifest.literals) != len(parent_manifest.literals) + 1
+            or extended_manifest.literals[:-1] != parent_manifest.literals
+            or extended_manifest.literals[-1].literal_id != lineage.invented_literal_id
+            or child_manifest != extended_manifest
+            or extended_snapshot.number_of_features
+            != parent_snapshot.number_of_features + 1
+            or extended_snapshot.number_of_clauses
+            != parent_snapshot.number_of_clauses
+            or extended_snapshot.states_per_action
+            != parent_snapshot.states_per_action
+            or extended_snapshot.specificity != parent_snapshot.specificity
+            or extended_snapshot.threshold != parent_snapshot.threshold
+            or extended_snapshot.rng_state != parent_snapshot.rng_state
+            or child_snapshot.number_of_features != len(child_manifest.literals)
+            or child_snapshot.number_of_clauses
+            != extended_snapshot.number_of_clauses
+            or child_snapshot.states_per_action
+            != extended_snapshot.states_per_action
+            or child_snapshot.specificity != extended_snapshot.specificity
+            or child_snapshot.threshold != extended_snapshot.threshold
+        ):
+            raise ModelGenerationError("lineage representation extension is inconsistent")
+        for old_states, new_states in zip(
+            parent_snapshot.states, extended_snapshot.states
+        ):
+            if new_states[:-2] != old_states or new_states[-2:] != (
+                parent_snapshot.states_per_action,
+                parent_snapshot.states_per_action,
+            ):
+                raise ModelGenerationError("lineage P+ snapshot is not an exact extension")
+        parent_digests = dict(parent.corpus_digests)
+        if (
+            parent.snapshot_id != bundle.adaptive_snapshot_id
+            or parent.literal_manifest_id != bundle.ordered_literal_manifest_id
+            or parent.preprocessing_contract_id != bundle.preprocessing_contract_id
+            or parent.inference_artifact_id != bundle.deployed_parent_artifact_id
+            or parent_digests.get(CorpusRole.PARENT_TRAINING.value)
+            != bundle.parent_training_corpus_digest
+            or len(parent_digests) != 1
+        ):
+            raise ModelGenerationError("lineage restoration bundle is inconsistent")
+        for generation, manifest in (
+            (parent, parent_manifest),
+            (extended, extended_manifest),
+            (child, child_manifest),
+        ):
+            preprocessing = self.store.load_preprocessing(
+                generation.preprocessing_contract_id
+            )
+            if tuple(preprocessing.literal_ids) != manifest.literal_ids:
+                raise ModelGenerationError(
+                    "generation preprocessing differs from its literal manifest"
+                )
+        return parent, extended, child, bundle, audit, evidence
+
+    def _validate_recovered_state(self) -> None:
+        if self._active_generation_id is None:
+            return
+        generation = self.store.load_generation(self._active_generation_id)
+        events = self.store.read_events()
+        route = next(
+            (
+                event
+                for event in reversed(events)
+                if event.kind
+                in (
+                    LifecycleEventKind.PARENT_REGISTERED,
+                    LifecycleEventKind.ACTIVATED,
+                    LifecycleEventKind.PARENT_RESTORED,
+                )
+            ),
+            None,
+        )
+        if route is None or route.generation_id != generation.generation_id:
+            raise ModelGenerationError("durable active-generation route is inconsistent")
+        if generation.kind is GenerationKind.ADAPTED_CHILD:
+            lineage_id = route.details.get("lineage_id")
+            if route.kind is not LifecycleEventKind.ACTIVATED or type(lineage_id) is not str:
+                raise ModelGenerationError("recovered child lacks its activation lineage")
+            lineage = self.store.load_lineage(lineage_id)
+            self._validate_lineage_graph(lineage)
+        elif generation.kind is not GenerationKind.TRAINED_PARENT:
+            raise ModelGenerationError("durable routing targets a non-deployable generation")
+        elif route.kind is LifecycleEventKind.PARENT_RESTORED:
+            bundle_id = route.details.get("restoration_bundle_id")
+            if type(bundle_id) is not str:
+                raise ModelGenerationError("recovered parent lacks its restoration bundle")
+            bundle = self.store.load_restoration_bundle(bundle_id)
+            if bundle.parent_generation_id != generation.generation_id:
+                raise ModelGenerationError("recovered parent route names a different bundle")
+            self._resolve_restoration_bundle(bundle)
+
+    def _resolve_restoration_bundle(
+        self, bundle: AdaptiveRestorationBundle
+    ) -> RestoredAdaptiveParent:
+        stored_bundle = self.store.load_restoration_bundle(bundle.bundle_id)
+        if stored_bundle != bundle:
+            raise ModelGenerationError("restoration bundle changed after publication")
+        parent = self.store.load_generation(bundle.parent_generation_id)
+        if parent.kind is not GenerationKind.TRAINED_PARENT:
+            raise ModelGenerationError("restoration target is not a trained parent")
+        parent_corpora = dict(parent.corpus_digests)
+        if (
+            len(parent_corpora) != 1
+            or parent.snapshot_id != bundle.adaptive_snapshot_id
+            or parent.literal_manifest_id != bundle.ordered_literal_manifest_id
+            or parent.preprocessing_contract_id != bundle.preprocessing_contract_id
+            or parent.inference_artifact_id != bundle.deployed_parent_artifact_id
+            or parent_corpora.get(CorpusRole.PARENT_TRAINING.value)
+            != bundle.parent_training_corpus_digest
+        ):
+            raise ModelGenerationError("restoration bundle differs from its parent generation")
+        snapshot = self.store.load_snapshot(bundle.adaptive_snapshot_id)
+        manifest = self.store.load_manifest(bundle.ordered_literal_manifest_id)
+        preprocessing = self.store.load_preprocessing(bundle.preprocessing_contract_id)
+        artifact = self.store.load_artifact(bundle.deployed_parent_artifact_id)
+        if snapshot.snapshot.number_of_features != len(manifest.literals):
+            raise ModelGenerationError("restoration snapshot and manifest widths differ")
+        if tuple(preprocessing.literal_ids) != manifest.literal_ids:
+            raise ModelGenerationError("restoration preprocessing order differs from manifest")
+        validation = artifact.manifest.get("validation")
+        signature = validation.get("signature") if isinstance(validation, Mapping) else None
+        if not isinstance(signature, Mapping) or (
+            signature.get("adaptive_snapshot_id") != bundle.adaptive_snapshot_id
+            or signature.get("ordered_literal_manifest_id")
+            != bundle.ordered_literal_manifest_id
+            or signature.get("training_corpus_digest")
+            != bundle.parent_training_corpus_digest
+        ):
+            raise ModelGenerationError("parent artifact is not bound to the restoration state")
+        machine = ScalarBinaryTsetlinMachine(
+            snapshot.snapshot.number_of_clauses,
+            snapshot.snapshot.number_of_features,
+            states_per_action=snapshot.snapshot.states_per_action,
+            specificity=snapshot.snapshot.specificity,
+            threshold=snapshot.snapshot.threshold,
+            seed=0,
+        )
+        machine.restore(snapshot.snapshot)
+        return RestoredAdaptiveParent(
+            bundle.parent_generation_id,
+            snapshot,
+            manifest,
+            preprocessing,
+            artifact,
+            machine,
+        )
+
     def register_parent(self, generation: ModelGeneration) -> None:
         if generation.kind is not GenerationKind.TRAINED_PARENT:
             raise ModelGenerationError("initial active generation must be a trained parent")
         if self.store.load_generation(generation.generation_id) != generation:
             raise ModelGenerationError("trained parent differs from durable generation")
         with self._control_lock:
+            if self._active_generation_id is not None or self.store.read_events():
+                raise ModelGenerationError("a trained parent is already registered")
             self._active_generation_id = generation.generation_id
             try:
                 self.store.append_event(
@@ -423,32 +723,15 @@ class ModelGenerationController:
         self._emit("parent_registered", generation_id=generation.generation_id)
 
     def record_candidate(self, lineage: ModelGenerationLineage) -> None:
-        if self.store.load_lineage(lineage.lineage_id) != lineage:
-            raise ModelGenerationError("candidate lineage differs from durable lineage")
-        parent = self.store.load_generation(lineage.parent_generation_id)
-        extended = self.store.load_generation(lineage.extended_generation_id)
-        child = self.store.load_generation(lineage.child_generation_id)
-        if (
-            parent.kind is not GenerationKind.TRAINED_PARENT
-            or extended.kind is not GenerationKind.EXTENDED_PARENT
-            or child.kind is not GenerationKind.ADAPTED_CHILD
-            or extended.parent_generation_id != parent.generation_id
-            or child.parent_generation_id != extended.generation_id
-            or extended.restoration_bundle_id != lineage.restoration_bundle_id
-            or child.restoration_bundle_id != lineage.restoration_bundle_id
-            or child.origin_proposal_semantic_id
-            != lineage.origin_proposal_semantic_id
-            or child.origin_proposal_provenance_id
-            != lineage.origin_proposal_provenance_id
-        ):
-            raise ModelGenerationError("candidate generation chain is inconsistent")
-        self.store.append_event(
-            LifecycleEventKind.CANDIDATE_CREATED,
-            lineage.child_generation_id,
-            lineage_id=lineage.lineage_id,
-            parent_generation_id=lineage.parent_generation_id,
-            extended_generation_id=lineage.extended_generation_id,
-        )
+        with self._control_lock:
+            self._validate_lineage_graph(lineage)
+            self.store.append_event(
+                LifecycleEventKind.CANDIDATE_CREATED,
+                lineage.child_generation_id,
+                lineage_id=lineage.lineage_id,
+                parent_generation_id=lineage.parent_generation_id,
+                extended_generation_id=lineage.extended_generation_id,
+            )
         self._emit(
             "proposal_created",
             generation_id=lineage.child_generation_id,
@@ -458,15 +741,18 @@ class ModelGenerationController:
     def reject_candidate(
         self, generation_id: str, audit: PromotionAuditSnapshot
     ) -> None:
-        self.store.append_event(
-            LifecycleEventKind.CANDIDATE_REJECTED,
-            generation_id,
-            audit_id=audit.audit_id,
-            parent_errors=audit.parent_errors,
-            child_errors=audit.child_errors,
-            improvements=audit.improvements,
-            regressions=audit.regressions,
-        )
+        with self._control_lock:
+            if self.store.load_audit(audit.audit_id) != audit:
+                raise ModelGenerationError("rejection audit differs from durable evidence")
+            self.store.append_event(
+                LifecycleEventKind.CANDIDATE_REJECTED,
+                generation_id,
+                audit_id=audit.audit_id,
+                parent_errors=audit.parent_errors,
+                child_errors=audit.child_errors,
+                improvements=audit.improvements,
+                regressions=audit.regressions,
+            )
         self._emit(
             "proposal_rejected",
             generation_id=generation_id,
@@ -480,19 +766,16 @@ class ModelGenerationController:
             raise ModelGenerationError("only an accepted exact audit may approve promotion")
         if lineage.promotion_audit_id != audit.audit_id:
             raise ModelGenerationError("lineage references a different promotion audit")
-        if self.store.load_lineage(lineage.lineage_id) != lineage:
-            raise ModelGenerationError("promotion lineage differs from durable lineage")
-        if self.store.load_audit(audit.audit_id) != audit:
-            raise ModelGenerationError("promotion audit differs from durable audit")
-        child = self.store.load_generation(lineage.child_generation_id)
-        if child.inference_artifact_id != audit.conformance.artifact_id:
-            raise ModelGenerationError("promotion audit verified a different child artifact")
-        self.store.append_event(
-            LifecycleEventKind.PROMOTION_APPROVED,
-            lineage.child_generation_id,
-            lineage_id=lineage.lineage_id,
-            audit_id=audit.audit_id,
-        )
+        with self._control_lock:
+            *_, stored_audit, _ = self._validate_lineage_graph(lineage)
+            if stored_audit != audit:
+                raise ModelGenerationError("promotion audit differs from durable audit")
+            self.store.append_event(
+                LifecycleEventKind.PROMOTION_APPROVED,
+                lineage.child_generation_id,
+                lineage_id=lineage.lineage_id,
+                audit_id=audit.audit_id,
+            )
         self._emit(
             "shadow_completed",
             generation_id=lineage.child_generation_id,
@@ -505,28 +788,19 @@ class ModelGenerationController:
     ) -> None:
         if not audit.accepted or lineage.promotion_audit_id != audit.audit_id:
             raise ModelGenerationError("child activation lacks an accepted promotion audit")
-        if self.store.load_lineage(lineage.lineage_id) != lineage:
-            raise ModelGenerationError("activation lineage differs from durable lineage")
-        if self.store.load_audit(audit.audit_id) != audit:
-            raise ModelGenerationError("activation audit differs from durable audit")
-        child = self.store.load_generation(lineage.child_generation_id)
-        bundle = self.store.load_restoration_bundle(lineage.restoration_bundle_id)
-        if (
-            child.inference_artifact_id != audit.conformance.artifact_id
-            or child.restoration_bundle_id != bundle.bundle_id
-            or bundle.parent_generation_id != lineage.parent_generation_id
-        ):
-            raise ModelGenerationError("activation objects do not form one generation chain")
-        events = self.store.read_events()
-        if (
-            not events
-            or events[-1].kind is not LifecycleEventKind.PROMOTION_APPROVED
-            or events[-1].generation_id != lineage.child_generation_id
-            or events[-1].details.get("lineage_id") != lineage.lineage_id
-            or events[-1].details.get("audit_id") != audit.audit_id
-        ):
-            raise ModelGenerationError("activation lacks the durable promotion decision")
         with self._control_lock:
+            *_, stored_audit, _ = self._validate_lineage_graph(lineage)
+            if stored_audit != audit:
+                raise ModelGenerationError("activation audit differs from durable audit")
+            events = self.store.read_events()
+            if (
+                not events
+                or events[-1].kind is not LifecycleEventKind.PROMOTION_APPROVED
+                or events[-1].generation_id != lineage.child_generation_id
+                or events[-1].details.get("lineage_id") != lineage.lineage_id
+                or events[-1].details.get("audit_id") != audit.audit_id
+            ):
+                raise ModelGenerationError("activation lacks the durable promotion decision")
             previous = self._active_generation_id
             if previous != lineage.parent_generation_id:
                 raise ModelGenerationError("active generation is not the lineage parent")
@@ -552,17 +826,39 @@ class ModelGenerationController:
     def request_reopen(
         self, child_generation_id: str, drift: PromotionAuditSnapshot
     ) -> None:
-        if self.active_generation_id != child_generation_id:
-            raise ModelGenerationError("reopen target is not the active generation")
-        if not drift_requires_reopen(drift):
-            raise ModelGenerationError("labeled drift does not justify reopen")
-        self.store.append_event(
-            LifecycleEventKind.REOPEN_REQUESTED,
-            child_generation_id,
-            drift_audit_id=drift.audit_id,
-            parent_errors=drift.parent_errors,
-            child_errors=drift.child_errors,
-        )
+        with self._control_lock:
+            if self._active_generation_id != child_generation_id:
+                raise ModelGenerationError("reopen target is not the active generation")
+            if self.store.load_audit(drift.audit_id) != drift:
+                raise ModelGenerationError("drift audit differs from durable evidence")
+            if not drift.conformance.exact or not drift_requires_reopen(drift):
+                raise ModelGenerationError("labeled drift does not justify reopen")
+            events = self.store.read_events()
+            if (
+                not events
+                or events[-1].kind is not LifecycleEventKind.ACTIVATED
+                or events[-1].generation_id != child_generation_id
+            ):
+                raise ModelGenerationError("reopen lacks the active child's durable activation")
+            lineage_id = events[-1].details.get("lineage_id")
+            if type(lineage_id) is not str:
+                raise ModelGenerationError("active child lacks durable lineage")
+            lineage = self.store.load_lineage(lineage_id)
+            _, _, child, bundle, _, _ = self._validate_lineage_graph(lineage)
+            if (
+                child.generation_id != child_generation_id
+                or child.inference_artifact_id != drift.conformance.artifact_id
+            ):
+                raise ModelGenerationError("drift audit is not tied to the active child")
+            self.store.append_event(
+                LifecycleEventKind.REOPEN_REQUESTED,
+                child_generation_id,
+                drift_audit_id=drift.audit_id,
+                lineage_id=lineage.lineage_id,
+                restoration_bundle_id=bundle.bundle_id,
+                parent_errors=drift.parent_errors,
+                child_errors=drift.child_errors,
+            )
         self._emit(
             "reopen_requested",
             generation_id=child_generation_id,
@@ -572,41 +868,42 @@ class ModelGenerationController:
     def restore_parent(
         self, bundle: AdaptiveRestorationBundle
     ) -> RestoredAdaptiveParent:
-        stored_bundle = self.store.load_restoration_bundle(bundle.bundle_id)
-        if stored_bundle != bundle:
-            raise ModelGenerationError("restoration bundle changed after publication")
-        snapshot = self.store.load_snapshot(bundle.adaptive_snapshot_id)
-        manifest = self.store.load_manifest(bundle.ordered_literal_manifest_id)
-        preprocessing = self.store.load_preprocessing(bundle.preprocessing_contract_id)
-        artifact = self.store.load_artifact(bundle.deployed_parent_artifact_id)
-        if snapshot.snapshot.number_of_features != len(manifest.literals):
-            raise ModelGenerationError("restoration snapshot and manifest widths differ")
-        if tuple(preprocessing.literal_ids) != manifest.literal_ids:
-            raise ModelGenerationError("restoration preprocessing order differs from manifest")
-        validation = artifact.manifest.get("validation")
-        signature = validation.get("signature") if isinstance(validation, Mapping) else None
-        if not isinstance(signature, Mapping) or (
-            signature.get("adaptive_snapshot_id") != bundle.adaptive_snapshot_id
-            or signature.get("ordered_literal_manifest_id")
-            != bundle.ordered_literal_manifest_id
-        ):
-            raise ModelGenerationError("parent artifact is not bound to the restoration state")
-        machine = ScalarBinaryTsetlinMachine(
-            snapshot.snapshot.number_of_clauses,
-            snapshot.snapshot.number_of_features,
-            states_per_action=snapshot.snapshot.states_per_action,
-            specificity=snapshot.snapshot.specificity,
-            threshold=snapshot.snapshot.threshold,
-            seed=0,
-        )
-        machine.restore(snapshot.snapshot)
         with self._control_lock:
+            active_child_id = self._active_generation_id
+            if active_child_id is None:
+                raise ModelGenerationError("restoration requires an active child")
+            events = self.store.read_events()
+            if (
+                not events
+                or events[-1].kind is not LifecycleEventKind.REOPEN_REQUESTED
+                or events[-1].generation_id != active_child_id
+                or events[-1].details.get("restoration_bundle_id") != bundle.bundle_id
+            ):
+                raise ModelGenerationError("restoration lacks a matching reopen request")
+            drift_id = events[-1].details.get("drift_audit_id")
+            lineage_id = events[-1].details.get("lineage_id")
+            if type(drift_id) is not str or type(lineage_id) is not str:
+                raise ModelGenerationError("reopen request lacks durable evidence")
+            drift = self.store.load_audit(drift_id)
+            lineage = self.store.load_lineage(lineage_id)
+            _, _, child, graph_bundle, _, _ = self._validate_lineage_graph(lineage)
+            if (
+                child.generation_id != active_child_id
+                or graph_bundle != bundle
+                or not drift_requires_reopen(drift)
+                or drift.conformance.artifact_id != child.inference_artifact_id
+            ):
+                raise ModelGenerationError("reopen evidence does not authorize restoration")
+            restored = self._resolve_restoration_bundle(bundle)
             self._active_generation_id = bundle.parent_generation_id
             try:
                 self.store.append_event(
                     LifecycleEventKind.PARENT_RESTORED,
                     bundle.parent_generation_id,
                     restoration_bundle_id=bundle.bundle_id,
+                    previous_generation_id=active_child_id,
+                    lineage_id=lineage.lineage_id,
+                    drift_audit_id=drift.audit_id,
                 )
             except Exception:
                 self._active_generation_id = self.store.recover_active_generation()
@@ -616,14 +913,7 @@ class ModelGenerationController:
             generation_id=bundle.parent_generation_id,
             restoration_bundle_id=bundle.bundle_id,
         )
-        return RestoredAdaptiveParent(
-            bundle.parent_generation_id,
-            snapshot,
-            manifest,
-            preprocessing,
-            artifact,
-            machine,
-        )
+        return restored
 
 
 def compile_generation_artifact(
@@ -670,8 +960,12 @@ def invent_threshold_for_corpus(
     parent_manifest: OrderedLiteralManifest,
     *,
     numeric_field: str,
-    collective: PTACollectiveService | None = None,
-) -> tuple[PTAReasoningSession, PTAEscalationProposal, ReviewedThresholdProposal]:
+) -> tuple[
+    PTAReasoningSession,
+    PTAEscalationProposal,
+    ReviewedThresholdProposal,
+    PrologInventionEvidence,
+]:
     """Require GNU Prolog to produce the sole threshold considered for approval."""
 
     if corpus.role is not CorpusRole.INVENTION:
@@ -688,15 +982,16 @@ def invent_threshold_for_corpus(
         for name, value in example.record.items():
             session.add_observation("pta:input", example.example_id, name, value)
         session.add_example_label(example.example_id, example.label)
-    service = collective or PTACollectiveService()
+    service = PTACollectiveService()
+    query = PTACollectiveQuery(
+        numeric_fields=(numeric_field,),
+        discover_intervals=False,
+        derive_deescalation=False,
+        derive_escalation=True,
+    )
     result = service.run(
         session,
-        query=PTACollectiveQuery(
-            numeric_fields=(numeric_field,),
-            discover_intervals=False,
-            derive_deescalation=False,
-            derive_escalation=True,
-        ),
+        query=query,
     )
     proposals = tuple(
         item
@@ -712,7 +1007,25 @@ def invent_threshold_for_corpus(
     reviewed = review_threshold_proposal(
         proposal, session=session, catalog=parent_catalog
     )
-    return session, proposal, reviewed
+    evidence = PrologInventionEvidence(
+        invention_corpus_digest=corpus.digest,
+        session_digest=content_digest(session.to_dict()),
+        numeric_field=numeric_field,
+        collective_protocol="PTM_PTA_COLLECTIVE_V1",
+        gprolog_version=_gprolog_version(service.executable),
+        gprolog_binary_digest=_file_digest(
+            service.executable, maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES
+        ),
+        module_digests=tuple(
+            sorted(
+                (name, _file_digest(path))
+                for name, path in service.module_paths.items()
+            )
+        ),
+        proposal_semantic_id=proposal.semantic_id(),
+        proposal_provenance_id=proposal.provenance_id(),
+    )
+    return session, proposal, reviewed, evidence
 
 
 def verify_artifact_with_ptmrt(
@@ -758,6 +1071,9 @@ class TrainedParentLifecycleResult:
     conformance: RuntimeConformanceReport
     promotion_audit: PromotionAuditSnapshot
     lineage: ModelGenerationLineage
+    invention_evidence: PrologInventionEvidence
+    dataset_id: str
+    preactivation_example_ids: frozenset[str | int]
     controller: ModelGenerationController
 
 
@@ -767,8 +1083,7 @@ def execute_trained_parent_lifecycle(
     parent_manifest: OrderedLiteralManifest,
     parent_training_corpus: LabeledCorpus,
     corpora: LifecycleCorpora,
-    invention_session: PTAReasoningSession,
-    reviewed: ReviewedThresholdProposal,
+    numeric_field: str,
     adaptation_epochs: int,
     promotion_policy: PromotionAuditPolicy,
     store: ModelGenerationStore,
@@ -782,23 +1097,12 @@ def execute_trained_parent_lifecycle(
         raise ModelGenerationError("parent training evidence has the wrong corpus role")
     if parent_training_corpus.dataset_id != corpora.invention.dataset_id:
         raise ModelGenerationError("parent and lifecycle corpora use different datasets")
-    if invention_session.dataset_id != corpora.invention.dataset_id:
-        raise ModelGenerationError("threshold session does not belong to invention corpus")
-    expected_observations = tuple(
-        ("pta:input", example.example_id, field, value)
-        for example in corpora.invention.examples
-        for field, value in example.record.items()
-    )
-    expected_labels = tuple(
-        (example.example_id, example.label)
-        for example in corpora.invention.examples
-    )
     if (
-        tuple(invention_session.observations) != expected_observations
-        or tuple(invention_session.example_labels) != expected_labels
+        not promotion_policy.require_strict_improvement
+        or promotion_policy.maximum_regressions != 0
     ):
         raise ModelGenerationError(
-            "threshold session facts differ from the immutable invention corpus"
+            "the first trained-parent loop requires strict zero-regression promotion"
         )
     lifecycle_ids = {
         example.example_id
@@ -806,7 +1110,6 @@ def execute_trained_parent_lifecycle(
             corpora.invention,
             corpora.adaptation,
             corpora.promotion,
-            corpora.live,
         )
         for example in corpus.examples
     }
@@ -814,6 +1117,19 @@ def execute_trained_parent_lifecycle(
         example.example_id for example in parent_training_corpus.examples
     }:
         raise ModelGenerationError("parent training IDs overlap lifecycle corpora")
+    preactivation_example_ids = frozenset(
+        lifecycle_ids
+        | {example.example_id for example in parent_training_corpus.examples}
+    )
+
+    invention_session, proposal, reviewed, invention_evidence = (
+        invent_threshold_for_corpus(
+            corpora.invention,
+            parent_manifest,
+            numeric_field=numeric_field,
+        )
+    )
+    store.put_invention_evidence(invention_evidence)
 
     parent_envelope = AdaptiveSnapshotEnvelope(parent_snapshot)
     parent_preprocessing, parent_artifact = compile_generation_artifact(
@@ -858,23 +1174,12 @@ def execute_trained_parent_lifecycle(
     elif controller.active_generation_id != parent_generation.generation_id:
         raise ModelGenerationError("store already routes a different active generation")
 
-    equivalence_records = tuple(
-        record
-        for corpus in (
-            parent_training_corpus,
-            corpora.invention,
-            corpora.adaptation,
-            corpora.promotion,
-            corpora.live,
-        )
-        for record in corpus.records
-    )
     extended = extend_parent_with_threshold(
         parent_snapshot,
         parent_manifest,
         reviewed,
         session=invention_session,
-        equivalence_records=equivalence_records,
+        equivalence_records=parent_training_corpus.records,
     )
     store.put_snapshot(extended.snapshot)
     store.put_manifest(extended.manifest)
@@ -882,7 +1187,6 @@ def execute_trained_parent_lifecycle(
         extended.manifest.build_catalog()
     )
     extended_preprocessing_id, _ = store.put_preprocessing(extended_preprocessing)
-    proposal = reviewed.proposal
     extended_generation = ModelGeneration(
         GenerationKind.EXTENDED_PARENT,
         extended.snapshot.snapshot_id,
@@ -962,6 +1266,7 @@ def execute_trained_parent_lifecycle(
         child_generation.generation_id,
         restoration_bundle.bundle_id,
         promotion.audit_id,
+        invention_evidence.evidence_id,
         reviewed.descriptor.literal_id,
         corpora.invention.digest,
         corpora.adaptation.digest,
@@ -987,6 +1292,9 @@ def execute_trained_parent_lifecycle(
         conformance,
         promotion,
         lineage,
+        invention_evidence,
+        parent_training_corpus.dataset_id,
+        preactivation_example_ids,
         controller,
     )
 
@@ -997,6 +1305,12 @@ def reopen_and_restore_for_drift(
 ) -> tuple[PromotionAuditSnapshot, RestoredAdaptiveParent]:
     if live_corpus.role is not CorpusRole.LIVE:
         raise ModelGenerationError("reopen evaluation requires the live/drift corpus")
+    if live_corpus.dataset_id != result.dataset_id:
+        raise ModelGenerationError("live/drift corpus belongs to a different dataset")
+    if result.preactivation_example_ids & {
+        example.example_id for example in live_corpus.examples
+    }:
+        raise ModelGenerationError("live/drift example IDs overlap pre-activation evidence")
     drift = audit_parent_child(
         result.extended_parent.parent_snapshot.snapshot,
         result.extended_parent.parent_manifest,

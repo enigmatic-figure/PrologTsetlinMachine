@@ -44,8 +44,9 @@ For each new feature, every clause appends exactly:
 therefore excluded. The parent RNG state is copied without constructing or
 advancing another random stream. The structural conditions prove that the new
 literal has no inference or feedback effect for either truth value. An
-independent raw-record corpus oracle and exhaustive small-feature tests provide
-defense in depth.
+independent raw-record oracle over the already-authorized parent-training
+corpus and exhaustive small-feature tests provide defense in depth. Invention,
+adaptation, promotion, and future live rows are not inspected by P+ creation.
 
 Threshold approval still uses the existing boundary:
 
@@ -56,6 +57,12 @@ Threshold approval still uses the existing boundary:
 4. `materialize_threshold_clause()` appends the canonical descriptor and
    crosses `lower_exact()` only as a derived `binary_clause`.
 5. The frozen parent catalog and snapshot remain untouched.
+
+The supported lifecycle performs GNU Prolog invention internally; it does not
+accept a caller-supplied proposal that merely claims a Prolog origin. It
+publishes content-addressed invention evidence binding the exact invention
+corpus and reasoning session, collective query/protocol, GNU Prolog executable
+digest and version, packaged module digests, and returned proposal identities.
 
 The original `threshold` proposal remains `NotRepresentable`.
 
@@ -80,6 +87,10 @@ Every corpus has a canonical SHA-256 digest. Lifecycle example IDs are
 disjoint, and identical labeled rows cannot cross invention, adaptation, and
 promotion. Live data may deliberately revisit covariates after a concept
 change, but it still has distinct observation identities.
+
+`LifecycleCorpora` contains only the three pre-activation roles. Live/drift
+evidence enters through `reopen_and_restore_for_drift()` after activation, and
+the service rejects live identities that overlap any pre-activation evidence.
 
 ## Conformance and promotion are different audits
 
@@ -133,11 +144,20 @@ Before child activation, the store durably publishes:
 
 Every object is content addressed. Atomic publication synchronizes the
 temporary file and, on POSIX, the containing directory after link or rename.
+Typed loads recompute the object's identity and require it to equal the
+requested address; a different valid object placed at that path fails closed.
 The lifecycle event log is atomically replaced as a complete hash chain. The
 controller changes its in-memory generation before appending the activation or
 restoration event; if that durable append fails, it immediately reconstructs
 routing from the previous or newly committed log rather than claiming an
-assumed state.
+assumed state. Store instances in one process share a root-scoped event lock;
+cross-process writers remain outside the experimental single-process contract.
+
+Before candidate recording, promotion, activation, and active-child recovery,
+the controller reloads and cross-validates the complete lineage graph. This
+includes generation links and kinds, P/P+/C manifests and snapshots, the
+appended invented literal, all corpus digests, proposal and invention-evidence
+IDs, preprocessing order, audit/artifact identity, and restoration parent.
 
 An `AdaptiveRestorationBundle` binds the parent generation to:
 
@@ -149,6 +169,11 @@ An `AdaptiveRestorationBundle` binds the parent generation to:
 - versioned training and RNG semantics.
 
 Reopen verifies and restores all of those objects before resuming the parent.
+Restoration is not a free-standing routing API: the active child must have a
+durably stored labeled live audit, a matching lineage/restoration bundle, and
+the immediately preceding `reopen_requested` transition. The parent generation,
+artifact signature, and bundle must agree on the snapshot, manifest,
+preprocessing, artifact, and parent-training digest.
 The integration contract proves snapshot equality, literal-manifest equality,
 prediction equality, and equality after the next training update. This is a
 bit-exact Python-to-Python restoration guarantee for the recorded compatible
@@ -171,6 +196,7 @@ without reconstructing private state or adding another lifecycle engine.
 - `tests/python/test_model_generation_lifecycle.py`
 - `tests/data/trained_parent_child_v1.hex`
 - the `ptmrt_trained_parent_*` CTest cases
+- the required `Trained-parent GNU Prolog / native lifecycle` CI job
 
 The next PTA work should generalize policies and service integration from this
 vertical slice. CoTM/shared weights, regression, graph, patch/CTM, and other

@@ -19,7 +19,6 @@ from prolog_tsetlin.representation import FeatureSchema, FieldKind, LiteralCatal
 from prolog_tsetlin.services.model_generation import (
     ModelGenerationStore,
     execute_trained_parent_lifecycle,
-    invent_threshold_for_corpus,
 )
 
 
@@ -71,12 +70,6 @@ def build_fixture(ptmrt: Path) -> bytes:
             (61, 66, 73, 74, 76, 81, 86, 89),
             (0, 0, 0, 0, 1, 1, 1, 1),
         ),
-        _corpus(
-            CorpusRole.LIVE,
-            400,
-            (59, 63, 69, 72, 78, 83, 88, 94),
-            (1, 1, 1, 1, 0, 0, 0, 0),
-        ),
     )
     schema = FeatureSchema.from_fields(
         temperature=FieldKind.NUMBER,
@@ -100,19 +93,13 @@ def build_fixture(ptmrt: Path) -> bytes:
         parent_training.labels,
         epochs=150,
     )
-    session, _, reviewed = invent_threshold_for_corpus(
-        corpora.invention,
-        manifest,
-        numeric_field="temperature",
-    )
     with TemporaryDirectory(prefix="ptm-generation-fixture-") as temporary:
         result = execute_trained_parent_lifecycle(
             parent_snapshot=parent.snapshot(),
             parent_manifest=manifest,
             parent_training_corpus=parent_training,
             corpora=corpora,
-            invention_session=session,
-            reviewed=reviewed,
+            numeric_field="temperature",
             adaptation_epochs=5,
             promotion_policy=PromotionAuditPolicy(8),
             store=ModelGenerationStore(temporary),

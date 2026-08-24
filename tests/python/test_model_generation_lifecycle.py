@@ -38,7 +38,6 @@ from prolog_tsetlin.services.model_generation import (
     ModelGenerationStore,
     compile_generation_artifact,
     execute_trained_parent_lifecycle,
-    invent_threshold_for_corpus,
     reopen_and_restore_for_drift,
 )
 
@@ -71,7 +70,7 @@ def _corpus(
     )
 
 
-def _fixture_corpora() -> tuple[LabeledCorpus, LifecycleCorpora]:
+def _fixture_corpora() -> tuple[LabeledCorpus, LifecycleCorpora, LabeledCorpus]:
     parent = _corpus(
         CorpusRole.PARENT_TRAINING,
         0,
@@ -99,11 +98,11 @@ def _fixture_corpora() -> tuple[LabeledCorpus, LifecycleCorpora]:
         (59, 63, 69, 72, 78, 83, 88, 94),
         (1, 1, 1, 1, 0, 0, 0, 0),
     )
-    return parent, LifecycleCorpora(invention, adaptation, promotion, live)
+    return parent, LifecycleCorpora(invention, adaptation, promotion), live
 
 
 def _parent() -> tuple[ScalarBinaryTsetlinMachine, OrderedLiteralManifest]:
-    parent_training, _ = _fixture_corpora()
+    parent_training, _, _ = _fixture_corpora()
     schema = FeatureSchema.from_fields(
         temperature=FieldKind.NUMBER,
         mode=FieldKind.CATEGORY,
@@ -158,7 +157,7 @@ def _reviewed(corpus: LabeledCorpus, manifest: OrderedLiteralManifest):
 
 
 def _candidate():
-    parent_training, corpora = _fixture_corpora()
+    parent_training, corpora, _ = _fixture_corpora()
     parent, manifest = _parent()
     session, reviewed = _reviewed(corpora.invention, manifest)
     extended = extend_parent_with_threshold(
@@ -313,6 +312,7 @@ def test_promotion_is_paired_and_requires_exact_runtime_conformance() -> None:
 
 def test_disagreement_alone_is_not_a_drift_reopen_decision() -> None:
     _, corpora, parent, manifest, _, _, _, child, artifact = _candidate()
+    _, _, live_corpus = _fixture_corpora()
     conformance = RuntimeConformanceReport(
         artifact.artifact_id, 8, 0, True, artifact.artifact_id
     )
@@ -332,7 +332,7 @@ def test_disagreement_alone_is_not_a_drift_reopen_decision() -> None:
         parent.snapshot(),
         manifest,
         child,
-        corpora.live,
+        live_corpus,
         conformance,
         PromotionAuditPolicy(1),
     )
@@ -342,7 +342,8 @@ def test_disagreement_alone_is_not_a_drift_reopen_decision() -> None:
 
 
 def test_lifecycle_corpora_reject_holdout_reuse() -> None:
-    _, corpora = _fixture_corpora()
+    _, corpora, _ = _fixture_corpora()
+    assert not hasattr(corpora, "live")
     reused = LabeledCorpus(
         corpora.promotion.dataset_id,
         CorpusRole.PROMOTION,
@@ -360,8 +361,64 @@ def test_lifecycle_corpora_reject_holdout_reuse() -> None:
             corpora.invention,
             corpora.adaptation,
             reused,
-            corpora.live,
         )
+
+
+def test_content_addressed_loaders_reject_valid_objects_at_wrong_addresses(
+    tmp_path: Path,
+) -> None:
+    parent, manifest = _parent()
+    first_snapshot = AdaptiveSnapshotEnvelope(parent.snapshot())
+    second_snapshot = AdaptiveSnapshotEnvelope(
+        extend_snapshot_features(parent.snapshot(), 1)
+    )
+    extended_catalog = manifest.build_catalog()
+    extended_catalog.numeric_ge("temperature", 75)
+    second_manifest = OrderedLiteralManifest.from_catalog(extended_catalog)
+    store = ModelGenerationStore(tmp_path / "store")
+    for value in (first_snapshot, second_snapshot):
+        store.put_snapshot(value)
+    for value in (manifest, second_manifest):
+        store.put_manifest(value)
+
+    snapshot_path = (
+        store.root
+        / "objects"
+        / "snapshots"
+        / f"{first_snapshot.snapshot_id[7:]}.json"
+    )
+    other_snapshot_path = (
+        store.root
+        / "objects"
+        / "snapshots"
+        / f"{second_snapshot.snapshot_id[7:]}.json"
+    )
+    snapshot_path.write_bytes(other_snapshot_path.read_bytes())
+    with pytest.raises(ModelGenerationError, match="address"):
+        store.load_snapshot(first_snapshot.snapshot_id)
+
+    manifest_path = (
+        store.root
+        / "objects"
+        / "literal-manifests"
+        / f"{manifest.manifest_id[7:]}.json"
+    )
+    other_manifest_path = (
+        store.root
+        / "objects"
+        / "literal-manifests"
+        / f"{second_manifest.manifest_id[7:]}.json"
+    )
+    manifest_path.write_bytes(other_manifest_path.read_bytes())
+    with pytest.raises(ModelGenerationError, match="address"):
+        store.load_manifest(manifest.manifest_id)
+
+
+def test_store_instances_share_one_process_local_event_lock(tmp_path: Path) -> None:
+    first = ModelGenerationStore(tmp_path / "store")
+    second = ModelGenerationStore(tmp_path / "store")
+
+    assert first._event_lock is second._event_lock
 
 
 def _ptmrt_path() -> Path | None:
@@ -388,24 +445,16 @@ def _has_gprolog() -> bool:
     reason="live GNU Prolog and a built ptmrt are required",
 )
 def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> None:
-    parent_training, corpora = _fixture_corpora()
+    parent_training, corpora, live = _fixture_corpora()
     parent, manifest = _parent()
     original_snapshot = parent.snapshot()
-    session, proposal, reviewed = invent_threshold_for_corpus(
-        corpora.invention,
-        manifest,
-        numeric_field="temperature",
-    )
-    assert proposal.structure["threshold"] == 75.0
-
     store = ModelGenerationStore(tmp_path / "generation-store")
     result = execute_trained_parent_lifecycle(
         parent_snapshot=original_snapshot,
         parent_manifest=manifest,
         parent_training_corpus=parent_training,
         corpora=corpora,
-        invention_session=session,
-        reviewed=reviewed,
+        numeric_field="temperature",
         adaptation_epochs=5,
         promotion_policy=PromotionAuditPolicy(8),
         store=store,
@@ -413,9 +462,21 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
     )
 
     assert result.conformance.exact
+    assert result.extended_parent.materialized.reviewed.proposal.structure[
+        "threshold"
+    ] == 75.0
+    assert result.invention_evidence.invention_corpus_digest == (
+        corpora.invention.digest
+    )
     assert result.promotion_audit.accepted
     assert result.promotion_audit.improvements == 4
     assert result.promotion_audit.regressions == 0
+    assert result.extended_parent.equivalence_case_count == len(
+        parent_training.examples
+    )
+    assert result.invention_evidence == result.controller.store.load_invention_evidence(
+        result.invention_evidence.evidence_id
+    )
     assert result.child_artifact.serialized == bytes.fromhex(
         GOLDEN_CHILD_HEX.read_text(encoding="ascii")
     )
@@ -425,7 +486,32 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
         result.child_generation.generation_id
     )
 
-    drift, restored = reopen_and_restore_for_drift(result, corpora.live)
+    with pytest.raises(ModelGenerationError, match="reopen request"):
+        result.controller.restore_parent(result.restoration_bundle)
+
+    overlapping_live = LabeledCorpus(
+        live.dataset_id,
+        CorpusRole.LIVE,
+        (
+            CorpusExample(
+                parent_training.examples[0].example_id,
+                live.examples[0].record,
+                live.examples[0].label,
+            ),
+        ),
+    )
+    with pytest.raises(ModelGenerationError, match="overlap"):
+        reopen_and_restore_for_drift(result, overlapping_live)
+
+    forged_lineage = replace(
+        result.lineage,
+        invented_literal_id=result.lineage.invented_literal_id ^ 1,
+    )
+    result.controller.store.put_lineage(forged_lineage)
+    with pytest.raises(ModelGenerationError, match="representation extension"):
+        result.controller.record_candidate(forged_lineage)
+
+    drift, restored = reopen_and_restore_for_drift(result, live)
     assert drift.child_errors > drift.parent_errors
     assert restored.snapshot.snapshot == original_snapshot
     assert restored.manifest == manifest
@@ -484,13 +570,8 @@ def test_event_log_tampering_fails_closed(tmp_path: Path) -> None:
 def test_failed_activation_recovers_the_last_durable_parent_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    parent_training, corpora = _fixture_corpora()
+    parent_training, corpora, _ = _fixture_corpora()
     parent, manifest = _parent()
-    session, _, reviewed = invent_threshold_for_corpus(
-        corpora.invention,
-        manifest,
-        numeric_field="temperature",
-    )
     store = ModelGenerationStore(tmp_path / "generation-store")
     append_event = store.append_event
 
@@ -506,8 +587,7 @@ def test_failed_activation_recovers_the_last_durable_parent_route(
             parent_manifest=manifest,
             parent_training_corpus=parent_training,
             corpora=corpora,
-            invention_session=session,
-            reviewed=reviewed,
+            numeric_field="temperature",
             adaptation_epochs=5,
             promotion_policy=PromotionAuditPolicy(8),
             store=store,
