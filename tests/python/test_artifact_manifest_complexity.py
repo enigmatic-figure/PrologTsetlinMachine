@@ -155,3 +155,14 @@ def test_export_rejects_nonportable_manifest_before_publication(
             name="nonportable",
             validation_signature=validation_signature,
         )
+
+
+def test_exported_canonical_unicode_escape_round_trips() -> None:
+    machine = ScalarBinaryTsetlinMachine(2, 1, threshold=2, seed=3)
+    artifact = export_packed_tm(
+        machine.snapshot(),
+        name="control\x01character",
+    )
+    assert b"control\\u0001character" in artifact.serialized
+    loaded = load_model_artifact_from_bytes(artifact.serialized)
+    assert loaded.manifest["title"] == "control\x01character"

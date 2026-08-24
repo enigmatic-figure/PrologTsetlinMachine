@@ -678,6 +678,25 @@ void test_portable_manifest_complexity_contract() {
         require_open_status(candidate, PTMRT_STATUS_INVALID_FORMAT,
                             "runtime accepted a manifest above max depth");
 
+        candidate = replace_fixture_manifest(
+            base, manifest_with_probe(
+                      manifest, "\"control\\u0001character\""));
+        require(fixture_manifest(candidate).find("\\u0001") !=
+                    std::string::npos,
+                "Unicode escape probe was not serialized as expected");
+        require_open_status(candidate, PTMRT_STATUS_OK,
+                            "runtime rejected a canonical Unicode escape");
+
+        candidate = replace_fixture_manifest(
+            base, manifest_with_probe(manifest, "\"rocket\\ud83d\\ude80\""));
+        require_open_status(candidate, PTMRT_STATUS_OK,
+                            "runtime rejected a Unicode surrogate pair");
+
+        candidate = replace_fixture_manifest(
+            base, manifest_with_probe(manifest, "\"lone\\ud800surrogate\""));
+        require_open_status(candidate, PTMRT_STATUS_INVALID_FORMAT,
+                            "runtime accepted a lone Unicode surrogate");
+
         const auto at_limit_elements =
             PTMRT_MODEL_MANIFEST_MAX_NODES - test_case.base_nodes - 1U;
         candidate = replace_fixture_manifest(
