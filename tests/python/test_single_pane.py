@@ -10,6 +10,7 @@ import pytest
 from rich.text import Text
 from textual.widgets import Button, DataTable, Input, Sparkline, Static
 
+from prolog_tsetlin.help_topics import CANONICAL_TUI_BINDINGS
 from prolog_tsetlin.prolog_bridge import BooleanDecisionTree
 from prolog_tsetlin.services.diagnostics import analyze_training_run
 from prolog_tsetlin.services.search import BoundedSearchResult, SearchKind
@@ -553,6 +554,15 @@ async def test_single_pane_navigation_bindings_are_unique_and_shell_owned(
 ) -> None:
     keys = [binding.key for binding in SinglePaneApp.BINDINGS]
     assert len(keys) == len(set(keys))
+    actual = [
+        (binding.key, binding.action, binding.description, binding.show)
+        for binding in SinglePaneApp.BINDINGS
+    ]
+    expected = [
+        (binding.key, binding.action, binding.label, binding.show)
+        for binding in CANONICAL_TUI_BINDINGS
+    ]
+    assert actual == expected
     destinations = {
         "1": "view-system",
         "2": "view-split",

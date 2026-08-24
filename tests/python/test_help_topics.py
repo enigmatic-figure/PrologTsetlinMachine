@@ -132,20 +132,9 @@ def test_tui_bindings_and_contexts_are_complete() -> None:
     assert actual == expected
 
 
-def test_canonical_workbench_bindings_are_registered_once() -> None:
-    from prolog_tsetlin.tui.single_pane.app import PTMWorkbenchApp
-
+def test_canonical_workbench_binding_keys_are_registered_once() -> None:
     keys = [binding.key for binding in CANONICAL_TUI_BINDINGS]
     assert len(keys) == len(set(keys))
-    actual = [
-        (binding.key, binding.action, binding.description, binding.show)
-        for binding in PTMWorkbenchApp.BINDINGS
-    ]
-    expected = [
-        (binding.key, binding.action, binding.label, binding.show)
-        for binding in CANONICAL_TUI_BINDINGS
-    ]
-    assert actual == expected
 
 
 def test_contextual_tui_help_uses_registered_controls() -> None:
