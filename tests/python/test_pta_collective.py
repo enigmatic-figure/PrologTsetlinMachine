@@ -428,6 +428,34 @@ def test_bounded_fact_writer_stops_at_the_first_oversized_line(
 
 
 @pytest.mark.skipif(not HAS_GPROLOG, reason="GNU Prolog is not installed")
+def test_mixed_label_value_is_a_barrier_without_poisoning_other_products() -> None:
+    session = PTAReasoningSession("mixed-label-value")
+    values = (0, 1, 1, 2, 3)
+    labels = (0, 0, 1, 1, 0)
+    for example, (value, label) in enumerate(zip(values, labels)):
+        session.add_observation("pta:input", example, "x", value)
+        session.add_example_label(example, label)
+        truth = example % 2
+        session.add_literal_truth(100, example, truth)
+        session.add_literal_truth(101, example, truth)
+
+    result = PTACollectiveService().run(session)
+
+    assert [
+        insight.evidence
+        for insight in result.insights
+        if insight.kind == "threshold"
+    ] == [(2.5,)]
+    assert not any(insight.kind == "interval" for insight in result.insights)
+    assert any(insight.kind == "literal_redundant" for insight in result.insights)
+    assert {
+        proposal.structure["threshold"]
+        for proposal in result.proposals
+        if proposal.native_target == "threshold"
+    } == {2.5}
+
+
+@pytest.mark.skipif(not HAS_GPROLOG, reason="GNU Prolog is not installed")
 def test_unique_id_deescalation_avoids_truth_row_cross_product() -> None:
     session = PTAReasoningSession("moderate-deescalation")
     for literal in range(10):

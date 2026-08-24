@@ -9,18 +9,43 @@
 invent_threshold(Field, Threshold) :-
     findall(V-Y, (observation(_, E, Field, V), example_label(E, Y)), Pairs),
     sort(Pairs, Sorted),
-    adjacent_flip(Sorted, Threshold).
+    numeric_states(Sorted, States),
+    adjacent_flip(States, Threshold).
 
 adjacent_flip([V1-Y1, V2-Y2 | _], Threshold) :-
-    Y1 \= Y2, V1 \= V2, Threshold is (V1 + V2) / 2.
+    (Y1 = 0 ; Y1 = 1),
+    (Y2 = 0 ; Y2 = 1),
+    Y1 \= Y2,
+    Threshold is (V1 + V2) / 2.
 adjacent_flip([_ | Rest], Threshold) :-
     adjacent_flip(Rest, Threshold).
+
+% Consolidate duplicate observations into one state per numeric value. A mixed
+% value is a barrier: it cannot create a zero-width threshold or masquerade as
+% part of an exact positive run.
+numeric_states(Pairs, States) :-
+    findall(V, member(V-_, Pairs), Values),
+    sort(Values, UniqueValues),
+    value_states(UniqueValues, Pairs, States).
+
+value_states([], _, []).
+value_states([V | Rest], Pairs, [V-State | States]) :-
+    value_state(V, Pairs, State),
+    value_states(Rest, Pairs, States).
+
+value_state(V, Pairs, mixed) :-
+    member(V-0, Pairs),
+    member(V-1, Pairs), !.
+value_state(V, Pairs, 1) :-
+    member(V-1, Pairs), !.
+value_state(_, _, 0).
 
 % Interval [Lo,Hi) covering maximal positive run bounded by negatives — halfway to neighboring negatives like Python reference
 invent_interval(Field, Lo, Hi) :-
     findall(V-Y, (observation(_, E, Field, V), example_label(E, Y)), Pairs),
     sort(Pairs, Sorted),
-    positive_run(Sorted, Lo0, Hi0, Prev, Next),
+    numeric_states(Sorted, States),
+    positive_run(States, Lo0, Hi0, Prev, Next),
     % A finite [Lo,Hi) interval is justified only when observations establish
     % both neighboring negative regions. Edge runs are threshold candidates,
     % not finite intervals.
@@ -41,11 +66,14 @@ positive_run(Sorted, Lo, Hi, Prev, Next) :-
 run_end([V-1 | Rest], Hi, Next) :-
     run_end_acc(Rest, V, Hi, Next).
 run_end_acc([], Hi, Hi, none).
-run_end_acc([V2-Y2 | Rest], CurrHi, Hi, Next) :-
-    ( Y2 = 1 -> run_end_acc(Rest, V2, Hi, Next) ; Hi = CurrHi, Next = V2 ).
+run_end_acc([V2-1 | Rest], _, Hi, Next) :-
+    run_end_acc(Rest, V2, Hi, Next).
+run_end_acc([V2-0 | _], CurrHi, CurrHi, V2).
+run_end_acc([_-mixed | _], CurrHi, CurrHi, none).
 
 % Alternative: discover thresholds via counterexample-guided join
 threshold_via_counterexample(Field, Threshold) :-
     findall(V-Y, (observation(_, E, Field, V), example_label(E, Y)), Pairs),
     sort(Pairs, Sorted),
-    adjacent_flip(Sorted, Threshold).
+    numeric_states(Sorted, States),
+    adjacent_flip(States, Threshold).

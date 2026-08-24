@@ -126,7 +126,10 @@ GNU Prolog's portable integer ceiling and floating midpoint behavior are part
 of the trust boundary. Semantic IDs are opaque-mapped; data terms are range
 checked; threshold inputs use the exact arithmetic magnitude; and Python
 independently verifies that returned boundaries lie strictly between an
-observed label flip. Rounded non-separating midpoints fail as protocol errors.
+observed label flip. Duplicate numeric values are consolidated into positive,
+negative, or mixed states; mixed values are barriers rather than zero-width
+thresholds or members of an exact positive interval. Rounded non-separating
+midpoints fail as protocol errors.
 
 Python validates, serializes, decodes, and later audits candidates. The
 threshold/interval midpoint is computed by GNU Prolog, not duplicated in the
