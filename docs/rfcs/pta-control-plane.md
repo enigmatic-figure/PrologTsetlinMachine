@@ -149,5 +149,6 @@ can decode de-escalation insights and escalation proposals through a
 range-checked, completeness-reporting protocol. The scalar-binary Input-PTA
 threshold slice now experimentally executes trained parent → invention → exact
 extension → adaptation → conformance → promotion → publication → activation →
-labeled drift → bit-exact restoration across Python, GNU Prolog, and `ptmrt`.
-The recurrent, multi-proposal, multi-PTA general control plane remains proposed.
+labeled drift → bit-exact restoration → fresh child activation across Python,
+GNU Prolog, and `ptmrt`, with durable cross-generation evidence-use accounting.
+The multi-proposal, multi-PTA general control plane remains proposed.

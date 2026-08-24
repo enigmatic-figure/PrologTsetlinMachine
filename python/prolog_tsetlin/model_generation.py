@@ -50,7 +50,8 @@ INVENTION_EVIDENCE_SCHEMA = "ptm.gnu-prolog-invention-evidence.v1"
 GENERATION_SCHEMA = "ptm.model-generation.v1"
 PROMOTION_AUDIT_SCHEMA = "ptm.promotion-audit.v1"
 LIVE_CONFORMANCE_SCHEMA = "ptm.live-runtime-conformance.v1"
-LINEAGE_SCHEMA = "ptm.model-generation-lineage.v3"
+EVIDENCE_USAGE_SCHEMA = "ptm.model-generation-evidence-usage.v1"
+LINEAGE_SCHEMA = "ptm.model-generation-lineage.v4"
 TRAINING_SEMANTICS_VERSION = "ptm.scalar-binary-training.v1"
 PYTHON_RNG_ALGORITHM = "python.random-mt19937-state-v1"
 MAX_CORPUS_EXAMPLES = 2_048
@@ -151,6 +152,12 @@ class CorpusRole(str, Enum):
     LIVE = "live_drift"
 
 
+class EvidenceUsagePurpose(str, Enum):
+    PARENT_REGISTRATION = "parent_registration"
+    CANDIDATE_EPISODE = "candidate_episode"
+    LIVE_DRIFT = "live_drift"
+
+
 @dataclass(frozen=True, slots=True)
 class LabeledCorpus:
     dataset_id: str
@@ -239,6 +246,211 @@ class LifecycleCorpora:
                 self.promotion,
             )
         )
+
+
+def evidence_record_fingerprint(
+    dataset_id: str, example: CorpusExample
+) -> str:
+    """Identify one labeled row independently of its observation identity."""
+
+    if type(dataset_id) is not str or not dataset_id:
+        raise ModelGenerationError("evidence dataset ID must be nonempty")
+    if not isinstance(example, CorpusExample):
+        raise TypeError("evidence fingerprint requires a corpus example")
+    return content_digest(
+        {
+            "dataset_id": dataset_id,
+            "record": example.record,
+            "label": example.label,
+        }
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceUsage:
+    """Exact labeled corpora durably spent for one bounded lifecycle purpose."""
+
+    purpose: EvidenceUsagePurpose
+    subject_generation_id: str
+    corpora: tuple[LabeledCorpus, ...]
+    schema: str = EVIDENCE_USAGE_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != EVIDENCE_USAGE_SCHEMA:
+            raise ModelGenerationError("evidence usage schema is unsupported")
+        if not isinstance(self.purpose, EvidenceUsagePurpose):
+            raise TypeError("evidence usage purpose is invalid")
+        _require_digest(self.subject_generation_id, "evidence subject generation")
+        if type(self.corpora) is not tuple or any(
+            not isinstance(corpus, LabeledCorpus) for corpus in self.corpora
+        ):
+            raise TypeError("evidence usage corpora must be a tuple of labeled corpora")
+        expected_roles = {
+            EvidenceUsagePurpose.PARENT_REGISTRATION: (
+                CorpusRole.PARENT_TRAINING,
+            ),
+            EvidenceUsagePurpose.CANDIDATE_EPISODE: (
+                CorpusRole.INVENTION,
+                CorpusRole.ADAPTATION,
+                CorpusRole.PROMOTION,
+            ),
+            EvidenceUsagePurpose.LIVE_DRIFT: (CorpusRole.LIVE,),
+        }[self.purpose]
+        if tuple(corpus.role for corpus in self.corpora) != expected_roles:
+            raise ModelGenerationError("evidence usage corpus roles are misplaced")
+        if len({corpus.dataset_id for corpus in self.corpora}) != 1:
+            raise ModelGenerationError("evidence usage corpora must share one dataset")
+        if self.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE:
+            LifecycleCorpora(*self.corpora)
+        identifiers: set[tuple[str, str, str | int]] = set()
+        fingerprints: set[str] = set()
+        for corpus in self.corpora:
+            for example in corpus.examples:
+                identifier = (
+                    corpus.dataset_id,
+                    type(example.example_id).__name__,
+                    example.example_id,
+                )
+                fingerprint = evidence_record_fingerprint(
+                    corpus.dataset_id, example
+                )
+                if identifier in identifiers or fingerprint in fingerprints:
+                    raise ModelGenerationError(
+                        "evidence usage contains repeated observations"
+                    )
+                identifiers.add(identifier)
+                fingerprints.add(fingerprint)
+
+    @property
+    def dataset_id(self) -> str:
+        return self.corpora[0].dataset_id
+
+    @property
+    def example_keys(self) -> frozenset[tuple[str, str, str | int]]:
+        return frozenset(
+            (
+                corpus.dataset_id,
+                type(example.example_id).__name__,
+                example.example_id,
+            )
+            for corpus in self.corpora
+            for example in corpus.examples
+        )
+
+    @property
+    def record_fingerprints(self) -> frozenset[str]:
+        return frozenset(
+            evidence_record_fingerprint(corpus.dataset_id, example)
+            for corpus in self.corpora
+            for example in corpus.examples
+        )
+
+    @property
+    def usage_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "purpose": self.purpose.value,
+            "subject_generation_id": self.subject_generation_id,
+            "dataset_id": self.dataset_id,
+            "corpora": [
+                {
+                    "corpus": corpus.canonical_payload(),
+                    "corpus_digest": corpus.digest,
+                }
+                for corpus in self.corpora
+            ],
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        result = self.canonical_payload()
+        result["usage_id"] = self.usage_id
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "EvidenceUsage":
+        expected = {
+            "schema",
+            "purpose",
+            "subject_generation_id",
+            "dataset_id",
+            "corpora",
+            "usage_id",
+        }
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected
+            or any(
+                type(value[name]) is not str
+                for name in expected - {"corpora"}
+            )
+            or not isinstance(value["corpora"], list)
+        ):
+            raise ModelGenerationError("evidence usage is malformed")
+        corpora: list[LabeledCorpus] = []
+        for raw_entry in value["corpora"]:
+            if (
+                not isinstance(raw_entry, Mapping)
+                or set(raw_entry) != {"corpus", "corpus_digest"}
+                or type(raw_entry["corpus_digest"]) is not str
+                or not isinstance(raw_entry["corpus"], Mapping)
+            ):
+                raise ModelGenerationError("evidence usage corpus is malformed")
+            raw_corpus = raw_entry["corpus"]
+            if (
+                set(raw_corpus) != {"dataset_id", "role", "examples"}
+                or type(raw_corpus["dataset_id"]) is not str
+                or type(raw_corpus["role"]) is not str
+                or not isinstance(raw_corpus["examples"], list)
+            ):
+                raise ModelGenerationError("evidence usage corpus is malformed")
+            examples: list[CorpusExample] = []
+            for raw_example in raw_corpus["examples"]:
+                if not isinstance(raw_example, Mapping) or set(raw_example) != {
+                    "example_id",
+                    "record",
+                    "label",
+                } or not isinstance(raw_example["record"], Mapping):
+                    raise ModelGenerationError(
+                        "evidence usage corpus example is malformed"
+                    )
+                examples.append(
+                    CorpusExample(
+                        raw_example["example_id"],
+                        raw_example["record"],
+                        raw_example["label"],
+                    )
+                )
+            try:
+                corpus = LabeledCorpus(
+                    raw_corpus["dataset_id"],
+                    CorpusRole(raw_corpus["role"]),
+                    tuple(examples),
+                )
+            except (TypeError, ValueError) as error:
+                raise ModelGenerationError(
+                    "evidence usage corpus is malformed"
+                ) from error
+            if corpus.digest != raw_entry["corpus_digest"]:
+                raise ModelGenerationError("evidence usage corpus digest mismatch")
+            corpora.append(corpus)
+        try:
+            result = cls(
+                EvidenceUsagePurpose(value["purpose"]),
+                value["subject_generation_id"],
+                tuple(corpora),
+                value["schema"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("evidence usage is malformed") from error
+        if (
+            result.dataset_id != value["dataset_id"]
+            or result.usage_id != value["usage_id"]
+        ):
+            raise ModelGenerationError("evidence usage digest mismatch")
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -1848,6 +2060,9 @@ class ModelGenerationLineage:
     restoration_bundle_id: str
     promotion_audit_id: str
     invention_evidence_id: str
+    evidence_usage_id: str
+    activation_sequence: int
+    previous_activated_lineage_id: str | None
     invented_literal_id: int
     invention_corpus_digest: str
     adaptation_corpus_digest: str
@@ -1867,6 +2082,7 @@ class ModelGenerationLineage:
             ("restoration bundle", self.restoration_bundle_id),
             ("promotion audit", self.promotion_audit_id),
             ("invention evidence", self.invention_evidence_id),
+            ("evidence usage", self.evidence_usage_id),
             ("invention corpus", self.invention_corpus_digest),
             ("adaptation corpus", self.adaptation_corpus_digest),
             ("promotion corpus", self.promotion_corpus_digest),
@@ -1874,6 +2090,16 @@ class ModelGenerationLineage:
             ("origin proposal provenance ID", self.origin_proposal_provenance_id),
         ):
             _require_digest(value, label)
+        if (
+            type(self.activation_sequence) is not int
+            or self.activation_sequence <= 0
+        ):
+            raise ModelGenerationError("activation sequence must be positive")
+        if self.previous_activated_lineage_id is not None:
+            _require_digest(
+                self.previous_activated_lineage_id,
+                "previous activated lineage",
+            )
         if type(self.invented_literal_id) is not int or not 0 <= self.invented_literal_id < 1 << 64:
             raise ModelGenerationError("invented literal ID must be unsigned 64-bit")
 
@@ -1891,6 +2117,9 @@ class ModelGenerationLineage:
             "restoration_bundle_id": self.restoration_bundle_id,
             "promotion_audit_id": self.promotion_audit_id,
             "invention_evidence_id": self.invention_evidence_id,
+            "evidence_usage_id": self.evidence_usage_id,
+            "activation_sequence": self.activation_sequence,
+            "previous_activated_lineage_id": self.previous_activated_lineage_id,
             "invented_literal_id": str(self.invented_literal_id),
             "invention_corpus_digest": self.invention_corpus_digest,
             "adaptation_corpus_digest": self.adaptation_corpus_digest,
@@ -1915,6 +2144,9 @@ class ModelGenerationLineage:
             "restoration_bundle_id",
             "promotion_audit_id",
             "invention_evidence_id",
+            "evidence_usage_id",
+            "activation_sequence",
+            "previous_activated_lineage_id",
             "invented_literal_id",
             "invention_corpus_digest",
             "adaptation_corpus_digest",
@@ -1926,7 +2158,16 @@ class ModelGenerationLineage:
         if (
             not isinstance(value, Mapping)
             or set(value) != expected
-            or any(type(value[key]) is not str for key in expected)
+            or any(
+                type(value[key]) is not str
+                for key in expected
+                - {"activation_sequence", "previous_activated_lineage_id"}
+            )
+            or type(value["activation_sequence"]) is not int
+            or (
+                value["previous_activated_lineage_id"] is not None
+                and type(value["previous_activated_lineage_id"]) is not str
+            )
         ):
             raise ModelGenerationError("model-generation lineage is malformed")
         raw_literal_id = value["invented_literal_id"]
@@ -1941,6 +2182,11 @@ class ModelGenerationLineage:
                 restoration_bundle_id=value["restoration_bundle_id"],
                 promotion_audit_id=value["promotion_audit_id"],
                 invention_evidence_id=value["invention_evidence_id"],
+                evidence_usage_id=value["evidence_usage_id"],
+                activation_sequence=value["activation_sequence"],
+                previous_activated_lineage_id=value[
+                    "previous_activated_lineage_id"
+                ],
                 invented_literal_id=int(raw_literal_id),
                 invention_corpus_digest=value["invention_corpus_digest"],
                 adaptation_corpus_digest=value["adaptation_corpus_digest"],

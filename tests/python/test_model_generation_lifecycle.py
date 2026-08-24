@@ -14,6 +14,8 @@ from prolog_tsetlin.model_generation import (
     CorpusExample,
     CorpusRole,
     DriftAuditPolicy,
+    EvidenceUsage,
+    EvidenceUsagePurpose,
     GenerationKind,
     LabeledCorpus,
     LiveRuntimeConformanceEvidence,
@@ -504,6 +506,41 @@ def test_lifecycle_corpora_reject_holdout_reuse() -> None:
         )
 
 
+def test_evidence_usage_round_trip_preserves_exact_spent_rows(
+    tmp_path: Path,
+) -> None:
+    _, corpora, live = _fixture_corpora()
+    subject = "sha256:" + "a" * 64
+    usage = EvidenceUsage(
+        EvidenceUsagePurpose.CANDIDATE_EPISODE,
+        subject,
+        (corpora.invention, corpora.adaptation, corpora.promotion),
+    )
+    assert EvidenceUsage.from_dict(usage.to_dict()) == usage
+    store = ModelGenerationStore(tmp_path / "store")
+    store.put_evidence_usage(usage)
+    assert store.load_evidence_usage(usage.usage_id) == usage
+
+    repeated = LabeledCorpus(
+        live.dataset_id,
+        CorpusRole.LIVE,
+        (
+            live.examples[0],
+            CorpusExample(
+                "same-row-new-observation",
+                live.examples[0].record,
+                live.examples[0].label,
+            ),
+        ),
+    )
+    with pytest.raises(ModelGenerationError, match="repeated observations"):
+        EvidenceUsage(
+            EvidenceUsagePurpose.LIVE_DRIFT,
+            subject,
+            (repeated,),
+        )
+
+
 def test_content_addressed_loaders_reject_valid_objects_at_wrong_addresses(
     tmp_path: Path,
 ) -> None:
@@ -586,9 +623,19 @@ def test_initial_parent_recovery_validates_the_complete_deployable_graph(
         ((CorpusRole.PARENT_TRAINING.value, parent_training.digest),),
     )
     store.put_generation(generation)
+    parent_usage = EvidenceUsage(
+        EvidenceUsagePurpose.PARENT_REGISTRATION,
+        generation.generation_id,
+        (parent_training,),
+    )
+    store.put_evidence_usage(parent_usage)
     # Simulate a legacy or externally assembled durable route that bypassed
     # current registration. Recovery must still validate the full graph.
-    store.append_event(LifecycleEventKind.PARENT_REGISTERED, generation.generation_id)
+    store.append_event(
+        LifecycleEventKind.PARENT_REGISTERED,
+        generation.generation_id,
+        evidence_usage_id=parent_usage.usage_id,
+    )
 
     with pytest.raises(ModelGenerationError, match="deployable generation"):
         ModelGenerationController(store)
@@ -678,6 +725,33 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
     assert ModelGenerationController(store).active_generation_id == (
         result.child_generation.generation_id
     )
+
+    forged_evidence_root = tmp_path / "forged-evidence-reuse-store"
+    shutil.copytree(store.root, forged_evidence_root)
+    forged_evidence_store = ModelGenerationStore(forged_evidence_root)
+    reused_as_live = LabeledCorpus(
+        corpora.invention.dataset_id,
+        CorpusRole.LIVE,
+        tuple(
+            CorpusExample(1700 + index, example.record, example.label)
+            for index, example in enumerate(corpora.invention.examples)
+        ),
+    )
+    forged_usage = EvidenceUsage(
+        EvidenceUsagePurpose.LIVE_DRIFT,
+        result.child_generation.generation_id,
+        (reused_as_live,),
+    )
+    forged_evidence_store.put_evidence_usage(forged_usage)
+    forged_evidence_store.append_event(
+        LifecycleEventKind.EVIDENCE_RESERVED,
+        result.child_generation.generation_id,
+        evidence_usage_id=forged_usage.usage_id,
+        purpose=forged_usage.purpose.value,
+        dataset_id=forged_usage.dataset_id,
+    )
+    with pytest.raises(ModelGenerationError, match="fingerprint"):
+        ModelGenerationController(forged_evidence_store)
 
     with pytest.raises(ModelGenerationError, match="reopen request"):
         result.controller.restore_parent(result.restoration_bundle)
@@ -814,7 +888,20 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         PromotionAuditPolicy(1),
     )
     assert drift_requires_reopen(forged_drift, STRICT_DRIFT_POLICY)
+    forged_live_usage = EvidenceUsage(
+        EvidenceUsagePurpose.LIVE_DRIFT,
+        result.child_generation.generation_id,
+        (live,),
+    )
+    forged_reopen_store.put_evidence_usage(forged_live_usage)
     forged_reopen_store.put_audit(forged_drift)
+    forged_reopen_store.append_event(
+        LifecycleEventKind.EVIDENCE_RESERVED,
+        result.child_generation.generation_id,
+        evidence_usage_id=forged_live_usage.usage_id,
+        purpose=forged_live_usage.purpose.value,
+        dataset_id=forged_live_usage.dataset_id,
+    )
     forged_reopen_store.append_event(
         LifecycleEventKind.REOPEN_REQUESTED,
         result.child_generation.generation_id,
@@ -825,6 +912,7 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         child_errors=forged_drift.child_errors,
         drift_policy=STRICT_DRIFT_POLICY.to_dict(),
         live_conformance_evidence_id="sha256:" + "f" * 64,
+        evidence_usage_id=forged_live_usage.usage_id,
     )
     with pytest.raises(ModelGenerationError, match="conformance evidence"):
         ModelGenerationController(forged_reopen_store)
@@ -863,7 +951,15 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         "sha256:" + "0" * 64,
     )
     forged_receipt_store.put_live_conformance(forged_receipt)
+    forged_receipt_store.put_evidence_usage(forged_live_usage)
     forged_receipt_store.put_audit(forged_drift)
+    forged_receipt_store.append_event(
+        LifecycleEventKind.EVIDENCE_RESERVED,
+        result.child_generation.generation_id,
+        evidence_usage_id=forged_live_usage.usage_id,
+        purpose=forged_live_usage.purpose.value,
+        dataset_id=forged_live_usage.dataset_id,
+    )
     forged_receipt_store.append_event(
         LifecycleEventKind.REOPEN_REQUESTED,
         result.child_generation.generation_id,
@@ -874,6 +970,7 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         child_errors=forged_drift.child_errors,
         drift_policy=STRICT_DRIFT_POLICY.to_dict(),
         live_conformance_evidence_id=forged_receipt.evidence_id,
+        evidence_usage_id=forged_live_usage.usage_id,
     )
     with pytest.raises(ModelGenerationError, match="executable digest"):
         ModelGenerationController(
@@ -884,6 +981,12 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         del args, kwargs
         raise ModelGenerationError("injected native verification requirement")
 
+    failed_live = _corpus(
+        CorpusRole.LIVE,
+        450,
+        (45, 46, 47, 48, 102, 103, 104, 105),
+        (1, 1, 1, 1, 0, 0, 0, 0),
+    )
     with monkeypatch.context() as scoped:
         scoped.setattr(
             model_generation_service,
@@ -893,11 +996,16 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         with pytest.raises(ModelGenerationError, match="native verification"):
             result.controller.request_reopen(
                 result.child_generation.generation_id,
-                live,
+                failed_live,
                 STRICT_DRIFT_POLICY,
                 _ptmrt_path(),
             )
-    assert store.read_events()[-1].kind is LifecycleEventKind.ACTIVATED
+    failed_events = store.read_events()
+    assert failed_events[-2].kind is LifecycleEventKind.EVIDENCE_RESERVED
+    assert failed_events[-1].kind is LifecycleEventKind.EVIDENCE_ABANDONED
+    assert failed_events[-1].details["evidence_usage_id"] == (
+        failed_events[-2].details["evidence_usage_id"]
+    )
 
     drift, restored = reopen_and_restore_for_drift(
         result, live, STRICT_DRIFT_POLICY
@@ -945,24 +1053,62 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         result.parent_generation.generation_id
     )
 
+    orphan_root = tmp_path / "orphaned-candidate-evidence-store"
+    shutil.copytree(store.root, orphan_root)
+    orphan_store = ModelGenerationStore(orphan_root)
+    orphan_controller = ModelGenerationController(
+        orphan_store, ptmrt_executable=_ptmrt_path()
+    )
+    orphan_corpora = LifecycleCorpora(
+        _corpus(CorpusRole.INVENTION, 1800, (10, 20, 30, 40), (0, 0, 1, 1)),
+        _corpus(
+            CorpusRole.ADAPTATION,
+            1900,
+            (11, 12, 13, 14, 31, 32, 33, 34),
+            (0, 0, 0, 0, 1, 1, 1, 1),
+        ),
+        _corpus(
+            CorpusRole.PROMOTION,
+            2000,
+            (15, 16, 17, 18, 35, 36, 37, 38),
+            (0, 0, 0, 0, 1, 1, 1, 1),
+        ),
+    )
+    orphan_usage, _, _ = orphan_controller.reserve_candidate_evidence(
+        orphan_corpora
+    )
+    assert orphan_store.read_events()[-1].kind is (
+        LifecycleEventKind.EVIDENCE_RESERVED
+    )
+    recovered_orphan = ModelGenerationController(
+        orphan_store, ptmrt_executable=_ptmrt_path()
+    )
+    assert recovered_orphan.active_generation_id == (
+        result.parent_generation.generation_id
+    )
+    orphan_events = orphan_store.read_events()
+    assert orphan_events[-1].kind is LifecycleEventKind.EVIDENCE_ABANDONED
+    assert orphan_events[-1].details["evidence_usage_id"] == orphan_usage.usage_id
+
     def package_candidate(
         adapted_child,
         promotion_corpus: LabeledCorpus,
         *,
         name: str,
-        claimed_adaptation_digest: str | None = None,
-        require_accepted: bool = True,
+        claimed_adaptation_corpus: LabeledCorpus | None = None,
+        require_accepted: bool | None = True,
     ) -> tuple[
         ModelGeneration,
         ModelGenerationLineage,
         PromotionAuditSnapshot,
     ]:
         preprocessing_id = result.child_generation.preprocessing_contract_id
-        adaptation_digest = (
-            adapted_child.adaptation_corpus_digest
-            if claimed_adaptation_digest is None
-            else claimed_adaptation_digest
+        adaptation_corpus = (
+            corpora.adaptation
+            if claimed_adaptation_corpus is None
+            else claimed_adaptation_corpus
         )
+        adaptation_digest = adaptation_corpus.digest
         behavior = AdaptiveBehaviorIdentity.from_child(
             adapted_child,
             preprocessing_contract_id=preprocessing_id,
@@ -1032,22 +1178,36 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             conformance,
             PromotionAuditPolicy(len(promotion_corpus.examples)),
         )
-        assert audit.accepted is require_accepted
+        if require_accepted is not None:
+            assert audit.accepted is require_accepted
         store.put_audit(audit)
-        lineage = ModelGenerationLineage(
+        usage = EvidenceUsage(
+            EvidenceUsagePurpose.CANDIDATE_EPISODE,
             result.parent_generation.generation_id,
-            result.extended_generation.generation_id,
-            generation.generation_id,
-            behavior.behavior_id,
-            result.restoration_bundle.bundle_id,
-            audit.audit_id,
-            result.invention_evidence.evidence_id,
-            result.lineage.invented_literal_id,
-            corpora.invention.digest,
-            adaptation_digest,
-            promotion_corpus.digest,
-            result.lineage.origin_proposal_semantic_id,
-            result.lineage.origin_proposal_provenance_id,
+            (corpora.invention, adaptation_corpus, promotion_corpus),
+        )
+        store.put_evidence_usage(usage)
+        lineage = ModelGenerationLineage(
+            parent_generation_id=result.parent_generation.generation_id,
+            extended_generation_id=result.extended_generation.generation_id,
+            child_generation_id=generation.generation_id,
+            adaptive_behavior_id=behavior.behavior_id,
+            restoration_bundle_id=result.restoration_bundle.bundle_id,
+            promotion_audit_id=audit.audit_id,
+            invention_evidence_id=result.invention_evidence.evidence_id,
+            evidence_usage_id=usage.usage_id,
+            activation_sequence=2,
+            previous_activated_lineage_id=result.lineage.lineage_id,
+            invented_literal_id=result.lineage.invented_literal_id,
+            invention_corpus_digest=corpora.invention.digest,
+            adaptation_corpus_digest=adaptation_digest,
+            promotion_corpus_digest=promotion_corpus.digest,
+            origin_proposal_semantic_id=(
+                result.lineage.origin_proposal_semantic_id
+            ),
+            origin_proposal_provenance_id=(
+                result.lineage.origin_proposal_provenance_id
+            ),
         )
         store.put_lineage(lineage)
         return generation, lineage, audit
@@ -1058,49 +1218,150 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         (60, 67, 70, 74, 77, 80, 90, 96),
         (0, 0, 0, 0, 1, 1, 1, 1),
     )
-    forged_adaptation_digest = _corpus(
+    forged_adaptation_corpus = _corpus(
         CorpusRole.ADAPTATION,
         600,
-        (56, 63, 70, 72, 78, 85, 93, 101),
+        (55, 57, 65, 68, 82, 85, 93, 101),
         (0, 0, 0, 0, 1, 1, 1, 1),
-    ).digest
-    assert forged_adaptation_digest != result.child.adaptation_corpus_digest
-    repackaged_generation, repackaged_lineage, _ = package_candidate(
+    )
+    assert forged_adaptation_corpus.digest != result.child.adaptation_corpus_digest
+    repackaged_generation, repackaged_lineage, repackaged_audit = package_candidate(
         result.child,
         repackaged_promotion,
         name="same adaptive behavior with fresh promotion evidence",
-        claimed_adaptation_digest=forged_adaptation_digest,
+        claimed_adaptation_corpus=forged_adaptation_corpus,
     )
     assert repackaged_generation.generation_id != result.child_generation.generation_id
     assert repackaged_lineage.adaptive_behavior_id == result.lineage.adaptive_behavior_id
     with pytest.raises(ModelGenerationError, match="adaptive behavior"):
         result.controller.record_candidate(repackaged_lineage)
 
-    genuinely_readapted = adapt_extended_parent(
-        result.extended_parent, corpora.adaptation, epochs=6
+    raw_approval_root = tmp_path / "raw-approval-live-store"
+    shutil.copytree(store.root, raw_approval_root)
+    raw_approval_store = ModelGenerationStore(raw_approval_root)
+    raw_approval_controller = ModelGenerationController(
+        raw_approval_store, ptmrt_executable=_ptmrt_path()
     )
-    rejected_promotion = _corpus(
-        CorpusRole.PROMOTION,
-        800,
-        (59, 63, 69, 72, 78, 83, 88, 94),
-        (1, 1, 1, 1, 0, 0, 0, 0),
+    raw_approval_store.append_event(
+        LifecycleEventKind.PROMOTION_APPROVED,
+        repackaged_lineage.child_generation_id,
+        lineage_id=repackaged_lineage.lineage_id,
+        audit_id=repackaged_audit.audit_id,
     )
-    rejected_generation, rejected_lineage, rejected_audit = package_candidate(
-        genuinely_readapted,
-        rejected_promotion,
-        name="readapted child with rejected promotion evidence",
-        require_accepted=False,
+    with pytest.raises(ModelGenerationError, match="promotion approval"):
+        raw_approval_controller.activate_child(
+            repackaged_lineage, repackaged_audit
+        )
+    with pytest.raises(ModelGenerationError, match="promotion approval"):
+        ModelGenerationController(
+            raw_approval_store, ptmrt_executable=_ptmrt_path()
+        )
+
+    reused_evidence_child = adapt_extended_parent(
+        result.extended_parent,
+        forged_adaptation_corpus,
+        epochs=6,
     )
-    result.controller.record_candidate(rejected_lineage)
-    result.controller.reject_candidate(
-        rejected_generation.generation_id, rejected_audit
+    _, reused_evidence_lineage, _ = package_candidate(
+        reused_evidence_child,
+        repackaged_promotion,
+        name="new behavior packaged with already-spent invention evidence",
+        claimed_adaptation_corpus=forged_adaptation_corpus,
+        require_accepted=None,
     )
+    assert reused_evidence_lineage.adaptive_behavior_id != (
+        result.lineage.adaptive_behavior_id
+    )
+    reused_evidence_usage = store.load_evidence_usage(
+        reused_evidence_lineage.evidence_usage_id
+    )
+
+    raw_reuse_root = tmp_path / "raw-reuse-live-store"
+    shutil.copytree(store.root, raw_reuse_root)
+    raw_reuse_store = ModelGenerationStore(raw_reuse_root)
+    raw_reuse_controller = ModelGenerationController(
+        raw_reuse_store, ptmrt_executable=_ptmrt_path()
+    )
+    raw_reuse_store.append_event(
+        LifecycleEventKind.EVIDENCE_RESERVED,
+        result.parent_generation.generation_id,
+        evidence_usage_id=reused_evidence_usage.usage_id,
+        purpose=reused_evidence_usage.purpose.value,
+        dataset_id=reused_evidence_usage.dataset_id,
+    )
+    with pytest.raises(
+        ModelGenerationError, match="observation identity|fingerprint"
+    ):
+        raw_reuse_controller.record_candidate(reused_evidence_lineage)
+    with pytest.raises(
+        ModelGenerationError, match="observation identity|fingerprint"
+    ):
+        ModelGenerationController(
+            raw_reuse_store, ptmrt_executable=_ptmrt_path()
+        )
+
+    raw_misbound_root = tmp_path / "raw-misbound-live-store"
+    shutil.copytree(store.root, raw_misbound_root)
+    raw_misbound_store = ModelGenerationStore(raw_misbound_root)
+    raw_misbound_controller = ModelGenerationController(
+        raw_misbound_store, ptmrt_executable=_ptmrt_path()
+    )
+    raw_misbound_store.append_event(
+        LifecycleEventKind.EVIDENCE_RESERVED,
+        reused_evidence_lineage.child_generation_id,
+        evidence_usage_id=reused_evidence_usage.usage_id,
+        purpose=reused_evidence_usage.purpose.value,
+        dataset_id=reused_evidence_usage.dataset_id,
+    )
+    with pytest.raises(ModelGenerationError, match="evidence-reserved"):
+        raw_misbound_controller.record_candidate(reused_evidence_lineage)
+    with pytest.raises(ModelGenerationError, match="evidence-reserved"):
+        ModelGenerationController(
+            raw_misbound_store, ptmrt_executable=_ptmrt_path()
+        )
+
+    rejected_corpora = LifecycleCorpora(
+        _corpus(
+            CorpusRole.INVENTION,
+            800,
+            (110, 120, 130, 140),
+            (0, 0, 1, 1),
+        ),
+        _corpus(
+            CorpusRole.ADAPTATION,
+            900,
+            (111, 112, 113, 114, 131, 132, 133, 134),
+            (0, 0, 0, 0, 1, 1, 1, 1),
+        ),
+        _corpus(
+            CorpusRole.PROMOTION,
+            1000,
+            (115, 116, 117, 118, 135, 136, 137, 138),
+            (1, 1, 1, 1, 0, 0, 0, 0),
+        ),
+    )
+    with pytest.raises(ModelGenerationError, match="promotion policy rejected"):
+        execute_trained_parent_lifecycle(
+            parent_snapshot=original_snapshot,
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=rejected_corpora,
+            numeric_field="temperature",
+            adaptation_epochs=6,
+            promotion_policy=PromotionAuditPolicy(8),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+    rejected_event = store.read_events()[-1]
+    assert rejected_event.kind is LifecycleEventKind.CANDIDATE_REJECTED
+    rejected_lineage = store.load_lineage(rejected_event.details["lineage_id"])
+    rejected_audit = store.load_audit(rejected_event.details["audit_id"])
     rejected_recovery_root = tmp_path / "rejected-activation-store"
     shutil.copytree(store.root, rejected_recovery_root)
     rejected_recovery_store = ModelGenerationStore(rejected_recovery_root)
     rejected_recovery_store.append_event(
         LifecycleEventKind.ACTIVATED,
-        rejected_generation.generation_id,
+        rejected_lineage.child_generation_id,
         previous_generation_id=result.parent_generation.generation_id,
         lineage_id=rejected_lineage.lineage_id,
         adaptive_behavior_id=rejected_lineage.adaptive_behavior_id,
@@ -1111,34 +1372,118 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             rejected_recovery_store, ptmrt_executable=_ptmrt_path()
         )
 
-    fresh_promotion = _corpus(
-        CorpusRole.PROMOTION,
-        700,
-        (57, 65, 69, 72, 78, 84, 91, 99),
-        (0, 0, 0, 0, 1, 1, 1, 1),
+    reused_invention = LifecycleCorpora(
+        corpora.invention,
+        _corpus(
+            CorpusRole.ADAPTATION,
+            1100,
+            (141, 142, 143, 144, 151, 152, 153, 154),
+            (0, 0, 0, 0, 1, 1, 1, 1),
+        ),
+        _corpus(
+            CorpusRole.PROMOTION,
+            1200,
+            (145, 146, 147, 148, 155, 156, 157, 158),
+            (0, 0, 0, 0, 1, 1, 1, 1),
+        ),
     )
-    _, readapted_lineage, _ = package_candidate(
-        genuinely_readapted,
-        fresh_promotion,
-        name="genuinely readapted child",
+    with pytest.raises(ModelGenerationError, match="already been used"):
+        execute_trained_parent_lifecycle(
+            parent_snapshot=original_snapshot,
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=reused_invention,
+            numeric_field="temperature",
+            adaptation_epochs=6,
+            promotion_policy=PromotionAuditPolicy(8),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+
+    cloned_invention = LabeledCorpus(
+        corpora.invention.dataset_id,
+        CorpusRole.INVENTION,
+        tuple(
+            CorpusExample(1300 + index, example.record, example.label)
+            for index, example in enumerate(corpora.invention.examples)
+        ),
     )
-    assert readapted_lineage.adaptive_behavior_id != result.lineage.adaptive_behavior_id
-    result.controller.record_candidate(readapted_lineage)
+    cloned_rows = LifecycleCorpora(
+        cloned_invention,
+        reused_invention.adaptation,
+        reused_invention.promotion,
+    )
+    with pytest.raises(ModelGenerationError, match="fingerprint"):
+        execute_trained_parent_lifecycle(
+            parent_snapshot=original_snapshot,
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=cloned_rows,
+            numeric_field="temperature",
+            adaptation_epochs=6,
+            promotion_policy=PromotionAuditPolicy(8),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+
+    second_corpora = LifecycleCorpora(
+        _corpus(
+            CorpusRole.INVENTION,
+            1400,
+            (53, 70, 80, 97),
+            (0, 0, 1, 1),
+        ),
+        _corpus(
+            CorpusRole.ADAPTATION,
+            1500,
+            (51, 52, 54, 57, 75, 84, 91, 96),
+            (0, 0, 0, 0, 1, 1, 1, 1),
+        ),
+        _corpus(
+            CorpusRole.PROMOTION,
+            1600,
+            (39, 40, 41, 42, 106, 107, 108, 109),
+            (0, 0, 0, 0, 1, 1, 1, 1),
+        ),
+    )
+    second = execute_trained_parent_lifecycle(
+        parent_snapshot=original_snapshot,
+        parent_manifest=manifest,
+        parent_training_corpus=parent_training,
+        corpora=second_corpora,
+        numeric_field="temperature",
+        adaptation_epochs=6,
+        promotion_policy=PromotionAuditPolicy(8),
+        store=store,
+        ptmrt_executable=_ptmrt_path(),
+    )
+    assert second.lineage.activation_sequence == 2
+    assert second.lineage.previous_activated_lineage_id == result.lineage.lineage_id
+    assert second.lineage.adaptive_behavior_id != result.lineage.adaptive_behavior_id
+    assert second.controller.active_generation_id == second.child_generation.generation_id
     assert [event.kind.value for event in store.read_events()] == [
         "parent_registered",
+        "evidence_reserved",
         "candidate_created",
         "promotion_approved",
         "activated",
+        "evidence_reserved",
+        "evidence_abandoned",
+        "evidence_reserved",
         "reopen_requested",
         "parent_restored",
+        "evidence_reserved",
         "candidate_created",
         "candidate_rejected",
+        "evidence_reserved",
         "candidate_created",
+        "promotion_approved",
+        "activated",
     ]
     assert ModelGenerationController(
         store, ptmrt_executable=_ptmrt_path()
     ).active_generation_id == (
-        result.parent_generation.generation_id
+        second.child_generation.generation_id
     )
 
 

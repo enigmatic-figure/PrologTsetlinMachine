@@ -24,6 +24,8 @@ from ..model_generation import (
     AdaptiveSnapshotEnvelope,
     CorpusRole,
     DriftAuditPolicy,
+    EvidenceUsage,
+    EvidenceUsagePurpose,
     ExtendedParent,
     LabeledCorpus,
     LiveRuntimeConformanceEvidence,
@@ -135,6 +137,8 @@ def _content_path(root: Path, namespace: str, identifier: str, suffix: str) -> P
 
 class LifecycleEventKind(str, Enum):
     PARENT_REGISTERED = "parent_registered"
+    EVIDENCE_RESERVED = "evidence_reserved"
+    EVIDENCE_ABANDONED = "evidence_abandoned"
     CANDIDATE_CREATED = "candidate_created"
     CANDIDATE_REJECTED = "candidate_rejected"
     PROMOTION_APPROVED = "promotion_approved"
@@ -373,6 +377,17 @@ class ModelGenerationStore:
             raise ModelGenerationError("invention evidence does not match its address")
         return result
 
+    def put_evidence_usage(self, value: EvidenceUsage) -> Path:
+        return self._put_json("evidence-usage", value.usage_id, value.to_dict())
+
+    def load_evidence_usage(self, identifier: str) -> EvidenceUsage:
+        result = EvidenceUsage.from_dict(
+            self._read_json("evidence-usage", identifier)
+        )
+        if result.usage_id != identifier:
+            raise ModelGenerationError("evidence usage does not match its address")
+        return result
+
     def put_audit(self, value: PromotionAuditSnapshot) -> Path:
         return self._put_json("audits", value.audit_id, value.to_dict())
 
@@ -562,6 +577,28 @@ class _LiveRuntimeVectors:
     native_predictions: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _LifecycleReplayState:
+    events: tuple[GenerationLifecycleEvent, ...]
+    active_generation_id: str | None
+    registered_dataset_id: str | None
+    pending_candidate_usage: EvidenceUsage | None
+    candidate: ModelGenerationLineage | None
+    approved: ModelGenerationLineage | None
+    activated: ModelGenerationLineage | None
+    pending_live_usage: EvidenceUsage | None
+    reopen: tuple[
+        ModelGenerationLineage,
+        AdaptiveRestorationBundle,
+        PromotionAuditSnapshot,
+    ] | None
+    activation_count: int
+    last_activated_lineage_id: str | None
+    activated_behavior_ids: frozenset[str]
+    spent_example_keys: frozenset[tuple[str, str, str | int]]
+    spent_record_fingerprints: frozenset[str]
+
+
 class ModelGenerationController:
     """Own durable active-generation routing above each generation's Class II registry."""
 
@@ -582,7 +619,17 @@ class ModelGenerationController:
         if ptmrt_executable is not None:
             self._bind_ptmrt_executable(ptmrt_executable)
         self._active_generation_id: str | None = None
-        self._active_generation_id = self._replay_lifecycle()
+        with self.store._event_lock:
+            state = self._replay_lifecycle_state()
+            pending = (
+                state.pending_candidate_usage
+                if state.pending_candidate_usage is not None
+                else state.pending_live_usage
+            )
+            if pending is not None:
+                self._append_evidence_abandoned_under_event_lock(pending)
+                state = self._replay_lifecycle_state()
+            self._active_generation_id = state.active_generation_id
 
     @property
     def active_generation_id(self) -> str | None:
@@ -633,6 +680,171 @@ class ModelGenerationController:
                 "durable live conformance requires a trusted ptmrt executable"
             )
         return self._ptmrt_executable
+
+    @staticmethod
+    def _evidence_usage_id(event: GenerationLifecycleEvent) -> str | None:
+        if event.kind not in (
+            LifecycleEventKind.PARENT_REGISTERED,
+            LifecycleEventKind.EVIDENCE_RESERVED,
+        ):
+            return None
+        identifier = event.details.get("evidence_usage_id")
+        if type(identifier) is not str:
+            raise ModelGenerationError("lifecycle event lacks durable evidence usage")
+        return identifier
+
+    def _ensure_evidence_available(
+        self,
+        usage: EvidenceUsage,
+        events: Sequence[GenerationLifecycleEvent],
+    ) -> None:
+        for event in events:
+            identifier = self._evidence_usage_id(event)
+            if identifier is None:
+                continue
+            previous = self.store.load_evidence_usage(identifier)
+            if previous.usage_id == usage.usage_id:
+                raise ModelGenerationError("evidence usage has already been reserved")
+            if previous.dataset_id != usage.dataset_id:
+                continue
+            if previous.example_keys & usage.example_keys:
+                raise ModelGenerationError(
+                    "evidence observation identity has already been used"
+                )
+            if previous.record_fingerprints & usage.record_fingerprints:
+                raise ModelGenerationError(
+                    "evidence labeled-record fingerprint has already been used"
+                )
+
+    def _authoritative_state_under_event_lock(self) -> _LifecycleReplayState:
+        state = self._replay_lifecycle_state()
+        if state.active_generation_id != self._active_generation_id:
+            raise ModelGenerationError(
+                "durable lifecycle route differs from the running controller"
+            )
+        return state
+
+    def _append_evidence_abandoned_under_event_lock(
+        self, usage: EvidenceUsage
+    ) -> None:
+        state = self._replay_lifecycle_state()
+        pending = (
+            state.pending_candidate_usage
+            if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE
+            else state.pending_live_usage
+        )
+        if pending != usage:
+            raise ModelGenerationError(
+                "evidence abandonment lacks the current pending reservation"
+            )
+        self.store.append_event(
+            LifecycleEventKind.EVIDENCE_ABANDONED,
+            usage.subject_generation_id,
+            evidence_usage_id=usage.usage_id,
+            purpose=usage.purpose.value,
+        )
+
+    def _abandon_evidence_if_pending(self, usage: EvidenceUsage) -> None:
+        with self._control_lock, self.store._event_lock:
+            state = self._authoritative_state_under_event_lock()
+            pending = (
+                state.pending_candidate_usage
+                if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE
+                else state.pending_live_usage
+            )
+            if pending == usage:
+                self._append_evidence_abandoned_under_event_lock(usage)
+
+    def _abandon_pending_for_purpose_under_event_lock(
+        self,
+        state: _LifecycleReplayState,
+        purpose: EvidenceUsagePurpose,
+    ) -> _LifecycleReplayState:
+        pending = (
+            state.pending_candidate_usage
+            if purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE
+            else state.pending_live_usage
+        )
+        if pending is None:
+            return state
+        self._append_evidence_abandoned_under_event_lock(pending)
+        return self._authoritative_state_under_event_lock()
+
+    def _reserve_evidence_under_event_lock(
+        self,
+        usage: EvidenceUsage,
+        state: _LifecycleReplayState,
+    ) -> None:
+        if usage.subject_generation_id != state.active_generation_id:
+            raise ModelGenerationError("evidence subject is not the active generation")
+        if not state.events or state.registered_dataset_id is None:
+            raise ModelGenerationError("evidence reservation requires a registered route")
+        if state.registered_dataset_id != usage.dataset_id:
+            raise ModelGenerationError(
+                "evidence usage belongs to a different registered dataset"
+            )
+        if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE:
+            subject = self.store.load_generation(usage.subject_generation_id)
+            if (
+                subject.kind is not GenerationKind.TRAINED_PARENT
+                or state.activated is not None
+                or state.candidate is not None
+                or state.approved is not None
+                or state.reopen is not None
+                or state.pending_candidate_usage is not None
+            ):
+                raise ModelGenerationError(
+                    "candidate evidence reservation is invalid in the current state"
+                )
+        elif usage.purpose is EvidenceUsagePurpose.LIVE_DRIFT:
+            subject = self.store.load_generation(usage.subject_generation_id)
+            if (
+                subject.kind is not GenerationKind.ADAPTED_CHILD
+                or state.activated is None
+                or state.candidate is not None
+                or state.approved is not None
+                or state.reopen is not None
+                or state.pending_live_usage is not None
+            ):
+                raise ModelGenerationError(
+                    "live evidence reservation is invalid in the current state"
+                )
+        else:
+            raise ModelGenerationError("parent evidence is committed during registration")
+        self._ensure_evidence_available(usage, state.events)
+        self.store.put_evidence_usage(usage)
+        self.store.append_event(
+            LifecycleEventKind.EVIDENCE_RESERVED,
+            usage.subject_generation_id,
+            evidence_usage_id=usage.usage_id,
+            purpose=usage.purpose.value,
+            dataset_id=usage.dataset_id,
+        )
+
+    def reserve_candidate_evidence(
+        self, corpora: LifecycleCorpora
+    ) -> tuple[EvidenceUsage, int, str | None]:
+        with self._control_lock:
+            if self._active_generation_id is None:
+                raise ModelGenerationError(
+                    "candidate evidence requires an active trained parent"
+                )
+            usage = EvidenceUsage(
+                EvidenceUsagePurpose.CANDIDATE_EPISODE,
+                self._active_generation_id,
+                (corpora.invention, corpora.adaptation, corpora.promotion),
+            )
+            with self.store._event_lock:
+                state = self._authoritative_state_under_event_lock()
+                state = self._abandon_pending_for_purpose_under_event_lock(
+                    state, EvidenceUsagePurpose.CANDIDATE_EPISODE
+                )
+                self._reserve_evidence_under_event_lock(usage, state)
+                return (
+                    usage,
+                    state.activation_count + 1,
+                    state.last_activated_lineage_id,
+                )
 
     def _validate_deployable_generation(
         self, generation: ModelGeneration
@@ -737,6 +949,7 @@ class ModelGenerationController:
         bundle = self.store.load_restoration_bundle(lineage.restoration_bundle_id)
         audit = self.store.load_audit(lineage.promotion_audit_id)
         evidence = self.store.load_invention_evidence(lineage.invention_evidence_id)
+        usage = self.store.load_evidence_usage(lineage.evidence_usage_id)
         parent_manifest = self.store.load_manifest(parent.literal_manifest_id)
         extended_manifest = self.store.load_manifest(extended.literal_manifest_id)
         child_manifest = self.store.load_manifest(child.literal_manifest_id)
@@ -760,6 +973,9 @@ class ModelGenerationController:
             (CorpusRole.ADAPTATION.value, lineage.adaptation_corpus_digest),
             (CorpusRole.PROMOTION.value, lineage.promotion_corpus_digest),
         )
+        usage_digests = tuple(
+            (corpus.role.value, corpus.digest) for corpus in usage.corpora
+        )
         if (
             parent.kind is not GenerationKind.TRAINED_PARENT
             or extended.kind is not GenerationKind.EXTENDED_PARENT
@@ -782,6 +998,9 @@ class ModelGenerationController:
             or evidence.invention_corpus_digest != lineage.invention_corpus_digest
             or evidence.proposal_semantic_id != lineage.origin_proposal_semantic_id
             or evidence.proposal_provenance_id != lineage.origin_proposal_provenance_id
+            or usage.purpose is not EvidenceUsagePurpose.CANDIDATE_EPISODE
+            or usage.subject_generation_id != parent.generation_id
+            or usage_digests != child_digests
             or audit.corpus_role is not CorpusRole.PROMOTION
             or audit.corpus_digest != lineage.promotion_corpus_digest
             or audit.conformance.artifact_id != child.inference_artifact_id
@@ -971,22 +1190,44 @@ class ModelGenerationController:
         if reconstructed != drift:
             raise ModelGenerationError("live drift audit cannot be reconstructed")
 
-    def _replay_lifecycle(self) -> str | None:
-        """Replay and validate every durable transition before deriving routing."""
+    def _replay_lifecycle_state(self) -> _LifecycleReplayState:
+        """Replay every durable transition into the authoritative semantic state."""
 
         events = self.store.read_events()
         if not events:
-            return None
+            return _LifecycleReplayState(
+                events=(),
+                active_generation_id=None,
+                registered_dataset_id=None,
+                pending_candidate_usage=None,
+                candidate=None,
+                approved=None,
+                activated=None,
+                pending_live_usage=None,
+                reopen=None,
+                activation_count=0,
+                last_activated_lineage_id=None,
+                activated_behavior_ids=frozenset(),
+                spent_example_keys=frozenset(),
+                spent_record_fingerprints=frozenset(),
+            )
         active: str | None = None
         candidate: ModelGenerationLineage | None = None
         approved: ModelGenerationLineage | None = None
         activated: ModelGenerationLineage | None = None
+        pending_candidate_usage: EvidenceUsage | None = None
+        pending_live_usage: EvidenceUsage | None = None
         reopen: tuple[
             ModelGenerationLineage,
             AdaptiveRestorationBundle,
             PromotionAuditSnapshot,
         ] | None = None
         activated_behaviors: set[str] = set()
+        activation_count = 0
+        last_activated_lineage_id: str | None = None
+        registered_dataset_id: str | None = None
+        used_example_keys: set[tuple[str, str, str | int]] = set()
+        used_record_fingerprints: set[str] = set()
         graph_cache: dict[
             str,
             tuple[
@@ -1007,16 +1248,139 @@ class ModelGenerationController:
                 graph_cache[lineage_id] = self._validate_lineage_graph(lineage)
             return self.store.load_lineage(lineage_id), graph_cache[lineage_id]
 
+        def consume_usage(usage: EvidenceUsage) -> None:
+            if used_example_keys & usage.example_keys:
+                raise ModelGenerationError(
+                    "lifecycle evidence reuses an observation identity"
+                )
+            if used_record_fingerprints & usage.record_fingerprints:
+                raise ModelGenerationError(
+                    "lifecycle evidence reuses a labeled-record fingerprint"
+                )
+            used_example_keys.update(usage.example_keys)
+            used_record_fingerprints.update(usage.record_fingerprints)
+
         for index, event in enumerate(events):
             details = dict(event.details)
             if event.kind is LifecycleEventKind.PARENT_REGISTERED:
-                if index != 0 or active is not None or details:
+                usage_id = details.get("evidence_usage_id")
+                if index != 0 or active is not None or type(usage_id) is not str:
                     raise ModelGenerationError("invalid parent registration transition")
                 parent = self.store.load_generation(event.generation_id)
+                usage = self.store.load_evidence_usage(usage_id)
+                expected = {"evidence_usage_id": usage.usage_id}
                 if parent.kind is not GenerationKind.TRAINED_PARENT:
                     raise ModelGenerationError("registered route is not a trained parent")
+                parent_digests = dict(parent.corpus_digests)
+                if (
+                    details != expected
+                    or usage.purpose
+                    is not EvidenceUsagePurpose.PARENT_REGISTRATION
+                    or usage.subject_generation_id != parent.generation_id
+                    or len(usage.corpora) != 1
+                    or usage.corpora[0].digest
+                    != parent_digests.get(CorpusRole.PARENT_TRAINING.value)
+                ):
+                    raise ModelGenerationError(
+                        "registered parent evidence usage is inconsistent"
+                    )
+                consume_usage(usage)
                 self._validate_deployable_generation(parent)
                 active = parent.generation_id
+                registered_dataset_id = usage.dataset_id
+                continue
+
+            if event.kind is LifecycleEventKind.EVIDENCE_RESERVED:
+                usage_id = details.get("evidence_usage_id")
+                if type(usage_id) is not str:
+                    raise ModelGenerationError("evidence reservation lacks an identity")
+                usage = self.store.load_evidence_usage(usage_id)
+                expected = {
+                    "evidence_usage_id": usage.usage_id,
+                    "purpose": usage.purpose.value,
+                    "dataset_id": usage.dataset_id,
+                }
+                if (
+                    details != expected
+                    or active is None
+                    or event.generation_id != active
+                    or usage.subject_generation_id != active
+                    or usage.dataset_id != registered_dataset_id
+                    or candidate is not None
+                    or approved is not None
+                    or reopen is not None
+                ):
+                    raise ModelGenerationError("invalid evidence-reserved transition")
+                if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE:
+                    subject = self.store.load_generation(active)
+                    if (
+                        subject.kind is not GenerationKind.TRAINED_PARENT
+                        or activated is not None
+                        or pending_candidate_usage is not None
+                    ):
+                        raise ModelGenerationError(
+                            "candidate evidence lacks an active trained parent"
+                        )
+                    pending_candidate_usage = usage
+                elif usage.purpose is EvidenceUsagePurpose.LIVE_DRIFT:
+                    subject = self.store.load_generation(active)
+                    if (
+                        subject.kind is not GenerationKind.ADAPTED_CHILD
+                        or activated is None
+                        or pending_live_usage is not None
+                    ):
+                        raise ModelGenerationError(
+                            "live evidence lacks an active child"
+                        )
+                    pending_live_usage = usage
+                else:
+                    raise ModelGenerationError(
+                        "parent evidence cannot use a reservation event"
+                    )
+                consume_usage(usage)
+                continue
+
+            if event.kind is LifecycleEventKind.EVIDENCE_ABANDONED:
+                usage_id = details.get("evidence_usage_id")
+                purpose = details.get("purpose")
+                if type(usage_id) is not str or type(purpose) is not str:
+                    raise ModelGenerationError(
+                        "evidence abandonment lacks durable identity"
+                    )
+                usage = self.store.load_evidence_usage(usage_id)
+                expected = {
+                    "evidence_usage_id": usage.usage_id,
+                    "purpose": usage.purpose.value,
+                }
+                if (
+                    details != expected
+                    or active is None
+                    or event.generation_id != active
+                    or usage.subject_generation_id != active
+                    or purpose != usage.purpose.value
+                    or candidate is not None
+                    or approved is not None
+                    or reopen is not None
+                ):
+                    raise ModelGenerationError(
+                        "invalid evidence-abandoned transition"
+                    )
+                if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE:
+                    if pending_candidate_usage != usage or activated is not None:
+                        raise ModelGenerationError(
+                            "candidate evidence abandonment lacks a pending reservation"
+                        )
+                    pending_candidate_usage = None
+                elif usage.purpose is EvidenceUsagePurpose.LIVE_DRIFT:
+                    if pending_live_usage != usage or activated is None:
+                        raise ModelGenerationError(
+                            "live evidence abandonment lacks a pending reservation"
+                        )
+                    pending_live_usage = None
+                else:
+                    raise ModelGenerationError(
+                        "parent registration evidence cannot be abandoned"
+                    )
                 continue
 
             if event.kind is LifecycleEventKind.CANDIDATE_CREATED:
@@ -1026,6 +1390,8 @@ class ModelGenerationController:
                     "lineage_id": lineage.lineage_id,
                     "parent_generation_id": parent.generation_id,
                     "extended_generation_id": extended.generation_id,
+                    "evidence_usage_id": lineage.evidence_usage_id,
+                    "activation_sequence": lineage.activation_sequence,
                 }
                 if (
                     active != parent.generation_id
@@ -1036,9 +1402,16 @@ class ModelGenerationController:
                     or event.generation_id != child.generation_id
                     or details != expected
                     or lineage.adaptive_behavior_id in activated_behaviors
+                    or pending_candidate_usage is None
+                    or pending_candidate_usage.usage_id
+                    != lineage.evidence_usage_id
+                    or lineage.activation_sequence != activation_count + 1
+                    or lineage.previous_activated_lineage_id
+                    != last_activated_lineage_id
                 ):
                     raise ModelGenerationError("invalid candidate-created transition")
                 candidate = lineage
+                pending_candidate_usage = None
                 continue
 
             if event.kind is LifecycleEventKind.CANDIDATE_REJECTED:
@@ -1059,6 +1432,9 @@ class ModelGenerationController:
                     or event.generation_id != child.generation_id
                     or audit.accepted
                     or details != expected
+                    or lineage.activation_sequence != activation_count + 1
+                    or lineage.previous_activated_lineage_id
+                    != last_activated_lineage_id
                 ):
                     raise ModelGenerationError("invalid candidate-rejected transition")
                 candidate = None
@@ -1103,11 +1479,16 @@ class ModelGenerationController:
                     or not audit.accepted
                     or not audit.conformance.exact
                     or lineage.adaptive_behavior_id in activated_behaviors
+                    or lineage.activation_sequence != activation_count + 1
+                    or lineage.previous_activated_lineage_id
+                    != last_activated_lineage_id
                     or details != expected
                 ):
                     raise ModelGenerationError("invalid activated transition")
                 active = child.generation_id
                 activated_behaviors.add(lineage.adaptive_behavior_id)
+                activation_count += 1
+                last_activated_lineage_id = lineage.lineage_id
                 approved = None
                 activated = lineage
                 continue
@@ -1119,10 +1500,12 @@ class ModelGenerationController:
                 _, _, child, bundle, _, _ = values
                 drift_id = details.get("drift_audit_id")
                 live_evidence_id = details.get("live_conformance_evidence_id")
+                evidence_usage_id = details.get("evidence_usage_id")
                 raw_policy = details.get("drift_policy")
                 if (
                     type(drift_id) is not str
                     or type(live_evidence_id) is not str
+                    or type(evidence_usage_id) is not str
                     or not isinstance(raw_policy, Mapping)
                 ):
                     raise ModelGenerationError("reopen request lacks durable evidence")
@@ -1140,6 +1523,11 @@ class ModelGenerationController:
                     "child_errors": drift.child_errors,
                     "drift_policy": policy.to_dict(),
                     "live_conformance_evidence_id": live_evidence.evidence_id,
+                    "evidence_usage_id": (
+                        pending_live_usage.usage_id
+                        if pending_live_usage is not None
+                        else None
+                    ),
                 }
                 if (
                     lineage != activated
@@ -1149,10 +1537,14 @@ class ModelGenerationController:
                     or not drift.conformance.exact
                     or drift.conformance.artifact_id != child.inference_artifact_id
                     or not drift_requires_reopen(drift, policy)
+                    or pending_live_usage is None
+                    or len(pending_live_usage.corpora) != 1
+                    or pending_live_usage.corpora[0] != live_evidence.corpus
                     or details != expected
                 ):
                     raise ModelGenerationError("invalid reopen-requested transition")
                 reopen = lineage, bundle, drift
+                pending_live_usage = None
                 continue
 
             if event.kind is LifecycleEventKind.PARENT_RESTORED:
@@ -1180,7 +1572,22 @@ class ModelGenerationController:
 
         if active is None:
             raise ModelGenerationError("lifecycle history has no active parent")
-        return active
+        return _LifecycleReplayState(
+            events=events,
+            active_generation_id=active,
+            registered_dataset_id=registered_dataset_id,
+            pending_candidate_usage=pending_candidate_usage,
+            candidate=candidate,
+            approved=approved,
+            activated=activated,
+            pending_live_usage=pending_live_usage,
+            reopen=reopen,
+            activation_count=activation_count,
+            last_activated_lineage_id=last_activated_lineage_id,
+            activated_behavior_ids=frozenset(activated_behaviors),
+            spent_example_keys=frozenset(used_example_keys),
+            spent_record_fingerprints=frozenset(used_record_fingerprints),
+        )
 
     def _resolve_restoration_bundle(
         self, bundle: AdaptiveRestorationBundle
@@ -1237,55 +1644,73 @@ class ModelGenerationController:
             machine,
         )
 
-    def register_parent(self, generation: ModelGeneration) -> None:
+    def register_parent(
+        self,
+        generation: ModelGeneration,
+        parent_training_corpus: LabeledCorpus,
+    ) -> None:
         if generation.kind is not GenerationKind.TRAINED_PARENT:
             raise ModelGenerationError("initial active generation must be a trained parent")
+        if parent_training_corpus.role is not CorpusRole.PARENT_TRAINING:
+            raise ModelGenerationError("parent registration evidence has the wrong role")
+        usage = EvidenceUsage(
+            EvidenceUsagePurpose.PARENT_REGISTRATION,
+            generation.generation_id,
+            (parent_training_corpus,),
+        )
+        if dict(generation.corpus_digests) != {
+            CorpusRole.PARENT_TRAINING.value: parent_training_corpus.digest
+        }:
+            raise ModelGenerationError(
+                "parent registration evidence differs from the generation"
+            )
         self._validate_deployable_generation(generation)
-        with self._control_lock:
-            if self._active_generation_id is not None or self.store.read_events():
+        with self._control_lock, self.store._event_lock:
+            state = self._authoritative_state_under_event_lock()
+            if state.active_generation_id is not None or state.events:
                 raise ModelGenerationError("a trained parent is already registered")
+            self.store.put_evidence_usage(usage)
+            self.store.append_event(
+                LifecycleEventKind.PARENT_REGISTERED,
+                generation.generation_id,
+                evidence_usage_id=usage.usage_id,
+            )
             self._active_generation_id = generation.generation_id
-            try:
-                self.store.append_event(
-                    LifecycleEventKind.PARENT_REGISTERED, generation.generation_id
-                )
-            except Exception:
-                self._active_generation_id = self._replay_lifecycle()
-                raise
         self._emit("parent_registered", generation_id=generation.generation_id)
 
     def record_candidate(self, lineage: ModelGenerationLineage) -> None:
-        with self._control_lock:
+        with self._control_lock, self.store._event_lock:
             self._validate_lineage_graph(lineage)
-            if self._active_generation_id != lineage.parent_generation_id:
+            state = self._authoritative_state_under_event_lock()
+            if state.active_generation_id != lineage.parent_generation_id:
                 raise ModelGenerationError("candidate parent is not the active generation")
-            events = self.store.read_events()
-            for event in events:
-                if event.kind is not LifecycleEventKind.ACTIVATED:
-                    continue
-                activated_lineage_id = event.details.get("lineage_id")
-                if type(activated_lineage_id) is not str:
-                    raise ModelGenerationError("activation lacks durable lineage identity")
-                activated_lineage = self.store.load_lineage(activated_lineage_id)
-                if (
-                    activated_lineage.adaptive_behavior_id
-                    == lineage.adaptive_behavior_id
-                ):
-                    raise ModelGenerationError(
-                        "candidate adaptive behavior has already been activated"
-                    )
-            if not events or events[-1].kind not in (
-                LifecycleEventKind.PARENT_REGISTERED,
-                LifecycleEventKind.CANDIDATE_REJECTED,
-                LifecycleEventKind.PARENT_RESTORED,
+            usage = self.store.load_evidence_usage(lineage.evidence_usage_id)
+            if lineage.adaptive_behavior_id in state.activated_behavior_ids:
+                raise ModelGenerationError(
+                    "candidate adaptive behavior has already been activated"
+                )
+            if (
+                state.pending_candidate_usage != usage
+                or state.candidate is not None
+                or state.approved is not None
+                or state.activated is not None
+                or state.reopen is not None
+                or usage.subject_generation_id != lineage.parent_generation_id
+                or lineage.activation_sequence != state.activation_count + 1
+                or lineage.previous_activated_lineage_id
+                != state.last_activated_lineage_id
             ):
-                raise ModelGenerationError("candidate creation is invalid in the current state")
+                raise ModelGenerationError(
+                    "candidate creation lacks matching reserved evidence"
+                )
             self.store.append_event(
                 LifecycleEventKind.CANDIDATE_CREATED,
                 lineage.child_generation_id,
                 lineage_id=lineage.lineage_id,
                 parent_generation_id=lineage.parent_generation_id,
                 extended_generation_id=lineage.extended_generation_id,
+                evidence_usage_id=usage.usage_id,
+                activation_sequence=lineage.activation_sequence,
             )
         self._emit(
             "proposal_created",
@@ -1296,24 +1721,18 @@ class ModelGenerationController:
     def reject_candidate(
         self, generation_id: str, audit: PromotionAuditSnapshot
     ) -> None:
-        with self._control_lock:
+        with self._control_lock, self.store._event_lock:
             if audit.accepted:
                 raise ModelGenerationError("an accepted promotion audit cannot be rejected")
             if self.store.load_audit(audit.audit_id) != audit:
                 raise ModelGenerationError("rejection audit differs from durable evidence")
-            events = self.store.read_events()
-            lineage_id = events[-1].details.get("lineage_id") if events else None
-            if (
-                not events
-                or events[-1].kind is not LifecycleEventKind.CANDIDATE_CREATED
-                or events[-1].generation_id != generation_id
-                or type(lineage_id) is not str
-            ):
+            state = self._authoritative_state_under_event_lock()
+            if state.candidate is None:
                 raise ModelGenerationError("candidate rejection is invalid in the current state")
-            lineage = self.store.load_lineage(lineage_id)
+            lineage = state.candidate
             *_, stored_audit, _ = self._validate_lineage_graph(lineage)
             if (
-                self._active_generation_id != lineage.parent_generation_id
+                state.active_generation_id != lineage.parent_generation_id
                 or lineage.child_generation_id != generation_id
                 or lineage.promotion_audit_id != audit.audit_id
                 or stored_audit != audit
@@ -1342,17 +1761,14 @@ class ModelGenerationController:
             raise ModelGenerationError("only an accepted exact audit may approve promotion")
         if lineage.promotion_audit_id != audit.audit_id:
             raise ModelGenerationError("lineage references a different promotion audit")
-        with self._control_lock:
+        with self._control_lock, self.store._event_lock:
             *_, stored_audit, _ = self._validate_lineage_graph(lineage)
             if stored_audit != audit:
                 raise ModelGenerationError("promotion audit differs from durable audit")
-            events = self.store.read_events()
+            state = self._authoritative_state_under_event_lock()
             if (
-                self._active_generation_id != lineage.parent_generation_id
-                or not events
-                or events[-1].kind is not LifecycleEventKind.CANDIDATE_CREATED
-                or events[-1].generation_id != lineage.child_generation_id
-                or events[-1].details.get("lineage_id") != lineage.lineage_id
+                state.active_generation_id != lineage.parent_generation_id
+                or state.candidate != lineage
             ):
                 raise ModelGenerationError("promotion approval is invalid in the current state")
             self.store.append_event(
@@ -1373,35 +1789,25 @@ class ModelGenerationController:
     ) -> None:
         if not audit.accepted or lineage.promotion_audit_id != audit.audit_id:
             raise ModelGenerationError("child activation lacks an accepted promotion audit")
-        with self._control_lock:
+        with self._control_lock, self.store._event_lock:
             *_, stored_audit, _ = self._validate_lineage_graph(lineage)
             if stored_audit != audit:
                 raise ModelGenerationError("activation audit differs from durable audit")
-            events = self.store.read_events()
-            if (
-                not events
-                or events[-1].kind is not LifecycleEventKind.PROMOTION_APPROVED
-                or events[-1].generation_id != lineage.child_generation_id
-                or events[-1].details.get("lineage_id") != lineage.lineage_id
-                or events[-1].details.get("audit_id") != audit.audit_id
-            ):
+            state = self._authoritative_state_under_event_lock()
+            if state.approved != lineage:
                 raise ModelGenerationError("activation lacks the durable promotion decision")
-            previous = self._active_generation_id
+            previous = state.active_generation_id
             if previous != lineage.parent_generation_id:
                 raise ModelGenerationError("active generation is not the lineage parent")
+            self.store.append_event(
+                LifecycleEventKind.ACTIVATED,
+                lineage.child_generation_id,
+                previous_generation_id=previous,
+                lineage_id=lineage.lineage_id,
+                adaptive_behavior_id=lineage.adaptive_behavior_id,
+                audit_id=audit.audit_id,
+            )
             self._active_generation_id = lineage.child_generation_id
-            try:
-                self.store.append_event(
-                    LifecycleEventKind.ACTIVATED,
-                    lineage.child_generation_id,
-                    previous_generation_id=previous,
-                    lineage_id=lineage.lineage_id,
-                    adaptive_behavior_id=lineage.adaptive_behavior_id,
-                    audit_id=audit.audit_id,
-                )
-            except Exception:
-                self._active_generation_id = self._replay_lifecycle()
-                raise
         self._emit(
             "artifact_published",
             generation_id=lineage.child_generation_id,
@@ -1420,85 +1826,128 @@ class ModelGenerationController:
             raise ModelGenerationError("reopen evaluation requires the live/drift corpus")
         with self._control_lock:
             trusted_ptmrt = self._bind_ptmrt_executable(ptmrt_executable)
-            if self._active_generation_id != child_generation_id:
-                raise ModelGenerationError("reopen target is not the active generation")
-            events = self.store.read_events()
-            if (
-                not events
-                or events[-1].kind is not LifecycleEventKind.ACTIVATED
-                or events[-1].generation_id != child_generation_id
-            ):
-                raise ModelGenerationError("reopen lacks the active child's durable activation")
-            lineage_id = events[-1].details.get("lineage_id")
-            if type(lineage_id) is not str:
-                raise ModelGenerationError("active child lacks durable lineage")
-            lineage = self.store.load_lineage(lineage_id)
-            parent, _, child, bundle, _, _ = self._validate_lineage_graph(lineage)
-            if child.generation_id != child_generation_id:
-                raise ModelGenerationError("active lineage names a different child")
-            child_snapshot, child_manifest, _, child_artifact = (
-                self._validate_deployable_generation(child)
-            )
-            parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
-            parent_manifest = self.store.load_manifest(parent.literal_manifest_id)
-            vectors = _verify_snapshot_records_with_ptmrt(
-                trusted_ptmrt,
-                self.store.artifact_path(child_artifact.artifact_id),
-                child_snapshot,
-                child_manifest,
-                child_artifact,
-                live_corpus.records,
-            )
-            live_evidence = LiveRuntimeConformanceEvidence(
-                child.generation_id,
-                child_artifact.artifact_id,
-                child.snapshot_id,
-                child.literal_manifest_id,
-                live_corpus,
-                vectors.scalar_features,
-                vectors.scalar_scores,
-                vectors.scalar_predictions,
-                vectors.packed_predictions,
-                vectors.native_features,
-                vectors.native_scores,
-                vectors.native_predictions,
-                _file_digest(
-                    trusted_ptmrt,
-                    maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
-                ),
-            )
-            conformance = audit_snapshot_runtime_conformance(
-                child_snapshot,
-                child_manifest,
-                child_artifact,
-                live_corpus.records,
-                ptmrt_verified=True,
-                ptmrt_artifact_id=vectors.artifact_id,
-            )
-            drift = audit_parent_child_snapshots(
-                parent_snapshot,
-                parent_manifest,
-                child_snapshot,
-                child_manifest,
-                live_corpus,
-                conformance,
-                PromotionAuditPolicy(minimum_observations=1),
-            )
-            if not drift.conformance.exact or not drift_requires_reopen(drift, policy):
-                raise ModelGenerationError("labeled drift does not justify reopen")
-            self.store.put_live_conformance(live_evidence)
-            self.store.put_audit(drift)
-            self.store.append_event(
-                LifecycleEventKind.REOPEN_REQUESTED,
+            live_usage = EvidenceUsage(
+                EvidenceUsagePurpose.LIVE_DRIFT,
                 child_generation_id,
-                drift_audit_id=drift.audit_id,
-                lineage_id=lineage.lineage_id,
-                restoration_bundle_id=bundle.bundle_id,
-                parent_errors=drift.parent_errors,
-                child_errors=drift.child_errors,
-                drift_policy=policy.to_dict(),
-                live_conformance_evidence_id=live_evidence.evidence_id,
+                (live_corpus,),
             )
+            with self.store._event_lock:
+                state = self._authoritative_state_under_event_lock()
+                if (
+                    state.active_generation_id != child_generation_id
+                    or state.activated is None
+                ):
+                    raise ModelGenerationError(
+                        "reopen lacks the active child's durable activation"
+                    )
+                state = self._abandon_pending_for_purpose_under_event_lock(
+                    state, EvidenceUsagePurpose.LIVE_DRIFT
+                )
+                lineage = state.activated
+                if lineage is None:
+                    raise ModelGenerationError(
+                        "reopen lacks the active child's durable activation"
+                    )
+                parent, _, child, bundle, _, _ = self._validate_lineage_graph(
+                    lineage
+                )
+                if child.generation_id != child_generation_id:
+                    raise ModelGenerationError(
+                        "active lineage names a different child"
+                    )
+                if live_corpus.dataset_id != state.registered_dataset_id:
+                    raise ModelGenerationError(
+                        "live/drift corpus belongs to a different dataset"
+                    )
+                self._reserve_evidence_under_event_lock(live_usage, state)
+            try:
+                child_snapshot, child_manifest, _, child_artifact = (
+                    self._validate_deployable_generation(child)
+                )
+                parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
+                parent_manifest = self.store.load_manifest(parent.literal_manifest_id)
+                vectors = _verify_snapshot_records_with_ptmrt(
+                    trusted_ptmrt,
+                    self.store.artifact_path(child_artifact.artifact_id),
+                    child_snapshot,
+                    child_manifest,
+                    child_artifact,
+                    live_corpus.records,
+                )
+                live_evidence = LiveRuntimeConformanceEvidence(
+                    child.generation_id,
+                    child_artifact.artifact_id,
+                    child.snapshot_id,
+                    child.literal_manifest_id,
+                    live_corpus,
+                    vectors.scalar_features,
+                    vectors.scalar_scores,
+                    vectors.scalar_predictions,
+                    vectors.packed_predictions,
+                    vectors.native_features,
+                    vectors.native_scores,
+                    vectors.native_predictions,
+                    _file_digest(
+                        trusted_ptmrt,
+                        maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
+                    ),
+                )
+                conformance = audit_snapshot_runtime_conformance(
+                    child_snapshot,
+                    child_manifest,
+                    child_artifact,
+                    live_corpus.records,
+                    ptmrt_verified=True,
+                    ptmrt_artifact_id=vectors.artifact_id,
+                )
+                drift = audit_parent_child_snapshots(
+                    parent_snapshot,
+                    parent_manifest,
+                    child_snapshot,
+                    child_manifest,
+                    live_corpus,
+                    conformance,
+                    PromotionAuditPolicy(minimum_observations=1),
+                )
+                if (
+                    not drift.conformance.exact
+                    or not drift_requires_reopen(drift, policy)
+                ):
+                    raise ModelGenerationError("labeled drift does not justify reopen")
+                self.store.put_live_conformance(live_evidence)
+                self.store.put_audit(drift)
+                with self.store._event_lock:
+                    commit_state = self._authoritative_state_under_event_lock()
+                    if (
+                        commit_state.active_generation_id != child_generation_id
+                        or commit_state.activated != lineage
+                        or commit_state.pending_live_usage != live_usage
+                        or commit_state.reopen is not None
+                    ):
+                        raise ModelGenerationError(
+                            "live evidence is no longer the pending reopen authorization"
+                        )
+                    self.store.append_event(
+                        LifecycleEventKind.REOPEN_REQUESTED,
+                        child_generation_id,
+                        drift_audit_id=drift.audit_id,
+                        lineage_id=lineage.lineage_id,
+                        restoration_bundle_id=bundle.bundle_id,
+                        parent_errors=drift.parent_errors,
+                        child_errors=drift.child_errors,
+                        drift_policy=policy.to_dict(),
+                        live_conformance_evidence_id=live_evidence.evidence_id,
+                        evidence_usage_id=live_usage.usage_id,
+                    )
+            except BaseException as error:
+                try:
+                    self._abandon_evidence_if_pending(live_usage)
+                except Exception as abandonment_error:
+                    error.add_note(
+                        "durable evidence abandonment also failed: "
+                        f"{abandonment_error}"
+                    )
+                raise
         self._emit(
             "reopen_requested",
             generation_id=child_generation_id,
@@ -1509,61 +1958,28 @@ class ModelGenerationController:
     def restore_parent(
         self, bundle: AdaptiveRestorationBundle
     ) -> RestoredAdaptiveParent:
-        with self._control_lock:
-            active_child_id = self._active_generation_id
-            if active_child_id is None:
-                raise ModelGenerationError("restoration requires an active child")
-            events = self.store.read_events()
-            if (
-                not events
-                or events[-1].kind is not LifecycleEventKind.REOPEN_REQUESTED
-                or events[-1].generation_id != active_child_id
-                or events[-1].details.get("restoration_bundle_id") != bundle.bundle_id
-            ):
-                raise ModelGenerationError("restoration lacks a matching reopen request")
-            drift_id = events[-1].details.get("drift_audit_id")
-            live_evidence_id = events[-1].details.get(
-                "live_conformance_evidence_id"
-            )
-            lineage_id = events[-1].details.get("lineage_id")
-            raw_policy = events[-1].details.get("drift_policy")
-            if (
-                type(drift_id) is not str
-                or type(live_evidence_id) is not str
-                or type(lineage_id) is not str
-                or not isinstance(raw_policy, Mapping)
-            ):
-                raise ModelGenerationError("reopen request lacks durable evidence")
-            drift = self.store.load_audit(drift_id)
-            live_evidence = self.store.load_live_conformance(live_evidence_id)
-            policy = DriftAuditPolicy.from_dict(raw_policy)
-            lineage = self.store.load_lineage(lineage_id)
-            _, _, child, graph_bundle, _, _ = self._validate_lineage_graph(lineage)
-            self._validate_live_conformance_evidence(
-                lineage, drift, live_evidence
-            )
-            if (
-                child.generation_id != active_child_id
-                or graph_bundle != bundle
-                or not drift.conformance.exact
-                or not drift_requires_reopen(drift, policy)
-                or drift.conformance.artifact_id != child.inference_artifact_id
-            ):
-                raise ModelGenerationError("reopen evidence does not authorize restoration")
-            restored = self._resolve_restoration_bundle(bundle)
-            self._active_generation_id = bundle.parent_generation_id
-            try:
-                self.store.append_event(
-                    LifecycleEventKind.PARENT_RESTORED,
-                    bundle.parent_generation_id,
-                    restoration_bundle_id=bundle.bundle_id,
-                    previous_generation_id=active_child_id,
-                    lineage_id=lineage.lineage_id,
-                    drift_audit_id=drift.audit_id,
+        with self._control_lock, self.store._event_lock:
+            state = self._authoritative_state_under_event_lock()
+            active_child_id = state.active_generation_id
+            if active_child_id is None or state.reopen is None:
+                raise ModelGenerationError(
+                    "restoration lacks a matching reopen request"
                 )
-            except Exception:
-                self._active_generation_id = self._replay_lifecycle()
-                raise
+            lineage, graph_bundle, drift = state.reopen
+            if graph_bundle != bundle:
+                raise ModelGenerationError(
+                    "reopen evidence does not authorize restoration"
+                )
+            restored = self._resolve_restoration_bundle(bundle)
+            self.store.append_event(
+                LifecycleEventKind.PARENT_RESTORED,
+                bundle.parent_generation_id,
+                restoration_bundle_id=bundle.bundle_id,
+                previous_generation_id=active_child_id,
+                lineage_id=lineage.lineage_id,
+                drift_audit_id=drift.audit_id,
+            )
+            self._active_generation_id = bundle.parent_generation_id
         self._emit(
             "artifact_reopened",
             generation_id=bundle.parent_generation_id,
@@ -1879,7 +2295,7 @@ class TrainedParentLifecycleResult:
     controller: ModelGenerationController
 
 
-def execute_trained_parent_lifecycle(
+def _execute_trained_parent_lifecycle_once(
     *,
     parent_snapshot: TMSnapshot,
     parent_manifest: OrderedLiteralManifest,
@@ -1893,7 +2309,7 @@ def execute_trained_parent_lifecycle(
     telemetry: TelemetrySession | None = None,
     event_sink: TelemetrySink | None = None,
 ) -> TrainedParentLifecycleResult:
-    """Execute and durably activate the first exact trained-parent PTA loop."""
+    """Execute one recurrent exact trained-parent PTA generation episode."""
 
     if parent_training_corpus.role is not CorpusRole.PARENT_TRAINING:
         raise ModelGenerationError("parent training evidence has the wrong corpus role")
@@ -1923,15 +2339,6 @@ def execute_trained_parent_lifecycle(
         lifecycle_ids
         | {example.example_id for example in parent_training_corpus.examples}
     )
-
-    invention_session, proposal, reviewed, invention_evidence = (
-        invent_threshold_for_corpus(
-            corpora.invention,
-            parent_manifest,
-            numeric_field=numeric_field,
-        )
-    )
-    store.put_invention_evidence(invention_evidence)
 
     parent_envelope = AdaptiveSnapshotEnvelope(parent_snapshot)
     parent_preprocessing, parent_artifact = compile_generation_artifact(
@@ -1975,9 +2382,38 @@ def execute_trained_parent_lifecycle(
         event_sink=event_sink,
     )
     if controller.active_generation_id is None:
-        controller.register_parent(parent_generation)
+        controller.register_parent(parent_generation, parent_training_corpus)
     elif controller.active_generation_id != parent_generation.generation_id:
         raise ModelGenerationError("store already routes a different active generation")
+    else:
+        events = store.read_events()
+        parent_usage = EvidenceUsage(
+            EvidenceUsagePurpose.PARENT_REGISTRATION,
+            parent_generation.generation_id,
+            (parent_training_corpus,),
+        )
+        registered_usage_id = (
+            events[0].details.get("evidence_usage_id") if events else None
+        )
+        if (
+            type(registered_usage_id) is not str
+            or store.load_evidence_usage(registered_usage_id) != parent_usage
+        ):
+            raise ModelGenerationError(
+                "active parent has different durable training evidence"
+            )
+
+    usage, activation_sequence, previous_lineage_id = (
+        controller.reserve_candidate_evidence(corpora)
+    )
+    invention_session, proposal, reviewed, invention_evidence = (
+        invent_threshold_for_corpus(
+            corpora.invention,
+            parent_manifest,
+            numeric_field=numeric_field,
+        )
+    )
+    store.put_invention_evidence(invention_evidence)
 
     extended = extend_parent_with_threshold(
         parent_snapshot,
@@ -2082,19 +2518,22 @@ def execute_trained_parent_lifecycle(
     )
     store.put_audit(promotion)
     lineage = ModelGenerationLineage(
-        parent_generation.generation_id,
-        extended_generation.generation_id,
-        child_generation.generation_id,
-        behavior.behavior_id,
-        restoration_bundle.bundle_id,
-        promotion.audit_id,
-        invention_evidence.evidence_id,
-        reviewed.descriptor.literal_id,
-        corpora.invention.digest,
-        corpora.adaptation.digest,
-        corpora.promotion.digest,
-        proposal.semantic_id(),
-        proposal.provenance_id(),
+        parent_generation_id=parent_generation.generation_id,
+        extended_generation_id=extended_generation.generation_id,
+        child_generation_id=child_generation.generation_id,
+        adaptive_behavior_id=behavior.behavior_id,
+        restoration_bundle_id=restoration_bundle.bundle_id,
+        promotion_audit_id=promotion.audit_id,
+        invention_evidence_id=invention_evidence.evidence_id,
+        evidence_usage_id=usage.usage_id,
+        activation_sequence=activation_sequence,
+        previous_activated_lineage_id=previous_lineage_id,
+        invented_literal_id=reviewed.descriptor.literal_id,
+        invention_corpus_digest=corpora.invention.digest,
+        adaptation_corpus_digest=corpora.adaptation.digest,
+        promotion_corpus_digest=corpora.promotion.digest,
+        origin_proposal_semantic_id=proposal.semantic_id(),
+        origin_proposal_provenance_id=proposal.provenance_id(),
     )
     store.put_lineage(lineage)
     controller.record_candidate(lineage)
@@ -2120,6 +2559,52 @@ def execute_trained_parent_lifecycle(
         Path(ptmrt_executable),
         controller,
     )
+
+
+def execute_trained_parent_lifecycle(
+    *,
+    parent_snapshot: TMSnapshot,
+    parent_manifest: OrderedLiteralManifest,
+    parent_training_corpus: LabeledCorpus,
+    corpora: LifecycleCorpora,
+    numeric_field: str,
+    adaptation_epochs: int,
+    promotion_policy: PromotionAuditPolicy,
+    store: ModelGenerationStore,
+    ptmrt_executable: str | Path,
+    telemetry: TelemetrySession | None = None,
+    event_sink: TelemetrySink | None = None,
+) -> TrainedParentLifecycleResult:
+    """Execute one episode and terminalize pre-candidate evidence on failure."""
+
+    try:
+        return _execute_trained_parent_lifecycle_once(
+            parent_snapshot=parent_snapshot,
+            parent_manifest=parent_manifest,
+            parent_training_corpus=parent_training_corpus,
+            corpora=corpora,
+            numeric_field=numeric_field,
+            adaptation_epochs=adaptation_epochs,
+            promotion_policy=promotion_policy,
+            store=store,
+            ptmrt_executable=ptmrt_executable,
+            telemetry=telemetry,
+            event_sink=event_sink,
+        )
+    except BaseException as error:
+        try:
+            # A newly reconstructed controller treats any crash-orphaned
+            # reservation as spent-but-terminal before returning a route.
+            ModelGenerationController(
+                store,
+                ptmrt_executable=ptmrt_executable,
+            )
+        except Exception as recovery_error:
+            error.add_note(
+                "candidate evidence recovery also failed: "
+                f"{recovery_error}"
+            )
+        raise
 
 
 def reopen_and_restore_for_drift(
