@@ -47,15 +47,20 @@ ADAPTIVE_SNAPSHOT_SCHEMA = "ptm.adaptive-snapshot.v1"
 RESTORATION_BUNDLE_SCHEMA = "ptm.adaptive-restoration-bundle.v1"
 ADAPTIVE_BEHAVIOR_SCHEMA = "ptm.adaptive-behavior.v2"
 INVENTION_EVIDENCE_SCHEMA = "ptm.gnu-prolog-invention-evidence.v1"
+THRESHOLD_CANDIDATE_SET_SCHEMA = "ptm.threshold-candidate-set.v1"
+THRESHOLD_CANDIDATE_SELECTION_SCHEMA = "ptm.threshold-candidate-selection.v1"
 GENERATION_SCHEMA = "ptm.model-generation.v1"
 PROMOTION_AUDIT_SCHEMA = "ptm.promotion-audit.v1"
 LIVE_CONFORMANCE_SCHEMA = "ptm.live-runtime-conformance.v1"
 EVIDENCE_USAGE_SCHEMA = "ptm.model-generation-evidence-usage.v1"
-LINEAGE_SCHEMA = "ptm.model-generation-lineage.v4"
+LEGACY_LINEAGE_SCHEMA = "ptm.model-generation-lineage.v4"
+LINEAGE_SCHEMA = "ptm.model-generation-lineage.v5"
 TRAINING_SEMANTICS_VERSION = "ptm.scalar-binary-training.v1"
 PYTHON_RNG_ALGORITHM = "python.random-mt19937-state-v1"
 MAX_CORPUS_EXAMPLES = 2_048
 MAX_ADAPTATION_EPOCHS = 10_000
+MAX_THRESHOLD_CANDIDATES = 64
+MAX_THRESHOLD_FIELDS = 32
 
 
 class ModelGenerationError(ValueError):
@@ -599,6 +604,690 @@ class PrologInventionEvidence:
         )
         if result.evidence_id != value["evidence_id"]:
             raise ModelGenerationError("GNU Prolog invention evidence digest mismatch")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class ThresholdCandidateBudget:
+    """Explicit breadth bounds for one complete Input-PTA threshold search."""
+
+    maximum_fields: int = 8
+    maximum_candidates: int = 8
+
+    def __post_init__(self) -> None:
+        for name, value, upper in (
+            ("maximum_fields", self.maximum_fields, MAX_THRESHOLD_FIELDS),
+            ("maximum_candidates", self.maximum_candidates, MAX_THRESHOLD_CANDIDATES),
+        ):
+            if type(value) is not int or not 1 <= value <= upper:
+                raise ModelGenerationError(f"{name} must be in 1..{upper}")
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "maximum_fields": self.maximum_fields,
+            "maximum_candidates": self.maximum_candidates,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ThresholdCandidateBudget":
+        if not isinstance(value, Mapping) or set(value) != {
+            "maximum_fields",
+            "maximum_candidates",
+        }:
+            raise ModelGenerationError("threshold candidate budget is malformed")
+        try:
+            return cls(value["maximum_fields"], value["maximum_candidates"])
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("threshold candidate budget is malformed") from error
+
+
+@dataclass(frozen=True, slots=True)
+class ThresholdCandidateProposal:
+    """Reviewed identity of one threshold returned by the bounded collective."""
+
+    proposal_semantic_id: str
+    proposal_provenance_id: str
+    field: str
+    threshold: int | float
+    invented_literal_id: int
+    boundary_evidence_digest: str
+    proposal_payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        _require_digest(self.proposal_semantic_id, "candidate proposal semantic")
+        _require_digest(self.proposal_provenance_id, "candidate proposal provenance")
+        _require_digest(self.boundary_evidence_digest, "candidate boundary evidence")
+        if type(self.field) is not str or not self.field:
+            raise ModelGenerationError("threshold candidate field is invalid")
+        if type(self.threshold) not in (int, float) or not math.isfinite(self.threshold):
+            raise ModelGenerationError("threshold candidate boundary is invalid")
+        if (
+            type(self.invented_literal_id) is not int
+            or not 0 <= self.invented_literal_id < 1 << 64
+        ):
+            raise ModelGenerationError("threshold candidate literal ID is invalid")
+        expected_proposal_fields = {
+            "proposal_id",
+            "source_pta_ids",
+            "supporting_insights",
+            "counterexamples_addressed",
+            "required_literals",
+            "native_target",
+            "structure",
+            "weights",
+            "output_assignments",
+            "resource_bounds",
+            "lowering_version",
+            "validation_signature",
+            "support_trace",
+        }
+        if (
+            not isinstance(self.proposal_payload, Mapping)
+            or set(self.proposal_payload) != expected_proposal_fields
+            or self.proposal_payload.get("native_target") != "threshold"
+            or not isinstance(self.proposal_payload.get("structure"), Mapping)
+            or dict(self.proposal_payload["structure"])
+            != {
+                "field": self.field,
+                "operator": "ge",
+                "threshold": self.threshold,
+            }
+        ):
+            raise ModelGenerationError(
+                "threshold candidate canonical proposal payload is inconsistent"
+            )
+        frozen_payload = _freeze_json(self.proposal_payload)
+        if not isinstance(frozen_payload, Mapping):
+            raise TypeError("threshold candidate proposal payload is invalid")
+        object.__setattr__(self, "proposal_payload", frozen_payload)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "proposal_semantic_id": self.proposal_semantic_id,
+            "proposal_provenance_id": self.proposal_provenance_id,
+            "field": self.field,
+            "threshold": self.threshold,
+            "invented_literal_id": str(self.invented_literal_id),
+            "boundary_evidence_digest": self.boundary_evidence_digest,
+            "proposal_payload": _thaw_json(self.proposal_payload),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ThresholdCandidateProposal":
+        expected = {
+            "proposal_semantic_id",
+            "proposal_provenance_id",
+            "field",
+            "threshold",
+            "invented_literal_id",
+            "boundary_evidence_digest",
+            "proposal_payload",
+        }
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected
+            or any(
+                type(value[name]) is not str
+                for name in expected - {"threshold", "proposal_payload"}
+            )
+            or type(value["threshold"]) not in (int, float)
+            or not isinstance(value["proposal_payload"], Mapping)
+            or not value["invented_literal_id"].isdigit()
+        ):
+            raise ModelGenerationError("threshold candidate proposal is malformed")
+        try:
+            return cls(
+                value["proposal_semantic_id"],
+                value["proposal_provenance_id"],
+                value["field"],
+                value["threshold"],
+                int(value["invented_literal_id"]),
+                value["boundary_evidence_digest"],
+                value["proposal_payload"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("threshold candidate proposal is malformed") from error
+
+
+@dataclass(frozen=True, slots=True)
+class PrologThresholdCandidateSet:
+    """Complete, reviewed output of one bounded GNU Prolog threshold query."""
+
+    invention_corpus_digest: str
+    session_digest: str
+    numeric_fields: tuple[str, ...]
+    budget: ThresholdCandidateBudget
+    available_candidates: int
+    candidates: tuple[ThresholdCandidateProposal, ...]
+    collective_protocol: str
+    gprolog_version: str
+    gprolog_binary_digest: str
+    module_digests: tuple[tuple[str, str], ...]
+    schema: str = THRESHOLD_CANDIDATE_SET_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != THRESHOLD_CANDIDATE_SET_SCHEMA:
+            raise ModelGenerationError("threshold candidate-set schema is unsupported")
+        _require_digest(self.invention_corpus_digest, "invention corpus")
+        _require_digest(self.session_digest, "reasoning session")
+        _require_digest(self.gprolog_binary_digest, "GNU Prolog executable")
+        if (
+            type(self.numeric_fields) is not tuple
+            or not self.numeric_fields
+            or any(type(field) is not str or not field for field in self.numeric_fields)
+            or tuple(sorted(set(self.numeric_fields))) != self.numeric_fields
+        ):
+            raise ModelGenerationError("threshold candidate fields are not canonical")
+        if not isinstance(self.budget, ThresholdCandidateBudget):
+            raise TypeError("threshold candidate budget is invalid")
+        if len(self.numeric_fields) > self.budget.maximum_fields:
+            raise ModelGenerationError("threshold candidate field budget was exceeded")
+        if (
+            type(self.available_candidates) is not int
+            or self.available_candidates != len(self.candidates)
+            or not 0 < len(self.candidates) <= self.budget.maximum_candidates
+        ):
+            raise ModelGenerationError(
+                "threshold candidate set must be complete, nonempty, and within budget"
+            )
+        if (
+            type(self.candidates) is not tuple
+            or any(not isinstance(item, ThresholdCandidateProposal) for item in self.candidates)
+            or tuple(sorted(self.candidates, key=lambda item: item.proposal_semantic_id))
+            != self.candidates
+            or any(item.field not in self.numeric_fields for item in self.candidates)
+            or len({item.proposal_semantic_id for item in self.candidates})
+            != len(self.candidates)
+            or len({item.proposal_provenance_id for item in self.candidates})
+            != len(self.candidates)
+            or len({item.invented_literal_id for item in self.candidates})
+            != len(self.candidates)
+        ):
+            raise ModelGenerationError("threshold candidates are not canonical and unique")
+        if self.collective_protocol != "PTM_PTA_COLLECTIVE_V1":
+            raise ModelGenerationError("threshold collective protocol is unsupported")
+        if (
+            type(self.gprolog_version) is not str
+            or not self.gprolog_version
+            or len(self.gprolog_version) > 1_024
+            or any(ord(character) < 0x20 for character in self.gprolog_version)
+        ):
+            raise ModelGenerationError("GNU Prolog version evidence is invalid")
+        if (
+            type(self.module_digests) is not tuple
+            or not self.module_digests
+            or tuple(sorted(self.module_digests)) != self.module_digests
+            or len({name for name, _ in self.module_digests}) != len(self.module_digests)
+        ):
+            raise ModelGenerationError("Prolog module evidence is not canonical")
+        for name, digest in self.module_digests:
+            if type(name) is not str or not name:
+                raise ModelGenerationError("Prolog module name is invalid")
+            _require_digest(digest, f"{name} module")
+
+    @property
+    def query(self) -> Mapping[str, object]:
+        return MappingProxyType(
+            {
+                "numeric_fields": self.numeric_fields,
+                "discover_thresholds": True,
+                "discover_intervals": False,
+                "derive_deescalation": False,
+                "derive_escalation": True,
+            }
+        )
+
+    @property
+    def evidence_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    @property
+    def candidate_set_id(self) -> str:
+        return self.evidence_id
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "invention_corpus_digest": self.invention_corpus_digest,
+            "session_digest": self.session_digest,
+            "query": _thaw_json(self.query),
+            "budget": self.budget.to_dict(),
+            "available_candidates": self.available_candidates,
+            "candidates": [item.to_dict() for item in self.candidates],
+            "collective_protocol": self.collective_protocol,
+            "gprolog_version": self.gprolog_version,
+            "gprolog_binary_digest": self.gprolog_binary_digest,
+            "module_digests": [list(item) for item in self.module_digests],
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        result = self.canonical_payload()
+        result["candidate_set_id"] = self.candidate_set_id
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "PrologThresholdCandidateSet":
+        expected = {
+            "schema",
+            "invention_corpus_digest",
+            "session_digest",
+            "query",
+            "budget",
+            "available_candidates",
+            "candidates",
+            "collective_protocol",
+            "gprolog_version",
+            "gprolog_binary_digest",
+            "module_digests",
+            "candidate_set_id",
+        }
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected
+            or not isinstance(value["query"], Mapping)
+            or not isinstance(value["budget"], Mapping)
+            or not isinstance(value["candidates"], list)
+            or not isinstance(value["module_digests"], list)
+            or type(value["available_candidates"]) is not int
+            or any(
+                type(value[name]) is not str
+                for name in expected
+                - {"query", "budget", "available_candidates", "candidates", "module_digests"}
+            )
+        ):
+            raise ModelGenerationError("threshold candidate set is malformed")
+        query = value["query"]
+        if (
+            set(query)
+            != {
+                "numeric_fields",
+                "discover_thresholds",
+                "discover_intervals",
+                "derive_deescalation",
+                "derive_escalation",
+            }
+            or not isinstance(query["numeric_fields"], list)
+            or any(type(field) is not str for field in query["numeric_fields"])
+            or query["discover_thresholds"] is not True
+            or query["discover_intervals"] is not False
+            or query["derive_deescalation"] is not False
+            or query["derive_escalation"] is not True
+            or any(
+                not isinstance(item, list)
+                or len(item) != 2
+                or any(type(part) is not str for part in item)
+                for item in value["module_digests"]
+            )
+        ):
+            raise ModelGenerationError("threshold candidate query is malformed")
+        try:
+            result = cls(
+                invention_corpus_digest=value["invention_corpus_digest"],
+                session_digest=value["session_digest"],
+                numeric_fields=tuple(query["numeric_fields"]),
+                budget=ThresholdCandidateBudget.from_dict(value["budget"]),
+                available_candidates=value["available_candidates"],
+                candidates=tuple(
+                    ThresholdCandidateProposal.from_dict(item)
+                    for item in value["candidates"]
+                ),
+                collective_protocol=value["collective_protocol"],
+                gprolog_version=value["gprolog_version"],
+                gprolog_binary_digest=value["gprolog_binary_digest"],
+                module_digests=tuple(tuple(item) for item in value["module_digests"]),
+                schema=value["schema"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("threshold candidate set is malformed") from error
+        if result.candidate_set_id != value["candidate_set_id"]:
+            raise ModelGenerationError("threshold candidate-set digest mismatch")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class ThresholdCandidateSelectionPolicy:
+    """Adaptation-only admission policy for choosing one invention alternative."""
+
+    minimum_observations: int = 1
+    require_strict_improvement: bool = True
+
+    def __post_init__(self) -> None:
+        if type(self.minimum_observations) is not int or self.minimum_observations <= 0:
+            raise ModelGenerationError("selection minimum observations must be positive")
+        if type(self.require_strict_improvement) is not bool:
+            raise TypeError("selection strict-improvement option must be boolean")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "minimum_observations": self.minimum_observations,
+            "require_strict_improvement": self.require_strict_improvement,
+        }
+
+    @classmethod
+    def from_dict(
+        cls, value: Mapping[str, object]
+    ) -> "ThresholdCandidateSelectionPolicy":
+        if not isinstance(value, Mapping) or set(value) != {
+            "minimum_observations",
+            "require_strict_improvement",
+        }:
+            raise ModelGenerationError("threshold selection policy is malformed")
+        try:
+            return cls(
+                value["minimum_observations"], value["require_strict_improvement"]
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("threshold selection policy is malformed") from error
+
+
+@dataclass(frozen=True, slots=True)
+class ThresholdCandidateOutcome:
+    """Adaptation-corpus result for one reviewed threshold alternative."""
+
+    proposal_semantic_id: str
+    proposal_provenance_id: str
+    invented_literal_id: int
+    extended_snapshot_id: str
+    extended_manifest_id: str
+    child_snapshot_id: str
+    child_manifest_id: str
+    child_preprocessing_id: str
+    adaptive_behavior_id: str
+    observations: int
+    parent_errors: int
+    child_errors: int
+    disagreements: int
+    improvements: int
+    regressions: int
+    both_correct: int
+    both_wrong: int
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("proposal semantic", self.proposal_semantic_id),
+            ("proposal provenance", self.proposal_provenance_id),
+            ("extended snapshot", self.extended_snapshot_id),
+            ("extended manifest", self.extended_manifest_id),
+            ("child snapshot", self.child_snapshot_id),
+            ("child manifest", self.child_manifest_id),
+            ("child preprocessing", self.child_preprocessing_id),
+            ("adaptive behavior", self.adaptive_behavior_id),
+        ):
+            _require_digest(value, label)
+        if (
+            type(self.invented_literal_id) is not int
+            or not 0 <= self.invented_literal_id < 1 << 64
+        ):
+            raise ModelGenerationError("candidate outcome literal ID is invalid")
+        counts = (
+            self.observations,
+            self.parent_errors,
+            self.child_errors,
+            self.disagreements,
+            self.improvements,
+            self.regressions,
+            self.both_correct,
+            self.both_wrong,
+        )
+        if any(type(value) is not int or value < 0 for value in counts):
+            raise ModelGenerationError("candidate outcome counts must be nonnegative integers")
+        if (
+            self.observations <= 0
+            or self.both_correct
+            + self.both_wrong
+            + self.improvements
+            + self.regressions
+            != self.observations
+            or self.parent_errors != self.both_wrong + self.improvements
+            or self.child_errors != self.both_wrong + self.regressions
+            or self.disagreements != self.improvements + self.regressions
+        ):
+            raise ModelGenerationError("candidate outcome counts are inconsistent")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "proposal_semantic_id": self.proposal_semantic_id,
+            "proposal_provenance_id": self.proposal_provenance_id,
+            "invented_literal_id": str(self.invented_literal_id),
+            "extended_snapshot_id": self.extended_snapshot_id,
+            "extended_manifest_id": self.extended_manifest_id,
+            "child_snapshot_id": self.child_snapshot_id,
+            "child_manifest_id": self.child_manifest_id,
+            "child_preprocessing_id": self.child_preprocessing_id,
+            "adaptive_behavior_id": self.adaptive_behavior_id,
+            "observations": self.observations,
+            "parent_errors": self.parent_errors,
+            "child_errors": self.child_errors,
+            "disagreements": self.disagreements,
+            "improvements": self.improvements,
+            "regressions": self.regressions,
+            "both_correct": self.both_correct,
+            "both_wrong": self.both_wrong,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ThresholdCandidateOutcome":
+        expected = {
+            "proposal_semantic_id",
+            "proposal_provenance_id",
+            "invented_literal_id",
+            "extended_snapshot_id",
+            "extended_manifest_id",
+            "child_snapshot_id",
+            "child_manifest_id",
+            "child_preprocessing_id",
+            "adaptive_behavior_id",
+            "observations",
+            "parent_errors",
+            "child_errors",
+            "disagreements",
+            "improvements",
+            "regressions",
+            "both_correct",
+            "both_wrong",
+        }
+        count_names = {
+            "observations",
+            "parent_errors",
+            "child_errors",
+            "disagreements",
+            "improvements",
+            "regressions",
+            "both_correct",
+            "both_wrong",
+        }
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected
+            or any(type(value[name]) is not int for name in count_names)
+            or any(type(value[name]) is not str for name in expected - count_names)
+            or not value["invented_literal_id"].isdigit()
+        ):
+            raise ModelGenerationError("threshold candidate outcome is malformed")
+        try:
+            return cls(
+                proposal_semantic_id=value["proposal_semantic_id"],
+                proposal_provenance_id=value["proposal_provenance_id"],
+                invented_literal_id=int(value["invented_literal_id"]),
+                extended_snapshot_id=value["extended_snapshot_id"],
+                extended_manifest_id=value["extended_manifest_id"],
+                child_snapshot_id=value["child_snapshot_id"],
+                child_manifest_id=value["child_manifest_id"],
+                child_preprocessing_id=value["child_preprocessing_id"],
+                adaptive_behavior_id=value["adaptive_behavior_id"],
+                observations=value["observations"],
+                parent_errors=value["parent_errors"],
+                child_errors=value["child_errors"],
+                disagreements=value["disagreements"],
+                improvements=value["improvements"],
+                regressions=value["regressions"],
+                both_correct=value["both_correct"],
+                both_wrong=value["both_wrong"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("threshold candidate outcome is malformed") from error
+
+
+@dataclass(frozen=True, slots=True)
+class ThresholdCandidateSelection:
+    """Deterministic adaptation-only selection over a complete candidate set."""
+
+    candidate_set_id: str
+    parent_generation_id: str
+    parent_snapshot_id: str
+    parent_manifest_id: str
+    adaptation_corpus_digest: str
+    adaptation_epochs: int
+    policy: ThresholdCandidateSelectionPolicy
+    outcomes: tuple[ThresholdCandidateOutcome, ...]
+    selected_proposal_semantic_id: str
+    selected_proposal_provenance_id: str
+    schema: str = THRESHOLD_CANDIDATE_SELECTION_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != THRESHOLD_CANDIDATE_SELECTION_SCHEMA:
+            raise ModelGenerationError("threshold candidate-selection schema is unsupported")
+        for label, value in (
+            ("candidate set", self.candidate_set_id),
+            ("parent generation", self.parent_generation_id),
+            ("parent snapshot", self.parent_snapshot_id),
+            ("parent manifest", self.parent_manifest_id),
+            ("adaptation corpus", self.adaptation_corpus_digest),
+            ("selected proposal semantic", self.selected_proposal_semantic_id),
+            ("selected proposal provenance", self.selected_proposal_provenance_id),
+        ):
+            _require_digest(value, label)
+        if (
+            type(self.adaptation_epochs) is not int
+            or not 0 < self.adaptation_epochs <= MAX_ADAPTATION_EPOCHS
+        ):
+            raise ModelGenerationError("selection adaptation epochs are invalid")
+        if not isinstance(self.policy, ThresholdCandidateSelectionPolicy):
+            raise TypeError("threshold candidate-selection policy is invalid")
+        if (
+            type(self.outcomes) is not tuple
+            or not self.outcomes
+            or any(not isinstance(item, ThresholdCandidateOutcome) for item in self.outcomes)
+            or tuple(sorted(self.outcomes, key=lambda item: item.proposal_semantic_id))
+            != self.outcomes
+            or len({item.proposal_semantic_id for item in self.outcomes})
+            != len(self.outcomes)
+            or len({item.proposal_provenance_id for item in self.outcomes})
+            != len(self.outcomes)
+        ):
+            raise ModelGenerationError("threshold candidate outcomes are not canonical")
+        eligible = tuple(
+            item
+            for item in self.outcomes
+            if item.observations >= self.policy.minimum_observations
+            and (
+                item.child_errors < item.parent_errors
+                if self.policy.require_strict_improvement
+                else item.child_errors <= item.parent_errors
+            )
+        )
+        if not eligible:
+            raise ModelGenerationError("no threshold candidate satisfies selection policy")
+        winner = min(
+            eligible,
+            key=lambda item: (
+                item.child_errors,
+                item.regressions,
+                -item.improvements,
+                item.proposal_semantic_id,
+            ),
+        )
+        if (
+            winner.proposal_semantic_id != self.selected_proposal_semantic_id
+            or winner.proposal_provenance_id != self.selected_proposal_provenance_id
+        ):
+            raise ModelGenerationError("threshold candidate selection is not deterministic")
+
+    @property
+    def selected_outcome(self) -> ThresholdCandidateOutcome:
+        return next(
+            item
+            for item in self.outcomes
+            if item.proposal_semantic_id == self.selected_proposal_semantic_id
+        )
+
+    @property
+    def selection_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "candidate_set_id": self.candidate_set_id,
+            "parent_generation_id": self.parent_generation_id,
+            "parent_snapshot_id": self.parent_snapshot_id,
+            "parent_manifest_id": self.parent_manifest_id,
+            "adaptation_corpus_digest": self.adaptation_corpus_digest,
+            "adaptation_epochs": self.adaptation_epochs,
+            "policy": self.policy.to_dict(),
+            "outcomes": [item.to_dict() for item in self.outcomes],
+            "selected_proposal_semantic_id": self.selected_proposal_semantic_id,
+            "selected_proposal_provenance_id": self.selected_proposal_provenance_id,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        result = self.canonical_payload()
+        result["selection_id"] = self.selection_id
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ThresholdCandidateSelection":
+        expected = {
+            "schema",
+            "candidate_set_id",
+            "parent_generation_id",
+            "parent_snapshot_id",
+            "parent_manifest_id",
+            "adaptation_corpus_digest",
+            "adaptation_epochs",
+            "policy",
+            "outcomes",
+            "selected_proposal_semantic_id",
+            "selected_proposal_provenance_id",
+            "selection_id",
+        }
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected
+            or type(value["adaptation_epochs"]) is not int
+            or not isinstance(value["policy"], Mapping)
+            or not isinstance(value["outcomes"], list)
+            or any(
+                type(value[name]) is not str
+                for name in expected - {"adaptation_epochs", "policy", "outcomes"}
+            )
+        ):
+            raise ModelGenerationError("threshold candidate selection is malformed")
+        try:
+            result = cls(
+                candidate_set_id=value["candidate_set_id"],
+                parent_generation_id=value["parent_generation_id"],
+                parent_snapshot_id=value["parent_snapshot_id"],
+                parent_manifest_id=value["parent_manifest_id"],
+                adaptation_corpus_digest=value["adaptation_corpus_digest"],
+                adaptation_epochs=value["adaptation_epochs"],
+                policy=ThresholdCandidateSelectionPolicy.from_dict(value["policy"]),
+                outcomes=tuple(
+                    ThresholdCandidateOutcome.from_dict(item)
+                    for item in value["outcomes"]
+                ),
+                selected_proposal_semantic_id=value["selected_proposal_semantic_id"],
+                selected_proposal_provenance_id=value[
+                    "selected_proposal_provenance_id"
+                ],
+                schema=value["schema"],
+            )
+        except ModelGenerationError:
+            raise
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("threshold candidate selection is malformed") from error
+        if result.selection_id != value["selection_id"]:
+            raise ModelGenerationError("threshold candidate-selection digest mismatch")
         return result
 
 
@@ -2069,10 +2758,11 @@ class ModelGenerationLineage:
     promotion_corpus_digest: str
     origin_proposal_semantic_id: str
     origin_proposal_provenance_id: str
-    schema: str = LINEAGE_SCHEMA
+    candidate_selection_id: str | None = None
+    schema: str = LEGACY_LINEAGE_SCHEMA
 
     def __post_init__(self) -> None:
-        if self.schema != LINEAGE_SCHEMA:
+        if self.schema not in (LEGACY_LINEAGE_SCHEMA, LINEAGE_SCHEMA):
             raise ModelGenerationError("model-generation lineage schema is unsupported")
         for label, value in (
             ("parent generation", self.parent_generation_id),
@@ -2100,6 +2790,10 @@ class ModelGenerationLineage:
                 self.previous_activated_lineage_id,
                 "previous activated lineage",
             )
+        if self.schema == LINEAGE_SCHEMA:
+            _require_digest(self.candidate_selection_id, "candidate selection")
+        elif self.candidate_selection_id is not None:
+            raise ModelGenerationError("legacy lineage cannot reference candidate selection")
         if type(self.invented_literal_id) is not int or not 0 <= self.invented_literal_id < 1 << 64:
             raise ModelGenerationError("invented literal ID must be unsigned 64-bit")
 
@@ -2108,7 +2802,7 @@ class ModelGenerationLineage:
         return content_digest(self.canonical_payload())
 
     def canonical_payload(self) -> dict[str, object]:
-        return {
+        result = {
             "schema": self.schema,
             "parent_generation_id": self.parent_generation_id,
             "extended_generation_id": self.extended_generation_id,
@@ -2127,6 +2821,9 @@ class ModelGenerationLineage:
             "origin_proposal_semantic_id": self.origin_proposal_semantic_id,
             "origin_proposal_provenance_id": self.origin_proposal_provenance_id,
         }
+        if self.schema == LINEAGE_SCHEMA:
+            result["candidate_selection_id"] = self.candidate_selection_id
+        return result
 
     def to_dict(self) -> dict[str, object]:
         result = self.canonical_payload()
@@ -2155,6 +2852,8 @@ class ModelGenerationLineage:
             "origin_proposal_provenance_id",
             "lineage_id",
         }
+        if isinstance(value, Mapping) and value.get("schema") == LINEAGE_SCHEMA:
+            expected.add("candidate_selection_id")
         if (
             not isinstance(value, Mapping)
             or set(value) != expected
@@ -2193,6 +2892,7 @@ class ModelGenerationLineage:
                 promotion_corpus_digest=value["promotion_corpus_digest"],
                 origin_proposal_semantic_id=value["origin_proposal_semantic_id"],
                 origin_proposal_provenance_id=value["origin_proposal_provenance_id"],
+                candidate_selection_id=value.get("candidate_selection_id"),
                 schema=value["schema"],
             )
         except (TypeError, ValueError) as error:

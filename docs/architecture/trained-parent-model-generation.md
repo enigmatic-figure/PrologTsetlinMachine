@@ -9,7 +9,9 @@ The trained-parent lifecycle separates representation from adaptation:
 
 ```text
 frozen trained parent P
-        ↓ GNU Prolog threshold invention and independent review
+        ↓ bounded GNU Prolog threshold candidate set
+independent review + adaptation-only deterministic selection
+        ↓ one selected threshold
 append-only extended parent P+
         ↓ exact structural and behavioral-equivalence proof
 bounded adaptation
@@ -52,21 +54,79 @@ adaptation, promotion, and future live rows are not inspected by P+ creation.
 
 Threshold approval still uses the existing boundary:
 
-1. GNU Prolog returns the sole bounded threshold proposal considered by the
-   first lifecycle.
-2. `review_threshold_proposal()` validates it without catalog mutation.
-3. A cloned parent catalog is reconstructed in its declared order.
-4. `materialize_threshold_clause()` appends the canonical descriptor and
+1. GNU Prolog returns every threshold produced by the declared numeric fields
+   within an explicit field and candidate budget.
+2. The lifecycle rejects a truncated result rather than silently selecting
+   from an incomplete prefix.
+3. `review_threshold_proposal()` independently validates every returned
+   threshold without catalog mutation.
+4. Python constructs and adapts one isolated P+ alternative per reviewed
+   threshold using only the adaptation corpus, then selects exactly one by a
+   deterministic paired-error policy.
+5. A cloned parent catalog is reconstructed in its declared order.
+6. `materialize_threshold_clause()` appends the canonical descriptor and
    crosses `lower_exact()` only as a derived `binary_clause`.
-5. The frozen parent catalog and snapshot remain untouched.
+7. The frozen parent catalog and snapshot remain untouched.
 
 The supported lifecycle performs GNU Prolog invention internally; it does not
 accept a caller-supplied proposal that merely claims a Prolog origin. It
 publishes content-addressed invention evidence binding the exact invention
 corpus and reasoning session, collective query/protocol, GNU Prolog executable
-digest and version, packaged module digests, and returned proposal identities.
+digest and version, packaged module digests, explicit query/budget, and every
+reviewed proposal identity and canonical proposal payload. The executable and
+module image is measured before and after the collective run; a changing image
+fails closed. The original `invent_threshold_for_corpus()` API remains as an
+exactly-one compatibility wrapper; generalized episodes use
+`invent_threshold_candidates_for_corpus()`. The exactly-one lifecycle result
+retains its legacy `PrologInventionEvidence` view and also exposes the complete
+candidate set separately.
+
+Because candidate-set identity includes that execution-environment
+attestation, independently replaying the same semantic episode with different
+GNU Prolog installations can produce different candidate-set, selection, and
+outer artifact IDs. This does not weaken artifact portability: either complete
+content-addressed artifact remains executable on every supported runtime, and
+its model payload, preprocessing contract, and conformance vectors remain
+portable. Cross-environment tests therefore compare the complete executable
+contract and all platform-neutral manifest fields while validating each local
+attestation against its own durable candidate set. Fixed golden artifact bytes
+are still verified independently by the native runtime.
 
 The original `threshold` proposal remains `NotRepresentable`.
+
+## Bounded alternatives are selected before promotion
+
+`ThresholdCandidateBudget` bounds both the number of numeric fields and the
+complete proposal set. GNU Prolog's protocol reports emitted and available
+counts. If the available threshold count exceeds the declared budget, the
+episode fails and its reserved evidence is abandoned-but-spent. This first
+policy deliberately requires completeness; raising a budget is an explicit
+new episode, not a silent change in the search population.
+
+Every reviewed alternative starts from the same frozen P. It receives its own
+deterministic excluded TA pair, is adapted for the same bounded epoch count,
+and is scored against P on the adaptation corpus. The durable outcome records
+both-correct, both-wrong, improvement, regression, disagreement, parent-error,
+and child-error counts together with the P+, child snapshot, ordered manifest,
+preprocessing, literal, proposal, and adaptive-behavior identities.
+These are derivational claims rather than trusted metadata: admission and
+recovery rerun the attested complete GNU Prolog query, independently review
+every replayed proposal, reconstruct every P+, replay the exact adaptation
+epoch count for every alternative, and require bit-exact snapshot and RNG
+identity before accepting the recorded metrics or winner.
+
+`ThresholdCandidateSelectionPolicy` first excludes alternatives that do not
+meet its observation and improvement rule. It ranks the remainder by child
+errors, regressions, improvements, and finally semantic ID. A
+content-addressed `ThresholdCandidateSelection` stores every outcome and the
+unique winner; every non-winning outcome is therefore reconstructibly rejected
+for that episode. Only the winner becomes a model-generation lineage child.
+
+The selection object contains the adaptation corpus digest and has no
+promotion corpus field. Its implementation accepts no promotion corpus. The
+promotion holdout is first used after selection, when the winner alone is
+compiled, checked through `ptmrt`, and subjected to the paired promotion
+audit. Thus repeated proposal comparison cannot tune against promotion labels.
 
 ## P+ to C is bounded adaptation
 
@@ -90,7 +150,7 @@ The lifecycle distinguishes these immutable corpora:
 | --- | --- | --- |
 | parent training | original trainer | establish P |
 | invention | GNU Prolog and threshold review | discover the new distinction |
-| adaptation | child trainer | produce C from P+ |
+| adaptation | child trainers and deterministic selector | produce and compare bounded alternatives |
 | promotion holdout | audit only | compare P and C with labels |
 | live/drift | post-activation audit | decide whether C became worse |
 
@@ -199,10 +259,11 @@ exact `EvidenceUsage` and appends `evidence_reserved`. Before child activation,
 the store then durably publishes:
 
 1. the parent's adaptive restoration bundle;
-2. P+ and C adaptive snapshots;
-3. ordered literal and preprocessing manifests;
-4. the child `.ptm` bytes;
-5. the paired audit and immutable lineage node.
+2. the complete threshold candidate set and adaptation-only selection;
+3. every alternative P+ and C adaptive snapshot;
+4. ordered literal and preprocessing manifests;
+5. the selected child `.ptm` bytes;
+6. the paired promotion audit and immutable lineage node.
 
 Every object is content addressed. Atomic publication synchronizes the
 temporary file and, on POSIX, the containing directory after link or rename.
@@ -267,6 +328,17 @@ restoration signatures must all agree with the durable child generation. A
 different valid artifact that merely matches the finite holdout cannot be
 attached to the child's adaptive lineage.
 
+New candidate-set lineages use `ptm.model-generation-lineage.v5` and bind the
+candidate selection ID. Recovery reloads the complete candidate set and
+selection, reconstructs the invention session from durable evidence, reruns
+the byte-attested GNU Prolog collective, repeats independent proposal review,
+and replays exact adaptation for all alternative snapshots/manifests and
+preprocessing contracts. It then recomputes paired metrics from the durable
+adaptation corpus and requires the selected outcome to match the deployed
+child. Legacy v4 lineage objects remain readable for previously durable
+exactly-one episodes, but `record_candidate()` rejects v4 for every new
+`candidate_created` transition; backward compatibility is recovery-only.
+
 An `AdaptiveRestorationBundle` binds the parent generation to:
 
 - its full `TMSnapshot` TA states and RNG state;
@@ -310,7 +382,6 @@ durable lifecycle transition.
 - the required `Trained-parent GNU Prolog / native lifecycle` CI job
 
 The next PTA breadth milestone should prove a De-escalation PTA lifecycle under
-this recurrent promotion/restoration substrate. Bounded multi-candidate Input
-PTA selection is also still future work. CoTM/shared weights, regression,
-graph, patch/CTM, and other families remain outside the implemented exact
-target set.
+this recurrent promotion/restoration substrate. Intervals, categorical groups,
+cross-PTA selection, CoTM/shared weights, regression, graph, patch/CTM, and
+other families remain outside the implemented exact target set.
