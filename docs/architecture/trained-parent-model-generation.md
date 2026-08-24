@@ -1,7 +1,7 @@
 # Trained-parent PTA model generations
 
-> Status: current experimental architecture contract. This closes the first
-> trained-parent threshold lifecycle for the scalar binary reference and
+> Status: current experimental architecture contract. This closes recurrent
+> trained-parent threshold episodes for the scalar binary reference and
 > portable packed runtime. It does not make the broader PTA control plane or
 > other TM families implemented.
 
@@ -19,6 +19,8 @@ behavior-changing child C
 immutable generation publication and activation
         ↓ labeled drift
 reopen and bit-exact restoration of P
+        ↓ fresh, durably reserved evidence
+genuinely new child C2 through the same bounded contract
 ```
 
 ## P to P+ is not learning
@@ -95,11 +97,25 @@ The lifecycle distinguishes these immutable corpora:
 Every corpus has a canonical SHA-256 digest. Lifecycle example IDs are
 disjoint, and identical labeled rows cannot cross invention, adaptation, and
 promotion. Live data may deliberately revisit covariates after a concept
-change, but it still has distinct observation identities.
+change, including with a changed label, but the same labeled observation is
+not reusable merely by assigning it a new example ID.
 
 `LifecycleCorpora` contains only the three pre-activation roles. Live/drift
-evidence enters through `reopen_and_restore_for_drift()` after activation, and
-the service rejects live identities that overlap any pre-activation evidence.
+evidence enters through `reopen_and_restore_for_drift()` after activation.
+Episode-local separation is supplemented by a durable cross-generation
+ledger. An immutable `EvidenceUsage` stores the exact labeled corpora for one
+of three purposes: parent registration, candidate episode, or live drift. Its
+content identity covers the dataset, purpose, subject generation, corpus
+digests, observation identities, raw records, and labels.
+
+Candidate and live evidence is committed through `evidence_reserved` before
+GNU Prolog invention, adaptation, promotion inspection, or native drift
+evaluation begins. A crash, rejection, failed native check, or other abandoned
+attempt does not make those observations fresh again. The strict v1 policy
+rejects both a previously used observation identity and a previously used
+`dataset + record + label` fingerprint across every role and episode. This is
+intentionally conservative; any future relaxation requires a versioned policy
+rather than an implicit exception.
 
 ## Conformance and promotion are different audits
 
@@ -165,9 +181,18 @@ Restoration reopens the parent for genuinely newly adapted behaviors. The
 experimental controller has no rehabilitation mechanism for a displaced
 behavior.
 
+Each lineage also records its expected activation sequence and the previously
+activated lineage. C2 therefore names C1 as its episode predecessor even when
+both children branch from the same bit-exact restored P0. These fields do not
+authorize transitions: replay recomputes them from prior `activated` events,
+and rejected candidates continue to occupy only the still-unfilled next
+activation slot.
+
 ## Durability and restoration
 
-Before child activation, the store durably publishes:
+Before any evidence may affect an episode, the store durably publishes its
+exact `EvidenceUsage` and appends `evidence_reserved`. Before child activation,
+the store then durably publishes:
 
 1. the parent's adaptive restoration bundle;
 2. P+ and C adaptive snapshots;
@@ -193,8 +218,11 @@ the experimental single-process contract.
 
 Recovery replays the complete lifecycle state machine rather than selecting the
 last routing-shaped event. Every frame must consume its required predecessor
-with matching lineage, audit, behavior, bundle, policy, error counts, and active
-route. In particular, activation requires an immediately valid accepted exact
+with matching lineage, audit, behavior, bundle, policy, error counts, evidence
+usage, activation sequence, and active route. Replay reconstructs the complete
+cross-generation set of spent observation identities and labeled-row
+fingerprints. A forged but hash-valid reservation that reuses either fails
+closed. In particular, activation requires an immediately valid accepted exact
 promotion, and parent restoration requires a valid reopen request whose labeled
 drift satisfies its recorded policy. A hash-valid but impossible event makes
 controller construction fail closed. Reopen replay and restoration also reload
@@ -267,7 +295,8 @@ durable lifecycle transition.
 - the `ptmrt_trained_parent_*` CTest cases
 - the required `Trained-parent GNU Prolog / native lifecycle` CI job
 
-The next PTA work should make model-generation adaptation recurrent, including
-durable cross-generation evidence-use accounting, before proving a
-De-escalation PTA lifecycle. CoTM/shared weights, regression, graph, patch/CTM,
-and other families remain outside the implemented exact target set.
+The next PTA breadth milestone should prove a De-escalation PTA lifecycle under
+this recurrent promotion/restoration substrate. Bounded multi-candidate Input
+PTA selection is also still future work. CoTM/shared weights, regression,
+graph, patch/CTM, and other families remain outside the implemented exact
+target set.
