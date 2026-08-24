@@ -522,6 +522,17 @@ class ModelGenerationController:
         parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
         extended_snapshot = self.store.load_snapshot(extended.snapshot_id).snapshot
         child_snapshot = self.store.load_snapshot(child.snapshot_id).snapshot
+        if child.inference_artifact_id is None:
+            raise ModelGenerationError("adapted child lacks an inference artifact")
+        child_artifact = self.store.load_artifact(child.inference_artifact_id)
+        child_validation = child_artifact.manifest.get("validation")
+        child_signature = (
+            child_validation.get("signature")
+            if isinstance(child_validation, Mapping)
+            else None
+        )
+        child_preprocessing = child_artifact.preprocessing
+        child_restoration = child_artifact.manifest.get("restoration_reference")
         invention_digests = ((CorpusRole.INVENTION.value, lineage.invention_corpus_digest),)
         child_digests = (
             (CorpusRole.INVENTION.value, lineage.invention_corpus_digest),
@@ -553,6 +564,25 @@ class ModelGenerationController:
             or audit.corpus_role is not CorpusRole.PROMOTION
             or audit.corpus_digest != lineage.promotion_corpus_digest
             or audit.conformance.artifact_id != child.inference_artifact_id
+            or not isinstance(child_signature, Mapping)
+            or child_signature.get("generation_stage") != "adapted_child"
+            or child_signature.get("adaptive_snapshot_id") != child.snapshot_id
+            or child_signature.get("ordered_literal_manifest_id")
+            != child.literal_manifest_id
+            or child_signature.get("invention_corpus_digest")
+            != lineage.invention_corpus_digest
+            or child_signature.get("adaptation_corpus_digest")
+            != lineage.adaptation_corpus_digest
+            or child_signature.get("promotion_corpus_digest")
+            != lineage.promotion_corpus_digest
+            or child_signature.get("origin_proposal_semantic_id")
+            != lineage.origin_proposal_semantic_id
+            or child_signature.get("origin_proposal_provenance_id")
+            != lineage.origin_proposal_provenance_id
+            or child_preprocessing is None
+            or preprocessing_contract_id(child_preprocessing)
+            != child.preprocessing_contract_id
+            or child_restoration != bundle.to_dict()
         ):
             raise ModelGenerationError("lineage object graph is inconsistent")
         if (
@@ -609,6 +639,7 @@ class ModelGenerationController:
                 raise ModelGenerationError(
                     "generation preprocessing differs from its literal manifest"
                 )
+        self._resolve_restoration_bundle(bundle)
         return parent, extended, child, bundle, audit, evidence
 
     def _validate_recovered_state(self) -> None:

@@ -158,6 +158,11 @@ the controller reloads and cross-validates the complete lineage graph. This
 includes generation links and kinds, P/P+/C manifests and snapshots, the
 appended invented literal, all corpus digests, proposal and invention-evidence
 IDs, preprocessing order, audit/artifact identity, and restoration parent.
+The child `.ptm` is opened as part of that graph validation: its embedded
+adaptive-snapshot, ordered-manifest, preprocessing, corpus/proposal, and
+restoration signatures must all agree with the durable child generation. A
+different valid artifact that merely matches the finite holdout cannot be
+attached to the child's adaptive lineage.
 
 An `AdaptiveRestorationBundle` binds the parent generation to:
 

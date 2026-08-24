@@ -39,6 +39,7 @@ from prolog_tsetlin.services.model_generation import (
     compile_generation_artifact,
     execute_trained_parent_lifecycle,
     reopen_and_restore_for_drift,
+    verify_artifact_with_ptmrt,
 )
 
 
@@ -510,6 +511,73 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
     result.controller.store.put_lineage(forged_lineage)
     with pytest.raises(ModelGenerationError, match="representation extension"):
         result.controller.record_candidate(forged_lineage)
+
+    alternate_states = [list(row) for row in result.child.snapshot.snapshot.states]
+    original_state = alternate_states[0][0]
+    action_boundary = result.child.snapshot.snapshot.states_per_action
+    if original_state < action_boundary or (
+        original_state == action_boundary + 1
+    ):
+        alternate_states[0][0] = original_state + 1
+    else:
+        alternate_states[0][0] = original_state - 1
+    alternate_snapshot = replace(
+        result.child.snapshot.snapshot,
+        states=tuple(tuple(row) for row in alternate_states),
+    )
+    _, alternate_artifact = compile_generation_artifact(
+        alternate_snapshot,
+        result.child.manifest,
+        name="same-mask alternate adaptive child",
+        validation_records=corpora.promotion.records,
+        validation_signature={
+            "generation_stage": "adapted_child",
+            "invention_corpus_digest": corpora.invention.digest,
+            "adaptation_corpus_digest": corpora.adaptation.digest,
+            "promotion_corpus_digest": corpora.promotion.digest,
+            "origin_proposal_semantic_id": (
+                result.lineage.origin_proposal_semantic_id
+            ),
+            "origin_proposal_provenance_id": (
+                result.lineage.origin_proposal_provenance_id
+            ),
+        },
+        restoration_reference=result.restoration_bundle.to_dict(),
+    )
+    alternate_path = result.controller.store.put_artifact(alternate_artifact)
+    verified_alternate = verify_artifact_with_ptmrt(
+        _ptmrt_path(), alternate_path, alternate_artifact.artifact_id
+    )
+    alternate_conformance = audit_runtime_conformance(
+        result.child,
+        alternate_artifact,
+        corpora.promotion.records,
+        ptmrt_verified=True,
+        ptmrt_artifact_id=verified_alternate,
+    )
+    assert alternate_conformance.exact
+    alternate_audit = audit_parent_child(
+        original_snapshot,
+        manifest,
+        result.child,
+        corpora.promotion,
+        alternate_conformance,
+        PromotionAuditPolicy(8),
+    )
+    result.controller.store.put_audit(alternate_audit)
+    alternate_generation = replace(
+        result.child_generation,
+        inference_artifact_id=alternate_artifact.artifact_id,
+    )
+    result.controller.store.put_generation(alternate_generation)
+    alternate_lineage = replace(
+        result.lineage,
+        child_generation_id=alternate_generation.generation_id,
+        promotion_audit_id=alternate_audit.audit_id,
+    )
+    result.controller.store.put_lineage(alternate_lineage)
+    with pytest.raises(ModelGenerationError, match="object graph"):
+        result.controller.record_candidate(alternate_lineage)
 
     drift, restored = reopen_and_restore_for_drift(result, live)
     assert drift.child_errors > drift.parent_errors
