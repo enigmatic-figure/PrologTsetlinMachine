@@ -1,5 +1,7 @@
 """Trust boundary tests — exact lowering, Prolog safety, morphology, immutability."""
 
+import json
+
 import pytest
 from prolog_tsetlin.representation import FeatureSchema, FieldKind, LiteralCatalog
 from prolog_tsetlin.pta import (
@@ -147,6 +149,38 @@ def test_every_native_target_has_exact_fail_closed_semantics(target):
         assert isinstance(result, NotRepresentable)
 
 
+@pytest.mark.parametrize(
+    ("patch", "patch_extent"),
+    [
+        ({"rows": "2", "cols": 3}, 6),
+        ({"rows": 2.0, "cols": 3}, 6),
+        ({"rows": True, "cols": 3}, 3),
+        ({"rows": 0, "cols": 3}, 3),
+        ({"rows": -1, "cols": 3}, 3),
+        ({"cols": 3}, 3),
+        ({"rows": 3}, 3),
+        ({"rows": 1 << 21, "cols": 1}, 1 << 21),
+        ({"rows": 2, "cols": 3}, 5),
+    ],
+)
+def test_malformed_patch_dimensions_fail_closed(patch, patch_extent):
+    proposal = PTAEscalationProposal(
+        proposal_id="malformed-patch",
+        source_pta_ids=("pta:test",),
+        supporting_insights=(),
+        counterexamples_addressed=(),
+        required_literals=(),
+        native_target="patch_clause",
+        structure={"kind": "region", "patch": patch},
+        resource_bounds={"patch_extent": patch_extent},
+    )
+
+    bounded, reason = syntactically_bounded(proposal)
+    assert bounded is False
+    assert "patch" in reason
+    assert isinstance(lower_exact(proposal), NotRepresentable)
+
+
 def test_lowered_candidate_cannot_claim_an_unsupported_target():
     proposal = _minimal_proposal()
     with pytest.raises(TypeError, match="only be created by lower_exact"):
@@ -215,6 +249,44 @@ def test_canonical_logic_program_lowers_to_validated_native_object():
     assert isinstance(result, LoweredCandidate)
     assert result.native_kind == "logic_program32"
     assert result.native_object == program
+
+
+def test_nested_proposal_to_dict_is_json_serializable():
+    from prolog_tsetlin.logic_consolidation import (
+        FixedLogicInstruction,
+        FixedLogicOpcode,
+        LogicProgram32,
+    )
+
+    program = LogicProgram32(
+        (FixedLogicInstruction(FixedLogicOpcode.INPUT, argument=0),),
+        root_instruction=0,
+    )
+    proposal = PTAEscalationProposal(
+        proposal_id="nested-json",
+        source_pta_ids=("pta:test",),
+        supporting_insights=(
+            PTAInsight(
+                "pta:test",
+                "nested",
+                "logic",
+                ({"levels": {"values": [1, 2]}},),
+            ),
+        ),
+        counterexamples_addressed=(),
+        required_literals=(),
+        native_target="logic_program",
+        structure={"program": program.to_dict()},
+        resource_bounds={"literal_count": 1},
+        validation_signature={"oracle": {"cases": [False, True]}},
+    )
+
+    decoded = json.loads(json.dumps(proposal.to_dict(), allow_nan=False))
+    assert decoded["structure"]["program"] == program.to_dict()
+    assert decoded["supporting_insights"][0]["evidence"][0]["levels"] == {
+        "values": [1, 2]
+    }
+    assert decoded["validation_signature"]["oracle"]["cases"] == [False, True]
 
 
 @pytest.mark.parametrize(

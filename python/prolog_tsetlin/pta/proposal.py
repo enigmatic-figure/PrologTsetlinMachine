@@ -326,7 +326,7 @@ class PTAEscalationProposal:
         return self.provenance_id()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "proposal_id": self.proposal_id,
             "source_pta_ids": list(self.source_pta_ids),
             "supporting_insights": [
@@ -344,6 +344,9 @@ class PTAEscalationProposal:
             "validation_signature": dict(self.validation_signature),
             "support_trace": list(self.support_trace),
         }
+        thawed = _thaw_for_json(value)
+        assert isinstance(thawed, dict)
+        return thawed
 
 
 @dataclass(frozen=True, slots=True)

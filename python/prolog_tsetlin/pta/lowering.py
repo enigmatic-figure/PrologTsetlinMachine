@@ -168,20 +168,27 @@ def syntactically_bounded(proposal: PTAEscalationProposal) -> tuple[bool, str]:
         return True, "ok (syntactically bounded)"
 
     if target == "patch_clause":
-        if "patch_extent" in rb:
-            pe = rb["patch_extent"]
-            if isinstance(pe, int):
-                if pe > PATCH_MAX_CELLS:
-                    return False, "patch extent exceeds bounded cells"
-            elif isinstance(pe, Mapping):
-                cells = pe.get("rows", 1) * pe.get("cols", 1)
-                if cells > PATCH_MAX_CELLS:
-                    return False, "patch extent exceeds bounded cells"
+        if "patch_extent" not in rb:
+            return False, "patch_extent resource bound is required"
+        patch_extent = rb["patch_extent"]
+        if patch_extent > PATCH_MAX_CELLS:
+            return False, "patch extent exceeds bounded cells"
         extent = struct.get("patch")
-        if isinstance(extent, Mapping):
-            cells = extent.get("rows", 1) * extent.get("cols", 1)
-            if cells > PATCH_MAX_CELLS:
-                return False, "patch extent exceeds bounded cells"
+        if not isinstance(extent, Mapping):
+            return False, "patch must be a rows/cols mapping"
+        if "rows" not in extent or "cols" not in extent:
+            return False, "patch rows and cols are required"
+        rows = extent["rows"]
+        cols = extent["cols"]
+        if type(rows) is not int or rows <= 0:
+            return False, "patch rows must be a positive integer"
+        if type(cols) is not int or cols <= 0:
+            return False, "patch cols must be a positive integer"
+        cells = rows * cols
+        if cells > PATCH_MAX_CELLS:
+            return False, "patch extent exceeds bounded cells"
+        if cells != patch_extent:
+            return False, "patch dimensions do not match patch_extent"
         if not isinstance(struct.get("kind", ""), str):
             return False, "patch kind must be string"
         return True, "ok (syntactically bounded)"
