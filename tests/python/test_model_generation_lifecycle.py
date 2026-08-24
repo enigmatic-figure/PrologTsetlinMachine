@@ -655,6 +655,10 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(tmp_path: Path) -> N
     assert drift.child_errors > drift.parent_errors
     assert restored.snapshot.snapshot == original_snapshot
     assert restored.manifest == manifest
+    with pytest.raises(ModelGenerationError, match="already been activated"):
+        result.controller.record_candidate(result.lineage)
+    assert result.controller.active_generation_id == result.parent_generation.generation_id
+    assert store.read_events()[-1].kind is LifecycleEventKind.PARENT_RESTORED
     original_rows = manifest.build_catalog().encode(parent_training.records).ta
     rows = tuple(
         original_rows.row_values(index) for index in range(original_rows.row_count)

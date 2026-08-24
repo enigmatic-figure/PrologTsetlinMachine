@@ -131,6 +131,10 @@ The UI-neutral `ModelGenerationController` derives its active generation from
 an immutable SHA-256-chained event log. Candidate creation, promotion approval,
 activation, reopen request, and parent restoration are separate events; the
 content-addressed lineage node is never edited to carry lifecycle state.
+Activation consumes the child generation identity: once a generation appears
+in an `activated` event, it cannot be recorded as a candidate again. Restoration
+reopens the parent for newly adapted generations, not for replay of the child
+and promotion evidence that labeled drift already displaced.
 
 ## Durability and restoration
 
