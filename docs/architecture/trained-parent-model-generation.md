@@ -111,7 +111,11 @@ digests, observation identities, raw records, and labels.
 Candidate and live evidence is committed through `evidence_reserved` before
 GNU Prolog invention, adaptation, promotion inspection, or native drift
 evaluation begins. A crash, rejection, failed native check, or other abandoned
-attempt does not make those observations fresh again. The strict v1 policy
+attempt appends `evidence_abandoned`, which terminalizes that reservation
+without making its observations fresh again. Controller recovery likewise
+terminalizes a reservation left pending by a process interruption. An
+abandoned reservation remains in the spent-evidence ledger but can never
+authorize candidate creation or reopen. The strict v1 policy
 rejects both a previously used observation identity and a previously used
 `dataset + record + label` fingerprint across every role and episode. This is
 intentionally conservative; any future relaxation requires a versioned policy
@@ -210,11 +214,9 @@ digest. Removing even a complete valid suffix therefore fails closed. The log
 is published before its head; a process or power loss between them leaves a
 detectable mismatch, while an ordinary publication exception attempts to
 restore the prior complete checkpoint. The controller changes its in-memory
-generation before appending the activation or restoration event; if that
-durable append fails, it immediately reconstructs routing from the previous or
-newly committed log rather than claiming an assumed state. Store instances in
-one process share a root-scoped event lock; cross-process writers remain outside
-the experimental single-process contract.
+generation only after the activation or restoration event is durably appended.
+Store instances in one process share a root-scoped event lock; cross-process
+writers remain outside the experimental single-process contract.
 
 Recovery replays the complete lifecycle state machine rather than selecting the
 last routing-shaped event. Every frame must consume its required predecessor
@@ -234,6 +236,18 @@ recovering a history that contains a reopen therefore require the trusted
 `ptmrt` path at construction. A self-asserted `ptmrt_verified` Boolean or a
 structurally valid receipt fabricated from scalar outputs cannot authorize
 restoration.
+
+The same replay engine is authoritative while the process is live. It returns
+the active route, registered dataset, pending reservation, candidate,
+promotion, activation, reopen, activation ordinal/predecessor, retired
+behaviors, and spent observation/fingerprint sets as one structured state.
+Every mutating controller method replays and compares that durable route with
+its cached route while holding the shared event lock, authorizes the proposed
+transition from the replayed state, and appends before releasing the lock.
+Native drift evaluation reserves and then releases the event lock while
+`ptmrt` runs, but reacquires it and replays again immediately before committing
+`reopen_requested`. Thus a hash-valid raw event tail cannot be accepted by a
+running controller when the same tail would be rejected after restart.
 
 Before any parent or child is registered, activated, restored, or recovered as
 the active route, one deployability contract reloads and cross-validates its
