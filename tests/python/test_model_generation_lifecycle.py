@@ -26,7 +26,11 @@ from prolog_tsetlin.model_generation import (
     OrderedLiteralManifest,
     PromotionAuditPolicy,
     PromotionAuditSnapshot,
+    PrologInventionEvidence,
     RuntimeConformanceReport,
+    ThresholdCandidateBudget,
+    ThresholdCandidateSelection,
+    ThresholdCandidateSelectionPolicy,
     adapt_extended_parent,
     audit_parent_child,
     audit_runtime_conformance,
@@ -48,6 +52,8 @@ from prolog_tsetlin.services.model_generation import (
     ModelGenerationStore,
     compile_generation_artifact,
     execute_trained_parent_lifecycle,
+    execute_trained_parent_lifecycle_with_candidates,
+    invent_threshold_candidates_for_corpus,
     reopen_and_restore_for_drift,
     verify_artifact_with_ptmrt,
 )
@@ -56,6 +62,25 @@ from prolog_tsetlin.services.telemetry import TelemetrySession
 
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_CHILD_HEX = ROOT / "tests" / "data" / "trained_parent_child_v1.hex"
+
+
+def _ptmrt_path() -> Path | None:
+    located = shutil.which("ptmrt")
+    candidates = (
+        Path(located) if located else None,
+        ROOT / "out" / "build" / "Release" / "ptmrt.exe",
+        ROOT / "out" / "build" / "ptmrt.exe",
+        ROOT / "out" / "build" / "ptmrt",
+    )
+    return next((path for path in candidates if path is not None and path.is_file()), None)
+
+
+def _has_gprolog() -> bool:
+    try:
+        resolve_gprolog()
+    except PrologResourceError:
+        return False
+    return True
 
 
 STRICT_DRIFT_POLICY = DriftAuditPolicy(
@@ -122,10 +147,96 @@ def _fixture_corpora() -> tuple[LabeledCorpus, LifecycleCorpora, LabeledCorpus]:
     return parent, LifecycleCorpora(invention, adaptation, promotion), live
 
 
+def _multi_field_corpora() -> tuple[LabeledCorpus, LifecycleCorpora]:
+    def make(
+        role: CorpusRole,
+        first_id: int,
+        temperatures: tuple[int, ...],
+        pressures: tuple[int, ...],
+        labels: tuple[int, ...],
+    ) -> LabeledCorpus:
+        return LabeledCorpus(
+            "thermostat-candidate-set-v1",
+            role,
+            tuple(
+                CorpusExample(
+                    first_id + index,
+                    {
+                        "temperature": temperature,
+                        "pressure": pressure,
+                        "mode": "heat",
+                        "previous_state": False,
+                    },
+                    label,
+                )
+                for index, (temperature, pressure, label) in enumerate(
+                    zip(temperatures, pressures, labels)
+                )
+            ),
+        )
+
+    parent = make(
+        CorpusRole.PARENT_TRAINING,
+        10_000,
+        (50, 55, 60, 65, 85, 90, 95, 100),
+        (20,) * 8,
+        (0, 0, 0, 0, 1, 1, 1, 1),
+    )
+    invention = make(
+        CorpusRole.INVENTION,
+        10_100,
+        (62, 72, 78, 88),
+        (10, 20, 30, 40),
+        (0, 0, 1, 1),
+    )
+    adaptation = make(
+        CorpusRole.ADAPTATION,
+        10_200,
+        (58, 64, 68, 71, 79, 82, 87, 92),
+        (20,) * 8,
+        (0, 0, 0, 0, 1, 1, 1, 1),
+    )
+    promotion = make(
+        CorpusRole.PROMOTION,
+        10_300,
+        (61, 66, 73, 74, 76, 81, 86, 89),
+        (20,) * 8,
+        (0, 0, 0, 0, 1, 1, 1, 1),
+    )
+    return parent, LifecycleCorpora(invention, adaptation, promotion)
+
+
 def _parent() -> tuple[ScalarBinaryTsetlinMachine, OrderedLiteralManifest]:
     parent_training, _, _ = _fixture_corpora()
     schema = FeatureSchema.from_fields(
         temperature=FieldKind.NUMBER,
+        mode=FieldKind.CATEGORY,
+        previous_state=FieldKind.BOOLEAN,
+    )
+    catalog = LiteralCatalog(schema)
+    catalog.category_eq("mode", "heat")
+    catalog.category_eq("previous_state", True)
+    machine = ScalarBinaryTsetlinMachine(
+        20,
+        2,
+        states_per_action=20,
+        specificity=3.0,
+        threshold=10,
+        seed=7,
+    )
+    machine.fit_literal_batch(
+        catalog.encode(parent_training.records).ta,
+        parent_training.labels,
+        epochs=150,
+    )
+    return machine, OrderedLiteralManifest.from_catalog(catalog)
+
+
+def _multi_field_parent() -> tuple[ScalarBinaryTsetlinMachine, OrderedLiteralManifest]:
+    parent_training, _ = _multi_field_corpora()
+    schema = FeatureSchema.from_fields(
+        temperature=FieldKind.NUMBER,
+        pressure=FieldKind.NUMBER,
         mode=FieldKind.CATEGORY,
         previous_state=FieldKind.BOOLEAN,
     )
@@ -220,6 +331,124 @@ def test_literal_manifest_round_trip_preserves_exact_feature_positions() -> None
     wrong_type["fields"][0]["name"] = 7
     with pytest.raises(ModelGenerationError, match="types"):
         OrderedLiteralManifest.from_dict(wrong_type)
+
+
+@pytest.mark.skipif(not _has_gprolog(), reason="GNU Prolog is required")
+def test_input_pta_returns_a_complete_reviewed_threshold_candidate_set() -> None:
+    _, corpora = _multi_field_corpora()
+    _, manifest = _multi_field_parent()
+
+    invention = invent_threshold_candidates_for_corpus(
+        corpora.invention,
+        manifest,
+        numeric_fields=("temperature", "pressure"),
+        budget=ThresholdCandidateBudget(maximum_fields=2, maximum_candidates=4),
+    )
+
+    assert invention.evidence.numeric_fields == ("pressure", "temperature")
+    assert invention.evidence.available_candidates == 2
+    assert {
+        (candidate.field, candidate.threshold)
+        for candidate in invention.evidence.candidates
+    } == {("pressure", 25.0), ("temperature", 75.0)}
+    assert tuple(
+        proposal.semantic_id() for proposal in invention.proposals
+    ) == tuple(
+        candidate.proposal_semantic_id
+        for candidate in invention.evidence.candidates
+    )
+    assert all(
+        reviewed.descriptor.literal_id == candidate.invented_literal_id
+        for reviewed, candidate in zip(
+            invention.reviewed, invention.evidence.candidates
+        )
+    )
+
+
+@pytest.mark.skipif(not _has_gprolog(), reason="GNU Prolog is required")
+def test_input_pta_rejects_a_truncated_candidate_set() -> None:
+    _, manifest = _parent()
+    corpus = _corpus(
+        CorpusRole.INVENTION,
+        11_000,
+        (10, 20, 30, 40),
+        (0, 1, 0, 1),
+    )
+
+    with pytest.raises(ModelGenerationError, match="exceeds its explicit budget"):
+        invent_threshold_candidates_for_corpus(
+            corpus,
+            manifest,
+            numeric_fields=("temperature",),
+            budget=ThresholdCandidateBudget(
+                maximum_fields=1, maximum_candidates=2
+            ),
+        )
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_multi_candidate_lifecycle_selects_before_promotion_and_recovers(
+    tmp_path: Path,
+) -> None:
+    parent_training, corpora = _multi_field_corpora()
+    parent, manifest = _multi_field_parent()
+    store = ModelGenerationStore(tmp_path / "multi-candidate-store")
+
+    result = execute_trained_parent_lifecycle_with_candidates(
+        parent_snapshot=parent.snapshot(),
+        parent_manifest=manifest,
+        parent_training_corpus=parent_training,
+        corpora=corpora,
+        numeric_fields=("temperature", "pressure"),
+        candidate_budget=ThresholdCandidateBudget(
+            maximum_fields=2, maximum_candidates=4
+        ),
+        selection_policy=ThresholdCandidateSelectionPolicy(
+            minimum_observations=8
+        ),
+        adaptation_epochs=5,
+        promotion_policy=PromotionAuditPolicy(8),
+        store=store,
+        ptmrt_executable=_ptmrt_path(),
+    )
+
+    assert len(result.candidate_selection.outcomes) == 2
+    selected = result.candidate_selection.selected_outcome
+    selected_candidate = next(
+        candidate
+        for candidate in result.invention_evidence.candidates
+        if candidate.proposal_semantic_id == selected.proposal_semantic_id
+    )
+    assert selected_candidate.field == "temperature"
+    assert selected_candidate.threshold == 75.0
+    assert selected.child_errors < selected.parent_errors
+    assert result.lineage.candidate_selection_id == (
+        result.candidate_selection.selection_id
+    )
+    assert result.promotion_audit.accepted
+    assert store.load_threshold_candidate_set(
+        result.invention_evidence.candidate_set_id
+    ) == result.invention_evidence
+    assert store.load_threshold_candidate_selection(
+        result.candidate_selection.selection_id
+    ) == result.candidate_selection
+    assert ModelGenerationController(
+        store, ptmrt_executable=_ptmrt_path()
+    ).active_generation_id == result.child_generation.generation_id
+
+    forged = result.candidate_selection.to_dict()
+    loser = next(
+        outcome
+        for outcome in result.candidate_selection.outcomes
+        if outcome.proposal_semantic_id != selected.proposal_semantic_id
+    )
+    forged["selected_proposal_semantic_id"] = loser.proposal_semantic_id
+    forged["selected_proposal_provenance_id"] = loser.proposal_provenance_id
+    with pytest.raises(ModelGenerationError, match="deterministic"):
+        ThresholdCandidateSelection.from_dict(forged)
 
 
 def test_representation_extension_appends_excluded_ta_pairs_without_rng_change() -> None:
@@ -648,25 +877,6 @@ def test_store_instances_share_one_process_local_event_lock(tmp_path: Path) -> N
     assert first._event_lock is second._event_lock
 
 
-def _ptmrt_path() -> Path | None:
-    located = shutil.which("ptmrt")
-    candidates = (
-        Path(located) if located else None,
-        ROOT / "out" / "build" / "Release" / "ptmrt.exe",
-        ROOT / "out" / "build" / "ptmrt.exe",
-        ROOT / "out" / "build" / "ptmrt",
-    )
-    return next((path for path in candidates if path is not None and path.is_file()), None)
-
-
-def _has_gprolog() -> bool:
-    try:
-        resolve_gprolog()
-    except PrologResourceError:
-        return False
-    return True
-
-
 @pytest.mark.skipif(
     not _has_gprolog() or _ptmrt_path() is None,
     reason="live GNU Prolog and a built ptmrt are required",
@@ -785,7 +995,9 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         invented_literal_id=result.lineage.invented_literal_id ^ 1,
     )
     result.controller.store.put_lineage(forged_lineage)
-    with pytest.raises(ModelGenerationError, match="representation extension"):
+    with pytest.raises(
+        ModelGenerationError, match="object graph|representation extension"
+    ):
         result.controller.record_candidate(forged_lineage)
 
     alternate_states = [list(row) for row in result.child.snapshot.snapshot.states]
@@ -1187,6 +1399,24 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             (corpora.invention, adaptation_corpus, promotion_corpus),
         )
         store.put_evidence_usage(usage)
+        selected_candidate = next(
+            candidate
+            for candidate in result.invention_evidence.candidates
+            if candidate.proposal_semantic_id
+            == result.lineage.origin_proposal_semantic_id
+        )
+        legacy_invention_evidence = PrologInventionEvidence(
+            invention_corpus_digest=result.invention_evidence.invention_corpus_digest,
+            session_digest=result.invention_evidence.session_digest,
+            numeric_field=selected_candidate.field,
+            collective_protocol=result.invention_evidence.collective_protocol,
+            gprolog_version=result.invention_evidence.gprolog_version,
+            gprolog_binary_digest=result.invention_evidence.gprolog_binary_digest,
+            module_digests=result.invention_evidence.module_digests,
+            proposal_semantic_id=result.lineage.origin_proposal_semantic_id,
+            proposal_provenance_id=result.lineage.origin_proposal_provenance_id,
+        )
+        store.put_invention_evidence(legacy_invention_evidence)
         lineage = ModelGenerationLineage(
             parent_generation_id=result.parent_generation.generation_id,
             extended_generation_id=result.extended_generation.generation_id,
@@ -1194,7 +1424,7 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             adaptive_behavior_id=behavior.behavior_id,
             restoration_bundle_id=result.restoration_bundle.bundle_id,
             promotion_audit_id=audit.audit_id,
-            invention_evidence_id=result.invention_evidence.evidence_id,
+            invention_evidence_id=legacy_invention_evidence.evidence_id,
             evidence_usage_id=usage.usage_id,
             activation_sequence=2,
             previous_activated_lineage_id=result.lineage.lineage_id,

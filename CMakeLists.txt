@@ -261,7 +261,7 @@ if(PTM_BUILD_TESTS)
         set_tests_properties(ptmrt_trained_parent_verify PROPERTIES
             FIXTURES_REQUIRED ptmrt_trained_parent_artifact
             PASS_REGULAR_EXPRESSION
-                "verified sha256:a636f64d8a5fc25459afa36d397a562a0c4fa0cc118d7d973c1f788760209d6b")
+                "verified sha256:d8af5f46abdbe47f43d37365599668f52fc1a283dc238d84695e78df93a4ede2")
         add_test(NAME ptmrt_trained_parent_below
             COMMAND ptmrt run-record "${PTM_TRAINED_PARENT_FIXTURE}"
                 "temperature:int=74"
