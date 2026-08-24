@@ -8,6 +8,7 @@ from pathlib import Path
 from ..model_artifact import export_packed_tm
 from ..preprocessing import PreprocessingContract
 from ..representation import FeatureSchema, FieldKind, LiteralCatalog
+from ._atomic import publish_bytes
 from .training import TrainingRun
 
 
@@ -78,9 +79,7 @@ def export_training_run(
             "seed": run.request.seed,
         },
     )
-    mode = "wb" if request.overwrite else "xb"
-    with destination.open(mode) as stream:
-        stream.write(artifact.serialized)
+    publish_bytes(destination, artifact.serialized, overwrite=request.overwrite)
     validation = artifact.manifest.get("validation", {})
     return ArtifactSummary(
         path=destination,

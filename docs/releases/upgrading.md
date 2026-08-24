@@ -31,7 +31,7 @@ Activate `.venv-next`, then install the desired profile:
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install ".[tui,data,test]"
+python -m pip install ".[tui,tui-test,data,test]"
 python -m pytest tests/python
 ```
 
@@ -71,6 +71,9 @@ application to the new environment/prefix only after those checks pass.
   artifacts remain valid.
 - The TUI is tested with Textual 8.x and intentionally excludes Textual 9 until
   its compatibility is reviewed.
+- `ptm tui` and `ptm-tui` now launch the research workbench by default. Use
+  `ptm tui --style classic` to retain the former screen-per-step presentation;
+  both shells use the same session controllers and service contracts.
 - Arrow/Parquet and image consumers must opt into the `data` extra. Existing
   dependency-free core installations do not acquire PyArrow or Pillow.
 - Installed native consumers should use exported CMake targets rather than

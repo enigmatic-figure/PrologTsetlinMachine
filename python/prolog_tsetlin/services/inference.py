@@ -39,10 +39,22 @@ class ArtifactInputField:
     accepted_values: tuple[object, ...] = ()
 
 
-def artifact_input_fields(path: str | Path) -> tuple[ArtifactInputField, ...]:
-    """Describe raw input fields in stable first-use order."""
+@dataclass(frozen=True, slots=True)
+class ArtifactInferenceSession:
+    """One immutable artifact instance pinned for inspection and inference."""
 
-    _, artifact = _load(path)
+    source: Path
+    artifact: InferenceArtifact
+    inspection: Mapping[str, Any]
+    verification: Mapping[str, Any]
+    fields: tuple[ArtifactInputField, ...]
+
+
+def _artifact_input_fields(
+    artifact: InferenceArtifact,
+) -> tuple[ArtifactInputField, ...]:
+    """Describe raw input fields from one already-loaded artifact."""
+
     if not isinstance(artifact, PackedTMInferenceArtifact):
         return ()
     preprocessing = artifact.preprocessing
@@ -91,6 +103,13 @@ def artifact_input_fields(path: str | Path) -> tuple[ArtifactInputField, ...]:
         )
         for name in order
     )
+
+
+def artifact_input_fields(path: str | Path) -> tuple[ArtifactInputField, ...]:
+    """Describe raw input fields in stable first-use order."""
+
+    _, artifact = _load(path)
+    return _artifact_input_fields(artifact)
 
 
 def parse_typed_record(
@@ -150,6 +169,17 @@ def inspect_artifact(
     """Load, validate, and return a stable human/tool-facing description."""
 
     source, artifact = _load(path)
+    return _inspect_artifact(source, artifact, include_manifest=include_manifest)
+
+
+def _inspect_artifact(
+    source: Path,
+    artifact: InferenceArtifact,
+    *,
+    include_manifest: bool = False,
+) -> dict[str, Any]:
+    """Inspect one already-loaded immutable artifact."""
+
     manifest = artifact.manifest
     ports = manifest.get("ports", {})
     validation = manifest.get("validation", {})
@@ -159,7 +189,7 @@ def inspect_artifact(
         "artifact_kind": manifest.get("artifact_kind"),
         "artifact_schema": manifest.get("artifact_schema"),
         "file": str(source),
-        "size_bytes": source.stat().st_size,
+        "size_bytes": len(artifact.serialized),
         "title": manifest.get("title"),
         "task": manifest.get("task"),
         "producer": manifest.get("producer"),
@@ -187,15 +217,46 @@ def verify_artifact(path: str | Path) -> dict[str, Any]:
     """Validate container integrity, contracts, and embedded conformance cases."""
 
     source, artifact = _load(path)
+    return _verify_artifact(source, artifact)
+
+
+def _verify_artifact(
+    source: Path, artifact: InferenceArtifact
+) -> dict[str, Any]:
+    """Verify one already-loaded immutable artifact."""
+
     verified = artifact.verify_conformance()
+    validation = artifact.manifest.get("validation")
+    case_count = (
+        validation.get("conformance_case_count", 0)
+        if isinstance(validation, Mapping)
+        else 0
+    )
     return {
         "artifact_id": artifact.artifact_id,
         "artifact_kind": artifact.manifest.get("artifact_kind"),
-        "conformance_case_count": len(artifact.conformance_cases),
+        "conformance_case_count": int(case_count),
         "file": str(source),
-        "size_bytes": source.stat().st_size,
+        "size_bytes": len(artifact.serialized),
         "verified": verified,
     }
+
+
+def open_artifact_session(path: str | Path) -> ArtifactInferenceSession:
+    """Load once and bind all later UI operations to the verified bytes."""
+
+    source = Path(path).expanduser().resolve()
+    artifact = load_model_artifact(source)
+    inspection = _inspect_artifact(source, artifact)
+    verification = _verify_artifact(source, artifact)
+    fields = _artifact_input_fields(artifact)
+    return ArtifactInferenceSession(
+        source=source,
+        artifact=artifact,
+        inspection=inspection,
+        verification=verification,
+        fields=fields,
+    )
 
 
 def run_artifact_records(
@@ -204,6 +265,22 @@ def run_artifact_records(
     """Materialize typed records and run a raw-record-capable packed TM."""
 
     _, artifact = _load(path)
+    return _run_artifact_records(artifact, records)
+
+
+def run_session_artifact_records(
+    session: ArtifactInferenceSession,
+    records: Sequence[Mapping[str, object]],
+) -> dict[str, Any]:
+    """Run records against the exact immutable artifact opened by the session."""
+
+    return _run_artifact_records(session.artifact, records)
+
+
+def _run_artifact_records(
+    artifact: InferenceArtifact,
+    records: Sequence[Mapping[str, object]],
+) -> dict[str, Any]:
     if not isinstance(artifact, PackedTMInferenceArtifact):
         raise ValueError("raw-record inference currently requires a packed-TM artifact")
     preprocessing = artifact.preprocessing

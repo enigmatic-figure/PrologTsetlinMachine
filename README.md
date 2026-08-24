@@ -29,9 +29,10 @@ python -m pip install ".[tui]"
 ptm tui --demo xor
 ```
 
-The Overview screen and footer guide the built-in XOR journey through training,
-clause inspection, export, verification, and raw-record inference. Contextual
-help is available in every view; the generated
+The Dashboard, persistent research telemetry, and task views guide the built-in
+XOR journey through training, clause and TA inspection, temporal samples,
+export, verification, and raw-record inference. Help is available throughout
+the workbench; the generated
 [help-topic and keyboard reference](docs/manual/reference/help-topics.md) is the
 authoritative offline copy.
 

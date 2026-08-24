@@ -10,6 +10,7 @@ import pytest
 
 from prolog_tsetlin.cli import _parser, main as cli_main
 from prolog_tsetlin.help_topics import (
+    CANONICAL_TUI_BINDINGS,
     COMMAND_TOPICS,
     HELP_TOPICS,
     PARSER_TOPICS,
@@ -129,6 +130,11 @@ def test_tui_bindings_and_contexts_are_complete() -> None:
         for binding in TUI_BINDINGS
     ]
     assert actual == expected
+
+
+def test_canonical_workbench_binding_keys_are_registered_once() -> None:
+    keys = [binding.key for binding in CANONICAL_TUI_BINDINGS]
+    assert len(keys) == len(set(keys))
 
 
 def test_contextual_tui_help_uses_registered_controls() -> None:

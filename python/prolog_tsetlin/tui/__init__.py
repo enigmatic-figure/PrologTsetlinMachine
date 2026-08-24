@@ -5,10 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def run(*, workspace: Path | None = None, demo: str = "xor") -> None:
-    from .app import PTMApp
+def run(
+    *, workspace: Path | None = None, demo: str = "xor", style: str = "workbench"
+) -> None:
+    if style in ("workbench", "single_pane"):
+        from .single_pane.app import PTMWorkbenchApp
 
-    PTMApp(workspace=workspace, demo=demo).run()
+        PTMWorkbenchApp(workspace=workspace, demo=demo).run()
+    elif style == "classic":
+        from .app import PTMApp
+
+        PTMApp(workspace=workspace, demo=demo).run()
+    else:
+        raise ValueError(f"unsupported TUI style: {style}")
 
 
 def main() -> None:

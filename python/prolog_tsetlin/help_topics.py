@@ -81,12 +81,13 @@ _TOPICS = (
         title="Terminal workbench",
         summary="Explore PTM through the keyboard-first Textual workbench.",
         explanation=(
-            "The workbench provides five views for environment status, deterministic "
-            "XOR training, clause inspection, portable artifacts, and bounded symbolic "
-            "search. The native runtime and GNU Prolog remain optional until a workflow "
-            "needs them.",
-            "Use the footer for active shortcuts and open contextual help in any view for "
-            "controls drawn from this shared registry.",
+            "The canonical workbench keeps system state and research telemetry visible "
+            "while task views cover deterministic XOR training, clauses, TA populations, "
+            "literals, temporal samples, portable artifacts, and bounded symbolic search. "
+            "The native runtime and GNU Prolog remain optional until a workflow needs them.",
+            "Use the footer for active shortcuts and open help for controls drawn from this "
+            "shared registry. The former five-view interface remains available with "
+            "`ptm tui --style classic`.",
         ),
         examples=(
             HelpExample(("tui", "--demo", "xor"), "Launch the built-in XOR session."),
@@ -355,6 +356,76 @@ TUI_BINDINGS = (
     TUIBindingSpec("q", "quit", "Quit", "Quit the workbench.", _ALL_VIEWS),
 )
 
+# Navigation is shell presentation, not a PTM command.  Keep the complete
+# registry above for the classic frontend and its contextual help, while
+# allowing other shells to share only behavior with the same semantics.
+TUI_NAVIGATION_ACTIONS = frozenset(
+    ("show_overview", "show_train", "show_clauses", "show_artifacts", "show_search")
+)
+TUI_SEMANTIC_ACTIONS = frozenset(
+    (
+        "train",
+        "cancel",
+        "export",
+        "load_artifact",
+        "run_record",
+        "search",
+        "cancel_search",
+        "help",
+        "quit",
+    )
+)
+TUI_NAVIGATION_BINDINGS = tuple(
+    binding for binding in TUI_BINDINGS if binding.action in TUI_NAVIGATION_ACTIONS
+)
+TUI_SEMANTIC_BINDINGS = tuple(
+    binding for binding in TUI_BINDINGS if binding.action in TUI_SEMANTIC_ACTIONS
+)
+
+# The canonical shell owns its presentation bindings. ``single_pane`` remains
+# a compatibility name for the layout, not the user-facing workbench identity.
+_CANONICAL_CONTEXT = ("workbench",)
+CANONICAL_TUI_BINDINGS = TUI_SEMANTIC_BINDINGS + (
+    TUIBindingSpec("1", "tab_1", "System", "Open System.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec(
+        "2", "tab_2", "Dashboard", "Open Dashboard.", _CANONICAL_CONTEXT, False
+    ),
+    TUIBindingSpec("3", "tab_3", "Clauses", "Open Clauses.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec("4", "tab_4", "TA States", "Open TA States.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec("5", "tab_5", "Literals", "Open Literals.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec("6", "tab_6", "Graphs", "Open Graphs.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec("7", "tab_7", "Artifacts", "Open Artifacts.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec("v", "show_timeline", "Timeline", "Open Timeline.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec("s", "show_search", "Search", "Open Search.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec("c", "show_config", "Config", "Open Config.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec(
+        "p",
+        "show_predictions",
+        "Predictions",
+        "Open Predictions.",
+        _CANONICAL_CONTEXT,
+        False,
+    ),
+    TUIBindingSpec("ctrl+l", "show_events", "Events", "Open Events.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec("d", "show_detail", "Detail", "Open Detail.", _CANONICAL_CONTEXT, False),
+    TUIBindingSpec("slash", "filter", "Filter", "Filter clauses.", _CANONICAL_CONTEXT),
+    TUIBindingSpec(
+        "k",
+        "prune",
+        "Mark hidden",
+        "Hide the selected clause locally.",
+        _CANONICAL_CONTEXT,
+    ),
+    TUIBindingSpec(
+        "enter",
+        "inspect",
+        "Inspect",
+        "Inspect the selected clause.",
+        _CANONICAL_CONTEXT,
+        False,
+    ),
+)
+
 
 _DISPLAY_KEY_OVERRIDES: Mapping[str, str] = MappingProxyType(
     {
@@ -480,7 +551,7 @@ def render_topic(topic_id: str) -> str:
         view for view, owners in TUI_VIEW_TOPICS.items() if topic_id in owners
     )
     if views:
-        lines.extend(("", "TUI views:", f"  {', '.join(views)}"))
+        lines.extend(("", "Classic compatibility views:", f"  {', '.join(views)}"))
     lines.extend(("", "Manual:"))
     lines.extend(f"  {manual_link}" for manual_link in value.manual_links)
     return "\n".join(lines)
@@ -511,17 +582,16 @@ def render_tui_help(view: str) -> tuple[str, str]:
 
 
 def _markdown_controls(topic_id: str) -> tuple[TUIBindingSpec, ...]:
+    if topic_id == "workbench":
+        return CANONICAL_TUI_BINDINGS
     views = tuple(
         view for view, owners in TUI_VIEW_TOPICS.items() if topic_id in owners
     )
-    seen: set[str] = set()
-    controls: list[TUIBindingSpec] = []
-    for view in views:
-        for binding in bindings_for_view(view):
-            if binding.key not in seen:
-                seen.add(binding.key)
-                controls.append(binding)
-    return tuple(controls)
+    return tuple(
+        binding
+        for binding in TUI_SEMANTIC_BINDINGS
+        if any(view in binding.contexts for view in views)
+    )
 
 
 def render_manual_reference() -> str:
