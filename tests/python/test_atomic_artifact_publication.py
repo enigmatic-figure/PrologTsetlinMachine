@@ -75,3 +75,19 @@ def test_failed_no_overwrite_publication_leaves_no_partial_destination(
 
     assert not target.exists()
     assert _temporary_files(target) == []
+
+
+def test_atomic_publication_synchronizes_parent_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = tmp_path / "model.ptm"
+    synchronized: list[Path] = []
+    monkeypatch.setattr(
+        _atomic,
+        "_sync_parent_directory",
+        lambda published: synchronized.append(published),
+    )
+
+    _atomic.publish_bytes(target, b"durable artifact", overwrite=False)
+
+    assert synchronized == [target]

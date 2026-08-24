@@ -267,6 +267,45 @@ class LiteralCatalog:
     def literals(self) -> tuple[LiteralDescriptor, ...]:
         return tuple(self._literals)
 
+    @classmethod
+    def from_descriptors(
+        cls,
+        schema: FeatureSchema,
+        descriptors: Iterable[LiteralDescriptor],
+    ) -> "LiteralCatalog":
+        """Rebuild one catalog in the declared positional order.
+
+        Stable literal IDs do not make feature positions interchangeable.  This
+        constructor validates every externally supplied descriptor and retains
+        its sequence so snapshots can be restored against an exact feature
+        manifest.
+        """
+
+        catalog = cls(schema)
+        for descriptor in descriptors:
+            catalog.register_descriptor(descriptor)
+        return catalog
+
+    def clone(self) -> "LiteralCatalog":
+        """Return an independently mutable catalog with identical positions."""
+
+        return type(self).from_descriptors(self.schema, self._literals)
+
+    def register_descriptor(
+        self, descriptor: LiteralDescriptor
+    ) -> LiteralDescriptor:
+        """Append one canonical external descriptor without reordering it."""
+
+        canonical = self.validate_descriptor(descriptor)
+        existing = self._by_id.get(canonical.literal_id)
+        if existing is not None:
+            if existing != canonical:
+                raise ValueError("literal ID collision")
+            return existing
+        self._by_id[canonical.literal_id] = canonical
+        self._literals.append(canonical)
+        return canonical
+
     def _describe(
         self,
         field_name: str,

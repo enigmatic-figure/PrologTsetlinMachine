@@ -26,6 +26,52 @@ class TMSnapshot:
     rng_state: object
 
 
+def extend_snapshot_features(
+    snapshot: TMSnapshot,
+    added_features: int,
+) -> TMSnapshot:
+    """Append deterministically excluded feature TAs to an adaptive snapshot.
+
+    Scalar TM state rows are interleaved by feature as positive/negative TA
+    pairs.  Appending ``(states_per_action, states_per_action)`` therefore
+    preserves every existing position and places each new TA at the highest
+    exclude state immediately below the inclusion boundary.  The RNG state is
+    copied without constructing or advancing a fresh random stream.
+    """
+
+    if not isinstance(snapshot, TMSnapshot):
+        raise TypeError("snapshot must be TMSnapshot")
+    if type(added_features) is not int:
+        raise TypeError("added_features must be an integer")
+    if added_features <= 0:
+        raise ValueError("added_features must be positive")
+    if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError("snapshot schema version is unsupported")
+    if (
+        snapshot.number_of_clauses <= 0
+        or snapshot.number_of_features <= 0
+        or snapshot.states_per_action <= 0
+    ):
+        raise ValueError("snapshot configuration is invalid")
+    ScalarBinaryTsetlinMachine._check_snapshot_states(
+        snapshot,
+        number_of_clauses=snapshot.number_of_clauses,
+        number_of_features=snapshot.number_of_features,
+        states_per_action=snapshot.states_per_action,
+    )
+    suffix = (snapshot.states_per_action,) * (2 * added_features)
+    return TMSnapshot(
+        schema_version=snapshot.schema_version,
+        number_of_clauses=snapshot.number_of_clauses,
+        number_of_features=snapshot.number_of_features + added_features,
+        states_per_action=snapshot.states_per_action,
+        specificity=snapshot.specificity,
+        threshold=snapshot.threshold,
+        states=tuple(tuple(row) + suffix for row in snapshot.states),
+        rng_state=copy.deepcopy(snapshot.rng_state),
+    )
+
+
 class ScalarBinaryTsetlinMachine:
     """Readable training oracle; it is intentionally not performance code."""
 
