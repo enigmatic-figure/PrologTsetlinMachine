@@ -5,17 +5,22 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-import queue
 import re
 import subprocess
 import tempfile
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
+from .._bounded_process import (
+    BoundedProcessDrainError,
+    BoundedProcessLaunchError,
+    BoundedProcessOutputLimit,
+    BoundedProcessTimeout,
+    run_bounded_process,
+)
 from ..prolog_resources import (
     PrologResourceError,
     prolog_process_environment,
@@ -520,99 +525,31 @@ def _run_bounded_process(
     timeout_seconds: float | int,
     max_output_bytes: int,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Capture two child streams without allowing unbounded pipe buffers."""
+    """Run the collective through PTM's shared process-tree boundary."""
 
     try:
-        process = subprocess.Popen(
+        return run_bounded_process(
             command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
             cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
             env=prolog_process_environment(),
             creationflags=(
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             ),
         )
-    except OSError as exc:
-        raise PTACollectiveExecutionError(
-            f"could not launch GNU Prolog: {exc}"
+    except BoundedProcessTimeout as exc:
+        raise PTACollectiveTimeout(
+            f"PTA collective timed out after {timeout_seconds:g}s"
         ) from exc
-
-    chunks: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=8)
-
-    def read_stream(name: str, stream: object) -> None:
-        try:
-            while True:
-                data = stream.read(8_192)  # type: ignore[attr-defined]
-                if not data:
-                    break
-                chunks.put((name, data))
-        finally:
-            chunks.put((name, None))
-
-    readers = [
-        threading.Thread(
-            target=read_stream,
-            args=("stdout", process.stdout),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=read_stream,
-            args=("stderr", process.stderr),
-            daemon=True,
-        ),
-    ]
-    for reader in readers:
-        reader.start()
-
-    output = {"stdout": bytearray(), "stderr": bytearray()}
-    finished_streams = 0
-    deadline = time.monotonic() + float(timeout_seconds)
-    failure: PTACollectiveError | None = None
-    while finished_streams < 2:
-        remaining = deadline - time.monotonic()
-        if failure is None and remaining <= 0:
-            failure = PTACollectiveTimeout(
-                f"PTA collective timed out after {timeout_seconds:g}s"
-            )
-            process.kill()
-        try:
-            name, data = chunks.get(timeout=max(0.01, min(0.05, remaining)))
-        except queue.Empty:
-            continue
-        if data is None:
-            finished_streams += 1
-            continue
-        output[name].extend(data)
-        if (
-            failure is None
-            and len(output["stdout"]) + len(output["stderr"]) > max_output_bytes
-        ):
-            failure = PTACollectiveProtocolError(
-                "collective output exceeded its byte budget"
-            )
-            process.kill()
-
-    try:
-        process.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-        if failure is None:
-            failure = PTACollectiveTimeout(
-                f"PTA collective timed out after {timeout_seconds:g}s"
-            )
-    for reader in readers:
-        reader.join(timeout=1.0)
-    if failure is not None:
-        raise failure
-    return subprocess.CompletedProcess(
-        command,
-        process.returncode,
-        bytes(output["stdout"]),
-        bytes(output["stderr"]),
-    )
+    except BoundedProcessOutputLimit as exc:
+        raise PTACollectiveProtocolError(
+            "collective output exceeded its byte budget"
+        ) from exc
+    except (BoundedProcessLaunchError, BoundedProcessDrainError) as exc:
+        raise PTACollectiveExecutionError(
+            f"GNU Prolog process boundary failed: {exc}"
+        ) from exc
 
 
 def _write_bounded_fact_lines(

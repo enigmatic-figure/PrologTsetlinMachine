@@ -20,9 +20,11 @@ kind-specific structural bounds.
 }
 ```
 
-Unknown top-level fields are rejected. The deadline is between 0.1 and 300
-seconds. JSON numbers and integers are type-checked rather than coerced from
-strings or Booleans.
+Unknown top-level fields are rejected. The single end-to-end deadline is
+between 0.1 and 300 seconds. A repair's counterexample iterations share that
+deadline; each solver invocation receives only the time remaining rather than
+resetting the full budget. JSON numbers and integers are type-checked rather
+than coerced from strings or Booleans.
 
 | Kind | Required problem fields | Bound |
 | --- | --- | --- |
@@ -62,6 +64,13 @@ Solved searches emit `ptm.search.result.v1` containing:
 Prolog output is never accepted directly as deployable behavior. Python checks
 returned indices, literals, tree bounds, the read-once property, and every
 labeled example before reporting success.
+
+Every GNU Prolog launch runs inside PTM's shared process-tree boundary: a
+POSIX process session/group or a Windows kill-on-close Job Object. The absolute
+deadline includes bounded termination and pipe draining, and combined stdout
+plus stderr is capped at 262,144 bytes. Cancellation, timeout, output overflow,
+and abnormal process-tree cleanup become typed bridge failures rather than
+leaving descendants or unbounded captured output.
 
 See [Run bounded symbolic search](../how-to/run-bounded-search.md) for the
 operational workflow.

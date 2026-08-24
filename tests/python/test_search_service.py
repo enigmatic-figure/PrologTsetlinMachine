@@ -10,9 +10,11 @@ from pathlib import Path
 
 import pytest
 
+import prolog_tsetlin.services.search as search_service
 from prolog_tsetlin import (
     DecisionTreeSearchProblem,
     GNUPrologSearch,
+    PrologBridgeError,
     PrologSearchCancelled,
     load_model_artifact,
 )
@@ -65,6 +67,28 @@ def test_search_request_rejects_kind_mismatch_and_unknown_fields() -> None:
     invalid_bound["problem"]["slot_count"] = True
     with pytest.raises(ValueError, match="slot_count must be an integer"):
         search_request_budget(BoundedSearchRequest.from_dict(invalid_bound))
+
+
+def test_request_deadline_includes_validation_and_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SearchMustNotLaunch:
+        def search(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("expired request launched GNU Prolog")
+
+    request_document = demo_search_document(SearchKind.THRESHOLD)
+    request_document["timeout_seconds"] = 0.1
+    request = BoundedSearchRequest.from_dict(request_document)
+    clock = iter((10.0, 10.2))
+    monkeypatch.setattr(search_service, "perf_counter", lambda: next(clock))
+    monkeypatch.setattr(
+        search_service,
+        "GNUPrologSearch",
+        lambda executable: SearchMustNotLaunch(),
+    )
+
+    with pytest.raises(PrologBridgeError, match="request timed out"):
+        run_bounded_search(request)
 
 
 @pytest.mark.skipif(not GPROLOG.is_file(), reason="GNU Prolog is not installed")

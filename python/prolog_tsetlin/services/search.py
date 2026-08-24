@@ -21,6 +21,7 @@ from ..prolog_bridge import (
     FeatureTemplateCandidate,
     FeatureTemplateSearchProblem,
     GNUPrologSearch,
+    PrologBridgeError,
     TAClauseSearchProblem,
     ThresholdSearchProblem,
 )
@@ -252,10 +253,21 @@ def run_bounded_search(
 ) -> BoundedSearchResult:
     """Validate all bounds, run one search, and return a typed JSON report."""
 
+    started = perf_counter()
+    deadline = started + request.timeout_seconds
+
+    def remaining_time() -> float:
+        remaining = deadline - perf_counter()
+        if remaining <= 0:
+            raise PrologBridgeError(
+                f"bounded Prolog {request.kind.value} request timed out after "
+                f"{request.timeout_seconds:g}s"
+            )
+        return remaining
+
     search_request_budget(request)
     search = GNUPrologSearch(executable)
     problem_value = request.problem
-    started = perf_counter()
     program: LogicProgram32 | None = None
 
     if request.kind is SearchKind.THRESHOLD:
@@ -266,7 +278,7 @@ def run_bounded_search(
             negative_examples=problem_value["negative_examples"],
         )
         result = search.search(
-            problem, timeout_seconds=request.timeout_seconds, cancel=cancel
+            problem, timeout_seconds=remaining_time(), cancel=cancel
         )
         report = {
             "selected_slots": list(result.selected_slots),
@@ -283,7 +295,7 @@ def run_bounded_search(
             coverage=problem_value["coverage"],
         )
         result = search.search_feature_template(
-            problem, timeout_seconds=request.timeout_seconds, cancel=cancel
+            problem, timeout_seconds=remaining_time(), cancel=cancel
         )
         report = {
             "candidate_index": result.candidate_index,
@@ -305,7 +317,7 @@ def run_bounded_search(
             labels=problem_value["labels"],
         )
         result = search.search_ta_clause(
-            problem, timeout_seconds=request.timeout_seconds, cancel=cancel
+            problem, timeout_seconds=remaining_time(), cancel=cancel
         )
         configuration_value = problem_value.get("configuration", {})
         if not isinstance(configuration_value, Mapping):
@@ -346,7 +358,7 @@ def run_bounded_search(
         )
         if request.kind is SearchKind.DECISION_TREE:
             result = search.search_decision_tree(
-                problem, timeout_seconds=request.timeout_seconds, cancel=cancel
+                problem, timeout_seconds=remaining_time(), cancel=cancel
             )
             tree = result.tree
             program = _logic_program_if_portable(tree, problem.slot_count)
@@ -365,7 +377,7 @@ def run_bounded_search(
                 parent,
                 problem,
                 max_iterations=request.max_iterations,
-                timeout_seconds=request.timeout_seconds,
+                timeout_seconds=remaining_time(),
                 cancel=cancel,
             )
             program = (
@@ -392,9 +404,8 @@ def run_bounded_search(
                 "dataset_digest": problem.dataset_digest(),
                 "candidate_upper_bound": problem.candidate_upper_bound,
             }
-    return BoundedSearchResult(
-        request.kind, report, perf_counter() - started, program
-    )
+    remaining_time()
+    return BoundedSearchResult(request.kind, report, perf_counter() - started, program)
 
 
 def export_search_artifact(
