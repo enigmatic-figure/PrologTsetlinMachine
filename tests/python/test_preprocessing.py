@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+from typing import Any, Callable
 from unittest import TestCase
 
 from prolog_tsetlin import (
@@ -10,12 +13,35 @@ from prolog_tsetlin import (
     NullPolicy,
     PreprocessingContract,
     ScalarBinaryTsetlinMachine,
+    ModelArtifactError,
     export_packed_tm,
     load_model_artifact_from_bytes,
 )
 
 
 ASSERTIONS = TestCase()
+
+
+def _rewrite_manifest(
+    serialized: bytes, mutate: Callable[[dict[str, Any]], None]
+) -> bytes:
+    manifest_size = int.from_bytes(serialized[24:32], "little")
+    payload_size = int.from_bytes(serialized[32:40], "little")
+    first = 64
+    last = first + manifest_size
+    manifest = json.loads(serialized[first:last])
+    mutate(manifest)
+    manifest_bytes = json.dumps(
+        manifest,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    header = bytearray(serialized[:64])
+    header[24:32] = len(manifest_bytes).to_bytes(8, "little")
+    content = bytes(header) + manifest_bytes + serialized[last : last + payload_size]
+    return content + hashlib.sha256(content).digest()
 
 
 def xor_machine() -> ScalarBinaryTsetlinMachine:
@@ -74,11 +100,81 @@ def test_preprocessing_rejects_ambiguous_types_and_tampered_ids() -> None:
         contract.materialize({"age": True})
     with ASSERTIONS.assertRaisesRegex(ValueError, "binary64"):
         contract.materialize({"age": 1 << 54})
+    with ASSERTIONS.assertRaisesRegex(ValueError, "finite"):
+        contract.materialize({"age": float("nan")})
 
     tampered = copy.deepcopy(contract.to_dict())
     tampered["outputs"][0]["literal_id"] = "1"
     with ASSERTIONS.assertRaisesRegex(ValueError, "literal ID"):
         PreprocessingContract.from_dict(tampered)
+
+
+def test_literal_catalog_and_portable_contract_share_typed_semantics() -> None:
+    schema = FeatureSchema.from_fields(
+        age=FieldKind.NUMBER,
+        status=FieldKind.CATEGORY,
+        active=FieldKind.BOOLEAN,
+    )
+    catalog = LiteralCatalog(schema)
+    catalog.numeric_ge("age", 18)
+    catalog.category_in("status", [True, 1, "1"])
+    catalog.category_eq("active", True)
+    contract = PreprocessingContract.from_catalog(catalog)
+
+    for record in (
+        {"age": 18, "status": True, "active": True},
+        {"age": 17.5, "status": 1, "active": False},
+        {"age": 20, "status": "1", "active": True},
+        {"age": None, "status": None, "active": None},
+    ):
+        assert catalog.encode([record]).ta.row_values(0) == contract.materialize(
+            record
+        )
+
+    for malformed in (
+        {"age": True, "status": 1, "active": True},
+        {"age": float("nan"), "status": 1, "active": True},
+        {"age": 18, "status": 1.0, "active": True},
+        {"age": 18, "status": 1, "active": 1},
+    ):
+        with ASSERTIONS.assertRaises(ValueError):
+            catalog.encode([malformed])
+        with ASSERTIONS.assertRaises(ValueError):
+            contract.materialize(malformed)
+
+
+def test_artifact_rejects_rehashed_content_identity_forgery() -> None:
+    schema = FeatureSchema.from_fields(
+        left=FieldKind.BOOLEAN,
+        right=FieldKind.BOOLEAN,
+    )
+    catalog = LiteralCatalog(schema)
+    catalog.category_eq("left", True)
+    catalog.category_eq("right", True)
+    preprocessing = PreprocessingContract.from_catalog(catalog)
+    artifact = export_packed_tm(
+        xor_machine().snapshot(),
+        name="Raw-record identity forgery test",
+        preprocessing=preprocessing,
+        validation_records=({"left": False, "right": False},),
+    )
+
+    def forge_field(manifest: dict[str, Any]) -> None:
+        manifest["preprocessing"]["outputs"][0]["field_id"] = "1"
+
+    with ASSERTIONS.assertRaises(ModelArtifactError):
+        load_model_artifact_from_bytes(
+            _rewrite_manifest(artifact.serialized, forge_field)
+        )
+
+    def forge_literal(manifest: dict[str, Any]) -> None:
+        manifest["preprocessing"]["outputs"][0]["literal_id"] = "1"
+        manifest["features"]["literal_ids"][0] = "1"
+
+    with ASSERTIONS.assertRaises(ModelArtifactError):
+        load_model_artifact_from_bytes(
+            _rewrite_manifest(artifact.serialized, forge_literal)
+        )
 
 
 def test_preprocessing_rejects_nonportable_token_semantics() -> None:

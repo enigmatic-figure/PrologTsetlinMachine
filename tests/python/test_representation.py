@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 
 from prolog_tsetlin import FeatureSchema, FieldKind, LiteralCatalog, NullPolicy
@@ -76,6 +77,47 @@ class RepresentationTests(unittest.TestCase):
         self.assertEqual(len(batch.ta.words[0]), 2)
         self.assertTrue(batch.ta.bit(0, 65))
         self.assertFalse(batch.ta.bit(0, 66))
+
+    def test_record_values_obey_declared_field_types(self) -> None:
+        catalog = LiteralCatalog(self.schema)
+        numeric = catalog.numeric_ge("age", 1)
+        integer_category = catalog.category_eq("color", 1)
+        catalog.token_contains("note", "urgent")
+
+        for malformed in (True, "1", math.nan, math.inf, -math.inf):
+            with self.subTest(age=malformed), self.assertRaises(ValueError):
+                catalog.encode(
+                    [{"age": malformed, "color": 1, "note": "urgent"}]
+                )
+            with self.subTest(direct_age=malformed), self.assertRaises(ValueError):
+                catalog.evaluate(numeric, malformed)
+
+        with self.assertRaisesRegex(ValueError, "must be text"):
+            catalog.encode([{"age": 1, "color": 1, "note": ["urgent"]}])
+        with self.assertRaisesRegex(ValueError, "string, integer, or Boolean"):
+            catalog.encode([{"age": 1, "color": 1.0, "note": "urgent"}])
+
+        self.assertTrue(catalog.evaluate(integer_category, 1))
+        self.assertFalse(catalog.evaluate(integer_category, True))
+
+    def test_boolean_fields_reject_integer_aliases_even_for_missingness(self) -> None:
+        schema = FeatureSchema.from_fields(flag=FieldKind.BOOLEAN)
+        catalog = LiteralCatalog(schema)
+        equality = catalog.category_eq("flag", True)
+        missing = catalog.is_missing("flag")
+
+        self.assertTrue(catalog.evaluate(equality, True))
+        self.assertFalse(catalog.evaluate(equality, False))
+        with self.assertRaisesRegex(ValueError, "must be Boolean"):
+            catalog.evaluate(equality, 1)
+        with self.assertRaisesRegex(ValueError, "must be Boolean"):
+            catalog.evaluate(missing, 1)
+
+    def test_encode_validates_schema_fields_without_registered_literals(self) -> None:
+        catalog = LiteralCatalog(self.schema)
+        catalog.is_missing("age")
+        with self.assertRaisesRegex(ValueError, "must be text"):
+            catalog.encode([{"age": None, "color": "blue", "note": 7}])
 
     def test_native_feature_major_pages_preserve_literal_bits(self) -> None:
         catalog = LiteralCatalog(self.schema)
