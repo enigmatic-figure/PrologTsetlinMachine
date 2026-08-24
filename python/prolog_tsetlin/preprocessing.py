@@ -14,6 +14,8 @@ from .representation import (
     LiteralDescriptor,
     NullPolicy,
     TransformKind,
+    _typed_equal,
+    _validate_typed_field_value,
 )
 
 
@@ -52,10 +54,6 @@ def _portable_category(value: object, label: str) -> str | int | bool:
     if isinstance(value, str) and any(ord(character) < 0x20 for character in value):
         raise ValueError(f"{label} cannot contain control characters")
     return value
-
-
-def _typed_equal(left: object, right: object) -> bool:
-    return type(left) is type(right) and left == right
 
 
 def _validate_contract_complexity(value: object) -> None:
@@ -330,14 +328,13 @@ class PreprocessingContract:
 
 
 def _validate_field_value(kind: FieldKind, value: object, field: str) -> object:
+    normalized = _validate_typed_field_value(kind, value, field)
     if kind is FieldKind.NUMBER:
-        return _portable_number(value, f"field {field!r}")
+        return _portable_number(normalized, f"field {field!r}")
     if kind is FieldKind.CATEGORY:
-        return _portable_category(value, f"field {field!r}")
+        return _portable_category(normalized, f"field {field!r}")
     if kind is FieldKind.BOOLEAN:
-        if type(value) is not bool:
-            raise ValueError(f"field {field!r} must be Boolean")
-        return value
+        return normalized
     raise ValueError(f"field kind {kind.value} is not portable in preprocessing v1")
 
 

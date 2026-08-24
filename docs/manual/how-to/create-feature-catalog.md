@@ -28,6 +28,12 @@ catalog, generated = create_feature_template_catalog(schema, specs)
 The catalog assigns stable literal identities and preserves generated order.
 Encode records through that catalog before training.
 
+Encoding enforces the declared `FieldKind` before it emits either Boolean
+literals or typed facts. Numbers reject Booleans and non-finite floats,
+category comparisons are type-strict (`True`, `1`, and `"1"` differ), Boolean
+fields accept only `bool`, and text fields accept strings. Absent and explicit
+null values remain governed by each literal's null policy.
+
 ## Analyze clause configuration
 
 ```python

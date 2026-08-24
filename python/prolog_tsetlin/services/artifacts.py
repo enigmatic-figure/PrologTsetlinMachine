@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..model_artifact import export_packed_tm
+from ..model_artifact import PackedTMInferenceArtifact, export_packed_tm
 from ..preprocessing import PreprocessingContract
 from ..representation import FeatureSchema, FieldKind, LiteralCatalog
 from ._atomic import publish_bytes
@@ -41,6 +41,31 @@ class ArtifactSummary:
     artifact_kind: str
     byte_count: int
     conformance_examples: int
+
+
+def publish_packed_inference_artifact(
+    artifact: PackedTMInferenceArtifact,
+    path: str | Path,
+    *,
+    overwrite: bool = False,
+) -> ArtifactSummary:
+    """Atomically publish one already-compiled packed inference artifact."""
+
+    if not isinstance(artifact, PackedTMInferenceArtifact):
+        raise TypeError("artifact must be PackedTMInferenceArtifact")
+    destination = Path(path).expanduser().resolve()
+    if destination.suffix.lower() != ".ptm":
+        raise ValueError("artifact path must end in .ptm")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    publish_bytes(destination, artifact.serialized, overwrite=overwrite)
+    validation = artifact.manifest.get("validation", {})
+    return ArtifactSummary(
+        path=destination,
+        artifact_id=artifact.artifact_id,
+        artifact_kind=str(artifact.manifest["artifact_kind"]),
+        byte_count=len(artifact.serialized),
+        conformance_examples=int(validation.get("conformance_example_count", 0)),
+    )
 
 
 def export_training_run(
@@ -79,12 +104,8 @@ def export_training_run(
             "seed": run.request.seed,
         },
     )
-    publish_bytes(destination, artifact.serialized, overwrite=request.overwrite)
-    validation = artifact.manifest.get("validation", {})
-    return ArtifactSummary(
-        path=destination,
-        artifact_id=artifact.artifact_id,
-        artifact_kind=str(artifact.manifest["artifact_kind"]),
-        byte_count=len(artifact.serialized),
-        conformance_examples=int(validation.get("conformance_example_count", 0)),
+    return publish_packed_inference_artifact(
+        artifact,
+        destination,
+        overwrite=request.overwrite,
     )

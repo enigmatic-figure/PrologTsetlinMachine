@@ -1,6 +1,11 @@
 """Presentation-neutral application services."""
 
-from .artifacts import ArtifactExportRequest, ArtifactSummary, export_training_run
+from .artifacts import (
+    ArtifactExportRequest,
+    ArtifactSummary,
+    export_training_run,
+    publish_packed_inference_artifact,
+)
 from .diagnostics import (
     RunDiagnostics,
     SampledTrainingDiagnostics,
@@ -56,6 +61,7 @@ __all__ = [
     "analyze_training_run",
     "analyze_training_sample",
     "export_training_run",
+    "publish_packed_inference_artifact",
     "demo_search_document",
     "export_search_artifact",
     "artifact_input_fields",

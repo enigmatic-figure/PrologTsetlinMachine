@@ -6,6 +6,7 @@ not become architecture until they are accepted and implemented.
 - [Hybrid runtime boundaries](adr/0001-hybrid-runtime-boundaries.md)
 - [Semantic contract](semantic-contract.md)
 - [Packed TM execution](packed-tm.md)
+- [PTA threshold materialization](pta-threshold-materialization.md)
 - [CUDA packed TM execution](cuda-packed-tm.md)
 - [Typed Logic AST](logic-ast.md)
 - [Logic compiler](logic-compiler.md)
@@ -22,6 +23,7 @@ not become architecture until they are accepted and implemented.
 adr/0001-hybrid-runtime-boundaries
 semantic-contract
 packed-tm
+pta-threshold-materialization
 cuda-packed-tm
 logic-ast
 logic-compiler

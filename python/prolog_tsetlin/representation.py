@@ -52,6 +52,40 @@ def _stable_u64(value: object) -> int:
     return int.from_bytes(digest[:8], "big", signed=False)
 
 
+def _typed_equal(left: object, right: object) -> bool:
+    """Compare scalar category values without Python's bool/int aliasing."""
+
+    return type(left) is type(right) and left == right
+
+
+def _validate_typed_field_value(
+    kind: FieldKind, value: object, field: str
+) -> object:
+    """Validate one non-null value against the Class-I field schema."""
+
+    if kind is FieldKind.NUMBER:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"field {field!r} must be a number")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"field {field!r} must be finite")
+        return value
+    if kind is FieldKind.CATEGORY:
+        if not isinstance(value, (str, int, bool)):
+            raise ValueError(
+                f"field {field!r} must be a string, integer, or Boolean"
+            )
+        return value
+    if kind is FieldKind.BOOLEAN:
+        if type(value) is not bool:
+            raise ValueError(f"field {field!r} must be Boolean")
+        return value
+    if kind is FieldKind.TEXT:
+        if type(value) is not str:
+            raise ValueError(f"field {field!r} must be text")
+        return value
+    raise AssertionError(f"unhandled field kind: {kind}")
+
+
 def _freeze_parameter(value: Any) -> Any:
     if isinstance(value, Mapping):
         return tuple(
@@ -600,27 +634,38 @@ class LiteralCatalog:
 
     def evaluate(self, descriptor: LiteralDescriptor, raw_value: Any) -> bool:
         transform = descriptor.transform
-        if transform is TransformKind.IS_MISSING:
-            return raw_value is None
         if raw_value is None:
+            if transform is TransformKind.IS_MISSING:
+                return True
             return self._null_result(descriptor)
 
+        field = self.schema.field(descriptor.source_field)
+        normalized = _validate_typed_field_value(
+            field.kind, raw_value, field.name
+        )
+        if transform is TransformKind.IS_MISSING:
+            return False
+
         if transform is TransformKind.NUMERIC_GE:
-            return raw_value >= descriptor.parameter("threshold")
+            return normalized >= descriptor.parameter("threshold")
         if transform is TransformKind.NUMERIC_BETWEEN:
             lower = descriptor.parameter("lower")
             upper = descriptor.parameter("upper")
-            lower_ok = raw_value >= lower if descriptor.parameter("inclusive_lower") else raw_value > lower
-            upper_ok = raw_value <= upper if descriptor.parameter("inclusive_upper") else raw_value < upper
+            lower_ok = normalized >= lower if descriptor.parameter("inclusive_lower") else normalized > lower
+            upper_ok = normalized <= upper if descriptor.parameter("inclusive_upper") else normalized < upper
             return lower_ok and upper_ok
         if transform is TransformKind.CATEGORY_EQ:
-            return raw_value == descriptor.parameter("value")
+            return _typed_equal(normalized, descriptor.parameter("value"))
         if transform is TransformKind.CATEGORY_IN:
-            return raw_value in descriptor.parameter("values")
+            return any(
+                _typed_equal(normalized, candidate)
+                for candidate in descriptor.parameter("values")
+            )
         if transform is TransformKind.TOKEN_CONTAINS:
             token = descriptor.parameter("token")
             case_sensitive = descriptor.parameter("case_sensitive")
-            tokens = raw_value.split() if isinstance(raw_value, str) else list(raw_value)
+            assert isinstance(normalized, str)
+            tokens = normalized.split()
             if not case_sensitive:
                 token = token.casefold()
                 tokens = [item.casefold() if isinstance(item, str) else item for item in tokens]
@@ -650,6 +695,12 @@ class LiteralCatalog:
         trace_rows: list[tuple[EvaluationTrace, ...]] = []
 
         for row_id, record in zip(ids, frozen_records):
+            for field in self.schema.fields:
+                raw_value = record.get(field.name)
+                if raw_value is not None:
+                    _validate_typed_field_value(
+                        field.kind, raw_value, field.name
+                    )
             words = [0] * word_count
             traces: list[EvaluationTrace] = []
             for position, descriptor in enumerate(self._literals):

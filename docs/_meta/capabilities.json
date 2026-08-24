@@ -1,7 +1,7 @@
 {
   "schema_version": "ptm.capabilities.v1",
-  "generated": "2026-08-21",
-  "note": "Minimal registry \u2014 Checkpoint 5 stub. Maturity requires evidence links.",
+  "generated": "2026-08-24",
+  "note": "Capability-level claims remain narrow; broad research families stay proposed until their complete lifecycle is executable.",
   "capabilities": [
     {
       "id": "packed-tm-inference",
@@ -43,6 +43,25 @@
         "docs/rfcs/pta-control-plane.md",
         "docs/developer/prolog-api.md",
         "tests/python/test_pta_collective.py"
+      ],
+      "owner": "research"
+    },
+    {
+      "id": "pta-collective",
+      "maturity": "experimental",
+      "evidence": [
+        "docs/developer/prolog-api.md",
+        "tests/python/test_pta_collective.py"
+      ],
+      "owner": "research"
+    },
+    {
+      "id": "pta-threshold-native-slice",
+      "maturity": "experimental",
+      "evidence": [
+        "docs/architecture/pta-threshold-materialization.md",
+        "tests/python/test_pta_threshold_artifact.py",
+        "tests/cpp/model_runtime_tests.cpp"
       ],
       "owner": "research"
     },

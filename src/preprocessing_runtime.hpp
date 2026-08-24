@@ -3,6 +3,7 @@
 
 #include "ptm/runtime.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -347,6 +348,170 @@ struct PreprocessingOutput {
            result.ptr == value.data() + value.size();
 }
 
+inline void append_json_string(std::string_view value, std::string& result) {
+    constexpr std::string_view digits = "0123456789abcdef";
+    result.push_back('"');
+    for (const auto raw : value) {
+        const auto character = static_cast<unsigned char>(raw);
+        switch (character) {
+        case '"': result.append("\\\""); break;
+        case '\\': result.append("\\\\"); break;
+        case '\b': result.append("\\b"); break;
+        case '\f': result.append("\\f"); break;
+        case '\n': result.append("\\n"); break;
+        case '\r': result.append("\\r"); break;
+        case '\t': result.append("\\t"); break;
+        default:
+            if (character < 0x20U) {
+                result.append("\\u00");
+                result.push_back(digits[character >> 4U]);
+                result.push_back(digits[character & 0x0fU]);
+            } else {
+                result.push_back(raw);
+            }
+        }
+    }
+    result.push_back('"');
+}
+
+[[nodiscard]] inline std::optional<std::string> python_json_float(
+    double value) {
+    if (!std::isfinite(value)) return std::nullopt;
+    if (value == 0.0) {
+        return std::signbit(value) ? std::optional<std::string>{"-0.0"}
+                                   : std::optional<std::string>{"0.0"};
+    }
+
+    char buffer[128]{};
+    const auto converted = std::to_chars(
+        buffer, buffer + sizeof(buffer), value, std::chars_format::scientific);
+    if (converted.ec != std::errc{}) return std::nullopt;
+    const std::string_view scientific(buffer, converted.ptr);
+    const auto exponent_marker = scientific.find('e');
+    if (exponent_marker == std::string_view::npos) return std::nullopt;
+
+    std::size_t position = 0;
+    std::string sign;
+    if (scientific[position] == '-') {
+        sign = "-";
+        ++position;
+    }
+    std::string digits;
+    for (; position < exponent_marker; ++position) {
+        if (scientific[position] != '.') digits.push_back(scientific[position]);
+    }
+    if (digits.empty()) return std::nullopt;
+    int exponent_sign = 1;
+    auto exponent_first = scientific.data() + exponent_marker + 1U;
+    const auto exponent_last = scientific.data() + scientific.size();
+    if (exponent_first != exponent_last &&
+        (*exponent_first == '+' || *exponent_first == '-')) {
+        if (*exponent_first == '-') exponent_sign = -1;
+        ++exponent_first;
+    }
+    int exponent_magnitude = 0;
+    const auto parsed = std::from_chars(
+        exponent_first, exponent_last, exponent_magnitude);
+    if (parsed.ec != std::errc{} || parsed.ptr != exponent_last) {
+        return std::nullopt;
+    }
+    const auto exponent = exponent_sign * exponent_magnitude;
+
+    std::string result = sign;
+    if (exponent >= -4 && exponent < 16) {
+        const auto decimal_position = exponent + 1;
+        if (decimal_position <= 0) {
+            result.append("0.");
+            result.append(static_cast<std::size_t>(-decimal_position), '0');
+            result.append(digits);
+        } else if (static_cast<std::size_t>(decimal_position) >= digits.size()) {
+            result.append(digits);
+            result.append(
+                static_cast<std::size_t>(decimal_position) - digits.size(), '0');
+            result.append(".0");
+        } else {
+            result.append(digits.substr(0, static_cast<std::size_t>(decimal_position)));
+            result.push_back('.');
+            result.append(digits.substr(static_cast<std::size_t>(decimal_position)));
+        }
+        return result;
+    }
+
+    result.push_back(digits.front());
+    if (digits.size() > 1U) {
+        result.push_back('.');
+        result.append(digits.substr(1));
+    }
+    result.push_back('e');
+    result.push_back(exponent < 0 ? '-' : '+');
+    const auto magnitude = static_cast<unsigned>(
+        exponent < 0 ? -static_cast<long long>(exponent) : exponent);
+    if (magnitude < 10U) result.push_back('0');
+    result.append(std::to_string(magnitude));
+    return result;
+}
+
+[[nodiscard]] inline bool append_canonical_json(
+    const JsonValue& value, std::string& result) {
+    if (std::get_if<std::nullptr_t>(&value.value)) {
+        result.append("null");
+        return true;
+    }
+    if (const auto* boolean = std::get_if<bool>(&value.value)) {
+        result.append(*boolean ? "true" : "false");
+        return true;
+    }
+    if (const auto* integer = std::get_if<std::int64_t>(&value.value)) {
+        result.append(std::to_string(*integer));
+        return true;
+    }
+    if (const auto* number = std::get_if<double>(&value.value)) {
+        const auto encoded = python_json_float(*number);
+        if (!encoded) return false;
+        result.append(*encoded);
+        return true;
+    }
+    if (const auto* text = std::get_if<std::string>(&value.value)) {
+        append_json_string(*text, result);
+        return true;
+    }
+    if (const auto* array = std::get_if<JsonValue::Array>(&value.value)) {
+        result.push_back('[');
+        for (std::size_t index = 0; index < array->size(); ++index) {
+            if (index != 0) result.push_back(',');
+            if (!append_canonical_json((*array)[index], result)) return false;
+        }
+        result.push_back(']');
+        return true;
+    }
+    const auto* object = std::get_if<JsonValue::Object>(&value.value);
+    if (!object) return false;
+    result.push_back('{');
+    bool first = true;
+    for (const auto& [key, item] : *object) {
+        if (!first) result.push_back(',');
+        first = false;
+        append_json_string(key, result);
+        result.push_back(':');
+        if (!append_canonical_json(item, result)) return false;
+    }
+    result.push_back('}');
+    return true;
+}
+
+[[nodiscard]] inline std::string category_sort_key(
+    const CategoryValue& category) {
+    if (const auto* value = std::get_if<bool>(&category.value)) {
+        return std::string("bool:") + (*value ? "True" : "False");
+    }
+    if (const auto* value = std::get_if<std::int64_t>(&category.value)) {
+        return "int:" + std::to_string(*value);
+    }
+    return "str:" + std::get<std::string>(category.value);
+}
+
+using StableIdentity = std::string (*)(std::string_view canonical_json);
+
 template <typename T>
 [[nodiscard]] const T* as(const JsonValue& value) {
     return std::get_if<T>(&value.value);
@@ -480,7 +645,9 @@ template <typename T>
 [[nodiscard]] inline bool parse_preprocessing(
     std::string_view manifest,
     std::uint32_t expected_outputs,
-    std::vector<PreprocessingOutput>& result) {
+    std::vector<PreprocessingOutput>& result,
+    StableIdentity stable_identity) {
+    if (stable_identity == nullptr) return false;
     constexpr std::string_view marker = "\"preprocessing\":";
     const auto marker_position = top_level_member(manifest, marker);
     if (!marker_position) {
@@ -607,10 +774,46 @@ template <typename T>
             if (const auto* text = std::get_if<std::string>(&category.value);
                 text && !portable_text(*text)) return false;
         }
+        if (output.transform == Transform::category_in) {
+            for (std::size_t index = 1; index < output.categories.size(); ++index) {
+                if (!(category_sort_key(output.categories[index - 1U]) <
+                      category_sort_key(output.categories[index]))) {
+                    return false;
+                }
+            }
+        }
+
+        std::string field_identity =
+            "{\"identity_schema_version\":1,\"kind\":";
+        append_json_string(*kind, field_identity);
+        field_identity.append(",\"name\":");
+        append_json_string(*field, field_identity);
+        field_identity.push_back('}');
+        if (stable_identity(field_identity) != output.field_id) return false;
+
+        std::string canonical_parameters;
+        if (!append_canonical_json(*parameters_value, canonical_parameters)) {
+            return false;
+        }
+        std::string literal_identity =
+            "{\"catalog_version\":1,\"null_policy\":";
+        append_json_string(*null_policy, literal_identity);
+        literal_identity.append(",\"parameters\":");
+        literal_identity.append(canonical_parameters);
+        literal_identity.append(",\"source_field_id\":");
+        literal_identity.append(output.field_id);
+        literal_identity.append(",\"transform\":");
+        append_json_string(*transform, literal_identity);
+        literal_identity.push_back('}');
+        if (stable_identity(literal_identity) != output.literal_id) return false;
+
         for (const auto& existing : result) {
             if (existing.literal_id == output.literal_id) return false;
             if (existing.field == output.field &&
                 (existing.field_id != output.field_id ||
+                 existing.field_kind != output.field_kind)) return false;
+            if (existing.field_id == output.field_id &&
+                (existing.field != output.field ||
                  existing.field_kind != output.field_kind)) return false;
         }
         result.push_back(std::move(output));
