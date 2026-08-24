@@ -112,7 +112,11 @@ live record through `ptmrt run-record`. Native preprocessing outputs, score,
 prediction, and artifact identity must exactly match the scalar child and
 packed Python artifact on that live window. This execution is owned by
 `ModelGenerationController.request_reopen()`; callers cannot authorize reopen
-by supplying a preconstructed conformance report or verification Boolean.
+by supplying a preconstructed conformance report or verification Boolean. The
+controller publishes a content-addressed `LiveRuntimeConformanceEvidence`
+receipt containing the exact labeled live corpus, child state/artifact
+identities, scalar feature/score/prediction vectors, packed predictions, native
+feature/score/prediction vectors, and the `ptmrt` executable digest.
 
 Promotion asks whether C is preferable to P on the independent labeled
 holdout. Each paired observation is classified as:
@@ -190,7 +194,11 @@ with matching lineage, audit, behavior, bundle, policy, error counts, and active
 route. In particular, activation requires an immediately valid accepted exact
 promotion, and parent restoration requires a valid reopen request whose labeled
 drift satisfies its recorded policy. A hash-valid but impossible event makes
-controller construction fail closed.
+controller construction fail closed. Reopen replay and restoration also reload
+the live-conformance receipt, reconstruct scalar features and scores and packed
+predictions from the durable child and exact corpus, require the native vectors
+to agree, and reconstruct the complete paired drift audit. A self-asserted
+`ptmrt_verified` Boolean without that evidence cannot authorize restoration.
 
 Before any parent or child is registered, activated, restored, or recovered as
 the active route, one deployability contract reloads and cross-validates its

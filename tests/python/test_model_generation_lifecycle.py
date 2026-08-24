@@ -794,6 +794,40 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
     with pytest.raises(ModelGenerationError, match="reopen request"):
         ModelGenerationController(unauthorized_restore_store)
 
+    forged_reopen_root = tmp_path / "forged-reopen-store"
+    shutil.copytree(store.root, forged_reopen_root)
+    forged_reopen_store = ModelGenerationStore(forged_reopen_root)
+    forged_conformance = RuntimeConformanceReport(
+        result.child_artifact.artifact_id,
+        len(live.examples),
+        0,
+        True,
+        result.child_artifact.artifact_id,
+    )
+    forged_drift = audit_parent_child(
+        original_snapshot,
+        manifest,
+        result.child,
+        live,
+        forged_conformance,
+        PromotionAuditPolicy(1),
+    )
+    assert drift_requires_reopen(forged_drift, STRICT_DRIFT_POLICY)
+    forged_reopen_store.put_audit(forged_drift)
+    forged_reopen_store.append_event(
+        LifecycleEventKind.REOPEN_REQUESTED,
+        result.child_generation.generation_id,
+        drift_audit_id=forged_drift.audit_id,
+        lineage_id=result.lineage.lineage_id,
+        restoration_bundle_id=result.restoration_bundle.bundle_id,
+        parent_errors=forged_drift.parent_errors,
+        child_errors=forged_drift.child_errors,
+        drift_policy=STRICT_DRIFT_POLICY.to_dict(),
+        live_conformance_evidence_id="sha256:" + "f" * 64,
+    )
+    with pytest.raises(ModelGenerationError, match="conformance evidence"):
+        ModelGenerationController(forged_reopen_store)
+
     def block_native_verification(*args, **kwargs):
         del args, kwargs
         raise ModelGenerationError("injected native verification requirement")
@@ -819,6 +853,13 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
     assert drift.child_errors > drift.parent_errors
     assert drift.conformance.exact
     assert drift.conformance.case_count == len(live.examples)
+    reopen_event = store.read_events()[-2]
+    live_evidence = store.load_live_conformance(
+        reopen_event.details["live_conformance_evidence_id"]
+    )
+    assert live_evidence.corpus == live
+    assert live_evidence.corpus.digest == drift.corpus_digest
+    assert live_evidence.scalar_scores == live_evidence.native_scores
     assert restored.snapshot.snapshot == original_snapshot
     assert restored.manifest == manifest
     with pytest.raises(ModelGenerationError, match="already been activated"):

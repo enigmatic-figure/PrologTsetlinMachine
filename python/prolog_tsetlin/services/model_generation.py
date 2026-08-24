@@ -26,6 +26,7 @@ from ..model_generation import (
     DriftAuditPolicy,
     ExtendedParent,
     LabeledCorpus,
+    LiveRuntimeConformanceEvidence,
     LifecycleCorpora,
     ModelGeneration,
     ModelGenerationError,
@@ -383,6 +384,28 @@ class ModelGenerationStore:
             raise ModelGenerationError("promotion audit does not match its address")
         return result
 
+    def put_live_conformance(self, value: LiveRuntimeConformanceEvidence) -> Path:
+        return self._put_json(
+            "live-conformance", value.evidence_id, value.to_dict()
+        )
+
+    def load_live_conformance(
+        self, identifier: str
+    ) -> LiveRuntimeConformanceEvidence:
+        try:
+            result = LiveRuntimeConformanceEvidence.from_dict(
+                self._read_json("live-conformance", identifier)
+            )
+        except OSError as error:
+            raise ModelGenerationError(
+                "live conformance evidence is unavailable"
+            ) from error
+        if result.evidence_id != identifier:
+            raise ModelGenerationError(
+                "live conformance evidence does not match its address"
+            )
+        return result
+
     def put_lineage(self, value: ModelGenerationLineage) -> Path:
         return self._put_json("lineage", value.lineage_id, value.to_dict())
 
@@ -525,6 +548,18 @@ class RestoredAdaptiveParent:
     preprocessing: PreprocessingContract
     artifact: PackedTMInferenceArtifact
     machine: ScalarBinaryTsetlinMachine
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveRuntimeVectors:
+    artifact_id: str
+    scalar_features: tuple[tuple[bool, ...], ...]
+    scalar_scores: tuple[int, ...]
+    scalar_predictions: tuple[int, ...]
+    packed_predictions: tuple[int, ...]
+    native_features: tuple[tuple[int, ...], ...]
+    native_scores: tuple[int, ...]
+    native_predictions: tuple[int, ...]
 
 
 class ModelGenerationController:
@@ -802,6 +837,75 @@ class ModelGenerationController:
         self._resolve_restoration_bundle(bundle)
         return parent, extended, child, bundle, audit, evidence
 
+    def _validate_live_conformance_evidence(
+        self,
+        lineage: ModelGenerationLineage,
+        drift: PromotionAuditSnapshot,
+        evidence: LiveRuntimeConformanceEvidence,
+    ) -> None:
+        if self.store.load_live_conformance(evidence.evidence_id) != evidence:
+            raise ModelGenerationError("live conformance evidence changed after publication")
+        parent, _, child, _, _, _ = self._validate_lineage_graph(lineage)
+        child_snapshot, child_manifest, _, artifact = (
+            self._validate_deployable_generation(child)
+        )
+        if (
+            evidence.child_generation_id != child.generation_id
+            or evidence.artifact_id != child.inference_artifact_id
+            or evidence.snapshot_id != child.snapshot_id
+            or evidence.literal_manifest_id != child.literal_manifest_id
+            or evidence.corpus.digest != drift.corpus_digest
+            or len(evidence.corpus.examples) != drift.observations
+        ):
+            raise ModelGenerationError("live conformance identity binding is inconsistent")
+        batch = child_manifest.build_catalog().encode(evidence.corpus.records).ta
+        rows = tuple(
+            batch.row_values(index) for index in range(batch.row_count)
+        )
+        machine = ScalarBinaryTsetlinMachine(
+            child_snapshot.snapshot.number_of_clauses,
+            child_snapshot.snapshot.number_of_features,
+            states_per_action=child_snapshot.snapshot.states_per_action,
+            specificity=child_snapshot.snapshot.specificity,
+            threshold=child_snapshot.snapshot.threshold,
+            seed=0,
+        )
+        machine.restore(child_snapshot.snapshot)
+        scalar_scores = tuple(machine.score(row) for row in rows)
+        scalar_predictions = tuple(int(score > 0) for score in scalar_scores)
+        packed_predictions = artifact.predict_records(evidence.corpus.records)
+        if (
+            rows != evidence.scalar_features
+            or scalar_scores != evidence.scalar_scores
+            or scalar_predictions != evidence.scalar_predictions
+            or packed_predictions != evidence.packed_predictions
+            or tuple(tuple(int(value) for value in row) for row in rows)
+            != evidence.native_features
+            or scalar_scores != evidence.native_scores
+            or scalar_predictions != evidence.native_predictions
+        ):
+            raise ModelGenerationError("live conformance evidence cannot be reconstructed")
+        conformance = RuntimeConformanceReport(
+            artifact.artifact_id,
+            len(rows),
+            0,
+            True,
+            artifact.artifact_id,
+        )
+        parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
+        parent_manifest = self.store.load_manifest(parent.literal_manifest_id)
+        reconstructed = audit_parent_child_snapshots(
+            parent_snapshot,
+            parent_manifest,
+            child_snapshot,
+            child_manifest,
+            evidence.corpus,
+            conformance,
+            PromotionAuditPolicy(minimum_observations=1),
+        )
+        if reconstructed != drift:
+            raise ModelGenerationError("live drift audit cannot be reconstructed")
+
     def _replay_lifecycle(self) -> str | None:
         """Replay and validate every durable transition before deriving routing."""
 
@@ -949,11 +1053,20 @@ class ModelGenerationController:
                 lineage, values = graph(details.get("lineage_id"))
                 _, _, child, bundle, _, _ = values
                 drift_id = details.get("drift_audit_id")
+                live_evidence_id = details.get("live_conformance_evidence_id")
                 raw_policy = details.get("drift_policy")
-                if type(drift_id) is not str or not isinstance(raw_policy, Mapping):
+                if (
+                    type(drift_id) is not str
+                    or type(live_evidence_id) is not str
+                    or not isinstance(raw_policy, Mapping)
+                ):
                     raise ModelGenerationError("reopen request lacks durable evidence")
                 drift = self.store.load_audit(drift_id)
+                live_evidence = self.store.load_live_conformance(live_evidence_id)
                 policy = DriftAuditPolicy.from_dict(raw_policy)
+                self._validate_live_conformance_evidence(
+                    lineage, drift, live_evidence
+                )
                 expected = {
                     "drift_audit_id": drift.audit_id,
                     "lineage_id": lineage.lineage_id,
@@ -961,6 +1074,7 @@ class ModelGenerationController:
                     "parent_errors": drift.parent_errors,
                     "child_errors": drift.child_errors,
                     "drift_policy": policy.to_dict(),
+                    "live_conformance_evidence_id": live_evidence.evidence_id,
                 }
                 if (
                     lineage != activated
@@ -1261,7 +1375,7 @@ class ModelGenerationController:
             )
             parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
             parent_manifest = self.store.load_manifest(parent.literal_manifest_id)
-            verified_id = _verify_snapshot_records_with_ptmrt(
+            vectors = _verify_snapshot_records_with_ptmrt(
                 ptmrt_executable,
                 self.store.artifact_path(child_artifact.artifact_id),
                 child_snapshot,
@@ -1269,13 +1383,31 @@ class ModelGenerationController:
                 child_artifact,
                 live_corpus.records,
             )
+            live_evidence = LiveRuntimeConformanceEvidence(
+                child.generation_id,
+                child_artifact.artifact_id,
+                child.snapshot_id,
+                child.literal_manifest_id,
+                live_corpus,
+                vectors.scalar_features,
+                vectors.scalar_scores,
+                vectors.scalar_predictions,
+                vectors.packed_predictions,
+                vectors.native_features,
+                vectors.native_scores,
+                vectors.native_predictions,
+                _file_digest(
+                    Path(ptmrt_executable),
+                    maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
+                ),
+            )
             conformance = audit_snapshot_runtime_conformance(
                 child_snapshot,
                 child_manifest,
                 child_artifact,
                 live_corpus.records,
                 ptmrt_verified=True,
-                ptmrt_artifact_id=verified_id,
+                ptmrt_artifact_id=vectors.artifact_id,
             )
             drift = audit_parent_child_snapshots(
                 parent_snapshot,
@@ -1288,6 +1420,7 @@ class ModelGenerationController:
             )
             if not drift.conformance.exact or not drift_requires_reopen(drift, policy):
                 raise ModelGenerationError("labeled drift does not justify reopen")
+            self.store.put_live_conformance(live_evidence)
             self.store.put_audit(drift)
             self.store.append_event(
                 LifecycleEventKind.REOPEN_REQUESTED,
@@ -1298,6 +1431,7 @@ class ModelGenerationController:
                 parent_errors=drift.parent_errors,
                 child_errors=drift.child_errors,
                 drift_policy=policy.to_dict(),
+                live_conformance_evidence_id=live_evidence.evidence_id,
             )
         self._emit(
             "reopen_requested",
@@ -1322,18 +1456,26 @@ class ModelGenerationController:
             ):
                 raise ModelGenerationError("restoration lacks a matching reopen request")
             drift_id = events[-1].details.get("drift_audit_id")
+            live_evidence_id = events[-1].details.get(
+                "live_conformance_evidence_id"
+            )
             lineage_id = events[-1].details.get("lineage_id")
             raw_policy = events[-1].details.get("drift_policy")
             if (
                 type(drift_id) is not str
+                or type(live_evidence_id) is not str
                 or type(lineage_id) is not str
                 or not isinstance(raw_policy, Mapping)
             ):
                 raise ModelGenerationError("reopen request lacks durable evidence")
             drift = self.store.load_audit(drift_id)
+            live_evidence = self.store.load_live_conformance(live_evidence_id)
             policy = DriftAuditPolicy.from_dict(raw_policy)
             lineage = self.store.load_lineage(lineage_id)
             _, _, child, graph_bundle, _, _ = self._validate_lineage_graph(lineage)
+            self._validate_live_conformance_evidence(
+                lineage, drift, live_evidence
+            )
             if (
                 child.generation_id != active_child_id
                 or graph_bundle != bundle
@@ -1548,7 +1690,7 @@ def verify_records_with_ptmrt(
         artifact,
         records,
         timeout_seconds=timeout_seconds,
-    )
+    ).artifact_id
 
 
 def _verify_snapshot_records_with_ptmrt(
@@ -1560,7 +1702,7 @@ def _verify_snapshot_records_with_ptmrt(
     records: Sequence[Mapping[str, object]],
     *,
     timeout_seconds: float = 30.0,
-) -> str:
+) -> _LiveRuntimeVectors:
     """Run raw records through ptmrt against one durable child state."""
 
     if not records:
@@ -1579,9 +1721,16 @@ def _verify_snapshot_records_with_ptmrt(
         seed=0,
     )
     machine.restore(child_snapshot.snapshot)
+    scalar_scores = tuple(machine.score(row) for row in rows)
+    scalar_predictions = tuple(int(score > 0) for score in scalar_scores)
     packed_predictions = artifact.predict_records(records)
+    native_features: list[tuple[int, ...]] = []
+    native_scores: list[int] = []
+    native_predictions: list[int] = []
     deadline = time.monotonic() + timeout_seconds
-    for record, row, packed_prediction in zip(records, rows, packed_predictions):
+    for record, row, expected_score, packed_prediction in zip(
+        records, rows, scalar_scores, packed_predictions
+    ):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ModelGenerationError("live ptmrt conformance timed out")
@@ -1621,7 +1770,6 @@ def _verify_snapshot_records_with_ptmrt(
             output = json.loads(completed.stdout)
         except (json.JSONDecodeError, TypeError) as error:
             raise ModelGenerationError("live ptmrt returned malformed output") from error
-        expected_score = machine.score(row)
         if (
             not isinstance(output, Mapping)
             or output.get("artifact_id") != artifact.artifact_id
@@ -1631,7 +1779,19 @@ def _verify_snapshot_records_with_ptmrt(
             or output.get("score") != expected_score
         ):
             raise ModelGenerationError("live ptmrt disagrees with child semantics")
-    return artifact.artifact_id
+        native_features.append(tuple(output["features"]))
+        native_scores.append(output["score"])
+        native_predictions.append(output["prediction"])
+    return _LiveRuntimeVectors(
+        artifact.artifact_id,
+        rows,
+        scalar_scores,
+        scalar_predictions,
+        packed_predictions,
+        tuple(native_features),
+        tuple(native_scores),
+        tuple(native_predictions),
+    )
 
 
 @dataclass(frozen=True, slots=True)

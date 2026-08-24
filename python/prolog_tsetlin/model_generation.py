@@ -49,6 +49,7 @@ ADAPTIVE_BEHAVIOR_SCHEMA = "ptm.adaptive-behavior.v2"
 INVENTION_EVIDENCE_SCHEMA = "ptm.gnu-prolog-invention-evidence.v1"
 GENERATION_SCHEMA = "ptm.model-generation.v1"
 PROMOTION_AUDIT_SCHEMA = "ptm.promotion-audit.v1"
+LIVE_CONFORMANCE_SCHEMA = "ptm.live-runtime-conformance.v1"
 LINEAGE_SCHEMA = "ptm.model-generation-lineage.v3"
 TRAINING_SEMANTICS_VERSION = "ptm.scalar-binary-training.v1"
 PYTHON_RNG_ALGORITHM = "python.random-mt19937-state-v1"
@@ -1269,6 +1270,218 @@ class RuntimeConformanceReport:
             value["ptmrt_verified"],
             value["ptmrt_artifact_id"],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRuntimeConformanceEvidence:
+    child_generation_id: str
+    artifact_id: str
+    snapshot_id: str
+    literal_manifest_id: str
+    corpus: LabeledCorpus
+    scalar_features: tuple[tuple[bool, ...], ...]
+    scalar_scores: tuple[int, ...]
+    scalar_predictions: tuple[int, ...]
+    packed_predictions: tuple[int, ...]
+    native_features: tuple[tuple[int, ...], ...]
+    native_scores: tuple[int, ...]
+    native_predictions: tuple[int, ...]
+    ptmrt_binary_digest: str
+    schema: str = LIVE_CONFORMANCE_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != LIVE_CONFORMANCE_SCHEMA:
+            raise ModelGenerationError("live conformance schema is unsupported")
+        for label, value in (
+            ("child generation", self.child_generation_id),
+            ("artifact", self.artifact_id),
+            ("snapshot", self.snapshot_id),
+            ("literal manifest", self.literal_manifest_id),
+            ("ptmrt executable", self.ptmrt_binary_digest),
+        ):
+            _require_digest(value, label)
+        if not isinstance(self.corpus, LabeledCorpus) or (
+            self.corpus.role is not CorpusRole.LIVE
+        ):
+            raise ModelGenerationError("live conformance requires a live corpus")
+        count = len(self.corpus.examples)
+        vectors = (
+            self.scalar_scores,
+            self.scalar_predictions,
+            self.packed_predictions,
+            self.native_scores,
+            self.native_predictions,
+        )
+        if (
+            type(self.scalar_features) is not tuple
+            or type(self.native_features) is not tuple
+            or any(type(vector) is not tuple for vector in vectors)
+            or len(self.scalar_features) != count
+            or len(self.native_features) != count
+            or any(len(vector) != count for vector in vectors)
+        ):
+            raise ModelGenerationError("live conformance vector lengths differ")
+        if (
+            not self.scalar_features
+            or any(
+                type(row) is not tuple
+                or not row
+                or any(type(value) is not bool for value in row)
+                for row in self.scalar_features
+            )
+            or len({len(row) for row in self.scalar_features}) != 1
+            or any(
+                type(row) is not tuple
+                or any(type(value) is not int or value not in (0, 1) for value in row)
+                for row in self.native_features
+            )
+            or tuple(tuple(int(value) for value in row) for row in self.scalar_features)
+            != self.native_features
+        ):
+            raise ModelGenerationError("live conformance feature vectors are invalid")
+        if any(type(value) is not int for value in (*self.scalar_scores, *self.native_scores)):
+            raise ModelGenerationError("live conformance scores must be integers")
+        if any(
+            type(value) is not int or value not in (0, 1)
+            for vector in (
+                self.scalar_predictions,
+                self.packed_predictions,
+                self.native_predictions,
+            )
+            for value in vector
+        ):
+            raise ModelGenerationError("live conformance predictions are invalid")
+        expected_predictions = tuple(int(score > 0) for score in self.scalar_scores)
+        if (
+            self.scalar_scores != self.native_scores
+            or self.scalar_predictions != expected_predictions
+            or self.packed_predictions != expected_predictions
+            or self.native_predictions != expected_predictions
+        ):
+            raise ModelGenerationError("live runtimes do not agree exactly")
+
+    @property
+    def evidence_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "child_generation_id": self.child_generation_id,
+            "artifact_id": self.artifact_id,
+            "snapshot_id": self.snapshot_id,
+            "literal_manifest_id": self.literal_manifest_id,
+            "corpus": self.corpus.canonical_payload(),
+            "corpus_digest": self.corpus.digest,
+            "scalar_features": [list(row) for row in self.scalar_features],
+            "scalar_scores": list(self.scalar_scores),
+            "scalar_predictions": list(self.scalar_predictions),
+            "packed_predictions": list(self.packed_predictions),
+            "native_features": [list(row) for row in self.native_features],
+            "native_scores": list(self.native_scores),
+            "native_predictions": list(self.native_predictions),
+            "ptmrt_binary_digest": self.ptmrt_binary_digest,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        result = self.canonical_payload()
+        result["evidence_id"] = self.evidence_id
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "LiveRuntimeConformanceEvidence":
+        expected = {
+            "schema",
+            "child_generation_id",
+            "artifact_id",
+            "snapshot_id",
+            "literal_manifest_id",
+            "corpus",
+            "corpus_digest",
+            "scalar_features",
+            "scalar_scores",
+            "scalar_predictions",
+            "packed_predictions",
+            "native_features",
+            "native_scores",
+            "native_predictions",
+            "ptmrt_binary_digest",
+            "evidence_id",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ModelGenerationError("live conformance evidence is malformed")
+        string_fields = (
+            "schema",
+            "child_generation_id",
+            "artifact_id",
+            "snapshot_id",
+            "literal_manifest_id",
+            "corpus_digest",
+            "ptmrt_binary_digest",
+            "evidence_id",
+        )
+        raw_corpus = value["corpus"]
+        matrix_fields = ("scalar_features", "native_features")
+        vector_fields = (
+            "scalar_scores",
+            "scalar_predictions",
+            "packed_predictions",
+            "native_scores",
+            "native_predictions",
+        )
+        if (
+            any(type(value[name]) is not str for name in string_fields)
+            or not isinstance(raw_corpus, Mapping)
+            or set(raw_corpus) != {"dataset_id", "role", "examples"}
+            or type(raw_corpus["dataset_id"]) is not str
+            or type(raw_corpus["role"]) is not str
+            or not isinstance(raw_corpus["examples"], list)
+            or any(not isinstance(value[name], list) for name in (*matrix_fields, *vector_fields))
+            or any(
+                not isinstance(row, list)
+                for name in matrix_fields
+                for row in value[name]
+            )
+        ):
+            raise ModelGenerationError("live conformance evidence types are malformed")
+        examples: list[CorpusExample] = []
+        for raw in raw_corpus["examples"]:
+            if not isinstance(raw, Mapping) or set(raw) != {
+                "example_id",
+                "record",
+                "label",
+            }:
+                raise ModelGenerationError("live conformance corpus is malformed")
+            examples.append(
+                CorpusExample(raw["example_id"], raw["record"], raw["label"])
+            )
+        try:
+            corpus = LabeledCorpus(
+                raw_corpus["dataset_id"],
+                CorpusRole(raw_corpus["role"]),
+                tuple(examples),
+            )
+            result = cls(
+                child_generation_id=value["child_generation_id"],
+                artifact_id=value["artifact_id"],
+                snapshot_id=value["snapshot_id"],
+                literal_manifest_id=value["literal_manifest_id"],
+                corpus=corpus,
+                scalar_features=tuple(tuple(row) for row in value["scalar_features"]),
+                scalar_scores=tuple(value["scalar_scores"]),
+                scalar_predictions=tuple(value["scalar_predictions"]),
+                packed_predictions=tuple(value["packed_predictions"]),
+                native_features=tuple(tuple(row) for row in value["native_features"]),
+                native_scores=tuple(value["native_scores"]),
+                native_predictions=tuple(value["native_predictions"]),
+                ptmrt_binary_digest=value["ptmrt_binary_digest"],
+                schema=value["schema"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ModelGenerationError("live conformance evidence is malformed") from error
+        if corpus.digest != value["corpus_digest"] or result.evidence_id != value["evidence_id"]:
+            raise ModelGenerationError("live conformance evidence digest mismatch")
+        return result
 
 
 @dataclass(frozen=True, slots=True)
