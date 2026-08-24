@@ -82,10 +82,21 @@ def test_regex_operations_are_bounded_and_typed() -> None:
         RegexTransform("text", "x", r"a", max_input_chars=2).evaluate(record)
 
 
-def test_regex_transform_rejects_hostile_nested_quantifier() -> None:
-    hostile = r"(a+)+$"
+@pytest.mark.parametrize(
+    ("hostile", "message"),
+    [
+        (r"(a+)+$", "nested quantifiers"),
+        (r"a*a*a*a*b", "adjacent quantifiers"),
+        (r"a+b", "must terminate its branch"),
+        (r"(?:ab)+", "one-character atoms"),
+        (r"a{1,65}", "at most 64"),
+    ],
+)
+def test_regex_transform_rejects_hostile_quantified_patterns(
+    hostile: str, message: str
+) -> None:
     near_match = "a" * 50_000 + "!"
-    with pytest.raises(ValueError, match="nested quantifiers"):
+    with pytest.raises(ValueError, match=message):
         RegexTransform("text", "x", hostile)
     pipeline = RecordTransformPipeline((RegexTransform("text", "x", "a+"),))
     descriptor = pipeline.to_dict()

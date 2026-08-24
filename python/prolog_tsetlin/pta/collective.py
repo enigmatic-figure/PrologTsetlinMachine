@@ -828,6 +828,148 @@ class PTACollectiveService:
                         "collective threshold proposal failed behavioral validation"
                     )
 
+    @staticmethod
+    def _validate_deescalation_products(
+        session: PTAReasoningSession,
+        insights: tuple[PTAInsight, ...],
+    ) -> None:
+        domain = set(session.example_domains)
+
+        def truth_vectors(
+            facts: list[tuple[int, int, int]],
+        ) -> dict[int, dict[int, int]]:
+            vectors: dict[int, dict[int, int]] = {}
+            for subject, example, truth in facts:
+                vectors.setdefault(subject, {})[example] = truth
+            return vectors
+
+        literal_vectors = truth_vectors(session.literal_truths)
+        clause_vectors = truth_vectors(session.clause_truths)
+        clause_literals: dict[int, set[int]] = {}
+        for clause, literal in session.clause_literals:
+            clause_literals.setdefault(clause, set()).add(literal)
+
+        for insight in insights:
+            if insight.kind not in (
+                "literal_redundant",
+                "literal_subsumes",
+                "clause_subsumes",
+            ):
+                continue
+            if len(insight.evidence) != 2 or any(
+                type(identifier) is not int for identifier in insight.evidence
+            ):
+                raise PTACollectiveProtocolError(
+                    "de-escalation insight has invalid semantic identifiers"
+                )
+            left, right = insight.evidence
+            if left == right or insight.subject != f"{left}->{right}":
+                raise PTACollectiveProtocolError(
+                    "de-escalation insight has inconsistent identity"
+                )
+
+            if insight.kind == "literal_redundant":
+                left_vector = literal_vectors.get(left)
+                right_vector = literal_vectors.get(right)
+                valid = (
+                    left_vector is not None
+                    and right_vector is not None
+                    and set(left_vector) == domain
+                    and set(right_vector) == domain
+                    and left_vector == right_vector
+                )
+                if not valid:
+                    raise PTACollectiveProtocolError(
+                        "literal redundancy failed independent validation"
+                    )
+                continue
+
+            if insight.kind == "literal_subsumes":
+                left_vector = literal_vectors.get(left)
+                right_vector = literal_vectors.get(right)
+                valid = (
+                    left_vector is not None
+                    and right_vector is not None
+                    and set(left_vector) == domain
+                    and set(right_vector) == domain
+                    and left_vector != right_vector
+                    and not any(
+                        left_vector[example] == 1
+                        and right_vector[example] == 0
+                        for example in domain
+                    )
+                )
+                if not valid:
+                    raise PTACollectiveProtocolError(
+                        "literal subsumption failed independent validation"
+                    )
+                continue
+
+            left_literals = clause_literals.get(left)
+            right_literals = clause_literals.get(right)
+            left_vector = clause_vectors.get(left)
+            right_vector = clause_vectors.get(right)
+            valid = (
+                left_literals is not None
+                and right_literals is not None
+                and left_literals < right_literals
+                and left_vector is not None
+                and right_vector is not None
+                and set(left_vector) == domain
+                and set(right_vector) == domain
+                and not any(
+                    right_vector[example] == 1 and left_vector[example] == 0
+                    for example in domain
+                )
+            )
+            if not valid:
+                raise PTACollectiveProtocolError(
+                    "clause subsumption failed independent validation"
+                )
+
+    @staticmethod
+    def _validate_weight_products(
+        session: PTAReasoningSession,
+        proposals: tuple[PTAEscalationProposal, ...],
+    ) -> None:
+        supported_classes = {
+            target_class for target_class, _, _ in session.class_supports
+        }
+        scores: dict[tuple[int, int], set[int | float]] = {}
+        for clause, target_class, score in session.clause_class_scores:
+            scores.setdefault((clause, target_class), set()).add(score)
+
+        for proposal in proposals:
+            if proposal.native_target != "shared_weighted_clause":
+                continue
+            structure = dict(proposal.structure)
+            if set(structure) != {"clause", "class", "weight"}:
+                raise PTACollectiveProtocolError(
+                    "CoTM weight proposal has an invalid structure"
+                )
+            clause = structure["clause"]
+            target_class = structure["class"]
+            weight = structure["weight"]
+            if any(type(value) is not int for value in (clause, target_class, weight)):
+                raise PTACollectiveProtocolError(
+                    "CoTM weight proposal identifiers and weight must be integers"
+                )
+            source_scores = scores.get((clause, target_class), set())
+            expected_weights = {math.trunc(score * 4) for score in source_scores}
+            valid = (
+                target_class in supported_classes
+                and len(source_scores) == 1
+                and weight in expected_weights
+                and weight != 0
+                and -1_000_000 <= weight <= 1_000_000
+                and proposal.weights == (weight,)
+                and proposal.output_assignments == ((clause, target_class),)
+            )
+            if not valid:
+                raise PTACollectiveProtocolError(
+                    "CoTM weight proposal failed independent validation"
+                )
+
     def run(
         self,
         session: PTAReasoningSession,
@@ -939,6 +1081,8 @@ class PTACollectiveService:
             max_results_per_product=resolved_budget.max_results_per_product,
         )
         self._validate_input_products(session, insights, proposals)
+        self._validate_deescalation_products(session, insights)
+        self._validate_weight_products(session, proposals)
         return PTACollectiveResult(
             insights=insights,
             proposals=proposals,

@@ -3,8 +3,9 @@
 This module implements the first Milestone 7 deliverable: the exact lowering
 boundary between the PTA reasoning plane and the native Tsetlin plane. It is
 deliberately small, dependency-free, and hostile-input tested. Prolog may be
-arbitrarily more expressive during deliberation; only a proposal that passes
-`lowerable()` becomes a native candidate.
+arbitrarily more expressive during deliberation; only a proposal for which
+`lower_exact()` constructs and validates an exact executable representation
+becomes a lowered candidate.
 """
 
 from __future__ import annotations

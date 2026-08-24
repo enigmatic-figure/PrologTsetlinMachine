@@ -7,7 +7,6 @@
 % insight(SourcePTA, Kind, Subject, Evidence).
 % counterexample(Model, Example, Expected, Actual).
 % proposal(PTA, Kind, Candidate).
-% lowerable(Candidate, Target).  % exact, no approximation
 
 :- dynamic(observation/4).
 :- dynamic(example_domain/1).
@@ -24,13 +23,6 @@
 :- dynamic(insight/4).
 :- dynamic(counterexample/4).
 :- dynamic(proposal/3).
-
-% Bounded lowerability -- exact gate (stubs, Python validates natively)
-lowerable(Candidate, Target) :-
-    nonvar(Candidate), nonvar(Target),
-    member(Target, [binary_clause, shared_weighted_clause, regression_clause, patch_clause, graph_clause, logic_program, threshold, composite_gate]),
-    % For now, delegate depth/bounds checks to Python lower_exact; Prolog ensures proposal well-formed
-    true.
 
 similar_failure(A,B) :-
     clause_conflict(C,A), clause_conflict(C,B),
