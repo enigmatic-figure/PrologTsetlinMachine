@@ -747,29 +747,85 @@ class PTACollectiveService:
     def _validate_deescalation_truths(session: PTAReasoningSession) -> None:
         domain = set(session.example_domains)
 
-        def validate_vectors(
-            facts: list[tuple[int, int, int]], relation: str
-        ) -> None:
-            vectors: dict[int, dict[int, int]] = {}
-            for subject, example, truth in facts:
-                values = vectors.setdefault(subject, {})
-                if example in values:
-                    raise ValueError(
-                        f"{relation} contains duplicate truth for subject "
-                        f"{subject}, example {example}"
-                    )
-                values[example] = truth
-            if vectors and not domain:
-                raise ValueError(f"{relation} requires a nonempty example domain")
-            for subject, values in vectors.items():
-                if set(values) != domain:
-                    raise ValueError(
-                        f"{relation} subject {subject} lacks one exact truth value "
-                        "for every domain example"
-                    )
+        PTACollectiveService._validated_truth_vectors(
+            session.literal_truths, "literal_truth", domain
+        )
+        PTACollectiveService._validated_truth_vectors(
+            session.clause_truths, "clause_truth", domain
+        )
 
-        validate_vectors(session.literal_truths, "literal_truth")
-        validate_vectors(session.clause_truths, "clause_truth")
+    @staticmethod
+    def _validated_truth_vectors(
+        facts: list[tuple[int, int, int]],
+        relation: str,
+        domain: set[int],
+    ) -> dict[int, dict[int, int]]:
+        vectors: dict[int, dict[int, int]] = {}
+        for subject, example, truth in facts:
+            values = vectors.setdefault(subject, {})
+            if example in values:
+                raise ValueError(
+                    f"{relation} contains duplicate truth for subject "
+                    f"{subject}, example {example}"
+                )
+            values[example] = truth
+        if vectors and not domain:
+            raise ValueError(f"{relation} requires a nonempty example domain")
+        for subject, values in vectors.items():
+            if set(values) != domain:
+                raise ValueError(
+                    f"{relation} subject {subject} lacks one exact truth value "
+                    "for every domain example"
+                )
+        return vectors
+
+    @staticmethod
+    def _validate_requested_products(
+        query: PTACollectiveQuery,
+        insights: tuple[PTAInsight, ...],
+        proposals: tuple[PTAEscalationProposal, ...],
+        product_counts: Mapping[str, PTACollectiveProductCount],
+    ) -> None:
+        if not query.discover_thresholds and (
+            product_counts["threshold_insights"].available
+            or any(insight.kind == "threshold" for insight in insights)
+        ):
+            raise PTACollectiveProtocolError(
+                "collective returned threshold insights disabled by the query"
+            )
+        if not query.discover_intervals and (
+            product_counts["interval_insights"].available
+            or any(insight.kind == "interval" for insight in insights)
+        ):
+            raise PTACollectiveProtocolError(
+                "collective returned interval insights disabled by the query"
+            )
+        if not query.derive_deescalation and (
+            any(
+                product_counts[key].available
+                for key in (
+                    "literal_redundancies",
+                    "literal_subsumptions",
+                    "clause_subsumptions",
+                )
+            )
+            or any(
+                insight.kind
+                in ("literal_redundant", "literal_subsumes", "clause_subsumes")
+                for insight in insights
+            )
+        ):
+            raise PTACollectiveProtocolError(
+                "collective returned de-escalation products disabled by the query"
+            )
+        if not query.derive_escalation and (
+            product_counts["threshold_proposals"].available
+            or product_counts["weight_proposals"].available
+            or proposals
+        ):
+            raise PTACollectiveProtocolError(
+                "collective returned escalation products disabled by the query"
+            )
 
     @staticmethod
     def _validate_input_products(
@@ -833,18 +889,26 @@ class PTACollectiveService:
         session: PTAReasoningSession,
         insights: tuple[PTAInsight, ...],
     ) -> None:
+        deescalation_kinds = {
+            "literal_redundant",
+            "literal_subsumes",
+            "clause_subsumes",
+        }
+        if not any(insight.kind in deescalation_kinds for insight in insights):
+            return
         domain = set(session.example_domains)
-
-        def truth_vectors(
-            facts: list[tuple[int, int, int]],
-        ) -> dict[int, dict[int, int]]:
-            vectors: dict[int, dict[int, int]] = {}
-            for subject, example, truth in facts:
-                vectors.setdefault(subject, {})[example] = truth
-            return vectors
-
-        literal_vectors = truth_vectors(session.literal_truths)
-        clause_vectors = truth_vectors(session.clause_truths)
+        try:
+            literal_vectors = PTACollectiveService._validated_truth_vectors(
+                session.literal_truths, "literal_truth", domain
+            )
+            clause_vectors = PTACollectiveService._validated_truth_vectors(
+                session.clause_truths, "clause_truth", domain
+            )
+        except ValueError as exc:
+            raise PTACollectiveProtocolError(
+                "de-escalation products cannot be independently validated: "
+                f"{exc}"
+            ) from exc
         clause_literals: dict[int, set[int]] = {}
         for clause, literal in session.clause_literals:
             clause_literals.setdefault(clause, set()).add(literal)
@@ -1079,6 +1143,9 @@ class PTACollectiveService:
             id_to_clause=id_to_clause,
             id_to_class=id_to_class,
             max_results_per_product=resolved_budget.max_results_per_product,
+        )
+        self._validate_requested_products(
+            resolved_query, insights, proposals, product_counts
         )
         self._validate_input_products(session, insights, proposals)
         self._validate_deescalation_products(session, insights)
