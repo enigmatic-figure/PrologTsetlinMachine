@@ -1,7 +1,8 @@
 % PTA Input -- learned Booleanization with symbolic provenance
 % Part of PTAReasoningSession collective; Python owns bounds/validation, Prolog drives invention.
 
-:- include('pta_ontology.pl').
+% The collective driver loads pta_ontology.pl before this file. Keeping module
+% composition in the driver avoids consulting the ontology three times.
 
 % Invent numeric_ge thresholds where label flips between adjacent sorted values
 % Requires both observation and example_label facts; Python bounds candidate width
@@ -20,14 +21,21 @@ invent_interval(Field, Lo, Hi) :-
     findall(V-Y, (observation(_, E, Field, V), example_label(E, Y)), Pairs),
     sort(Pairs, Sorted),
     positive_run(Sorted, Lo0, Hi0, Prev, Next),
-    ( Prev = none -> Lo = Lo0 ; Lo is (Prev + Lo0) / 2 ),
-    ( Next = none -> Hi = Hi0 ; Hi is (Hi0 + Next) / 2 ).
+    % A finite [Lo,Hi) interval is justified only when observations establish
+    % both neighboring negative regions. Edge runs are threshold candidates,
+    % not finite intervals.
+    Prev \= none, Next \= none,
+    Lo is (Prev + Lo0) / 2,
+    Hi is (Hi0 + Next) / 2.
 
 % positive_run finds maximal contiguous 1-run, also returns neighboring negative values
 positive_run(Sorted, Lo, Hi, Prev, Next) :-
-    append(Before, [V-1 | Rest], Sorted),
-    % V is first 1 of run, Before ends with 0 or empty
-    ( Before = [] -> Prev = none ; my_last(Before, PrevV-PrevY), ( PrevY = 0 -> Prev = PrevV ; Prev = none ) ),
+    % Enumerate only real run starts: the beginning of the series or a 0->1
+    % transition. Allowing every positive suffix creates redundant search paths.
+    ( Sorted = [V-1 | Rest], Prev = none
+    ; append(_, [PrevV-0, V-1 | Rest], Sorted), Prev = PrevV
+    ),
+    Lo = V,
     run_end([V-1 | Rest], Hi, Next).
 
 run_end([V-1 | Rest], Hi, Next) :-
@@ -35,11 +43,6 @@ run_end([V-1 | Rest], Hi, Next) :-
 run_end_acc([], Hi, Hi, none).
 run_end_acc([V2-Y2 | Rest], CurrHi, Hi, Next) :-
     ( Y2 = 1 -> run_end_acc(Rest, V2, Hi, Next) ; Hi = CurrHi, Next = V2 ).
-
-% Helper: last element (use built-in last/2 if available, else define)
-:- dynamic(my_last/2).
-my_last([X], X) :- !.
-my_last([_ | T], X) :- my_last(T, X).
 
 % Alternative: discover thresholds via counterexample-guided join
 threshold_via_counterexample(Field, Threshold) :-

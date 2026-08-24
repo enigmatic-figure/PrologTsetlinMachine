@@ -1,13 +1,11 @@
 % PTA Escalation -- structure invention + CoTM weight allocation
 % Python EscalationPTA is reference oracle with greedy solver; Prolog CLP(FD) will replace.
 
-:- include('pta_ontology.pl').
+% The collective driver loads pta_ontology.pl and pta_input.pl first.
 
 % Exception clause via example_label join (discovers real threshold)
 exception_clause(Field, Threshold, Clause) :-
-    findall(V-Y, (observation(_, E, Field, V), example_label(E, Y)), Pairs),
-    sort(Pairs, Sorted),
-    Sorted = [V1-Y1, V2-Y2 | _], Y1 \= Y2, Threshold is (V1 + V2) / 2,
+    invent_threshold(Field, Threshold),
     Clause = [Field, Threshold].
 
 % CoTM weight via class_support and clause_class_score facts

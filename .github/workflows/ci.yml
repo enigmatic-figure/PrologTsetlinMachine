@@ -175,8 +175,47 @@ jobs:
         run: >-
           python -m pytest
           tests/python/test_prolog_bridge.py
+          tests/python/test_pta_collective.py
           tests/python/test_search_service.py
           tests/python/test_tui.py::test_tui_runs_repair_shows_counterexamples_and_exports
+      - name: Verify installed-wheel PTA collective
+        run: |
+          python -m pip wheel . --no-deps --wheel-dir /tmp/pta-wheel-dist
+          python -m venv /tmp/pta-wheel-venv
+          /tmp/pta-wheel-venv/bin/python -m pip install /tmp/pta-wheel-dist/*.whl
+          cd /tmp
+          PTM_GPROLOG=/usr/bin/gprolog /tmp/pta-wheel-venv/bin/python - <<'PY'
+          from pathlib import Path
+          from prolog_tsetlin.prolog_resources import resolve_prolog_module_set
+          from prolog_tsetlin.pta import PTACollectiveService, PTAReasoningSession
+
+          names = (
+              "pta_ontology.pl",
+              "pta_input.pl",
+              "pta_deescalation.pl",
+              "pta_escalation.pl",
+          )
+          paths = resolve_prolog_module_set(names)
+          assert len({path.parent for path in paths.values()}) == 1
+          for path in paths.values():
+              assert Path("/tmp/pta-wheel-venv") in path.parents, path
+
+          session = PTAReasoningSession("installed-wheel")
+          for example, value in enumerate((60, 70, 80, 90)):
+              session.add_observation("pta:input", example, "temperature", value)
+          for example, label in enumerate((0, 1, 1, 0)):
+              session.add_example_label(example, label)
+          result = PTACollectiveService().run(session)
+          assert any(
+              insight.kind == "interval" and insight.evidence == (65.0, 85.0)
+              for insight in result.insights
+          )
+          assert {proposal.structure["threshold"] for proposal in result.proposals} == {
+              65.0,
+              85.0,
+          }
+          assert not result.truncated
+          PY
 
   sanitizers:
     name: Sanitizers (ASan+UBSan) / ubuntu-latest

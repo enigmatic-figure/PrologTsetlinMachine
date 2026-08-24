@@ -99,12 +99,39 @@ Files: `prolog/pta_ontology.pl`, `prolog/pta_input.pl`, `prolog/pta_deescalation
 
 | File | Exported predicates (examples) | Mode | Bounds |
 |---|---|---|---|
-| `pta_ontology.pl` | `pta_class/2`, `pta_superclass/2`, `pta_resource/2` | `+ -` semidet | ontology facts bounded by `ptm_ontology` size; exposed via `python/prolog_tsetlin/pta/ontology.py` |
-| `pta_input.pl` | `pta_input_fact/2`, `pta_literal_binding/2` | `+ -` det | input facts mirrored from `LiteralCatalog` / `PrimitiveLogicGraph` |
-| `pta_deescalation.pl` | `pta_deescalate/3` | `+ + -` det | escalation/de-escalation guarded by `MAX_SEARCH_CANDIDATES` |
-| `pta_escalation.pl` | `pta_escalate/3` | `+ + -` det | same |
+| `pta_ontology.pl` | bounded dynamic relations including `observation/4`, `example_label/2`, `literal_truth/3`, `clause_truth/3`, `insight/4`, `proposal/3` | facts | each relation is bounded by `PTAReasoningSession`; collective execution applies a second resource budget |
+| `pta_input.pl` | `invent_threshold/2`, `invent_interval/3` | `+ -` / `+ - -`, nondet | numeric fields and observations are bounded; finite intervals require observed negative regions on both sides |
+| `pta_deescalation.pl` | `literals_equivalent/2`, `literal_subsumes/2`, `clause_subsumes/2`, `stable_inclusion/1` | mixed, nondet | complete truth vectors are required; equivalence is reported generically as literal redundancy unless transform metadata justifies a stronger term; clause subsumption requires strict literal-set containment |
+| `pta_escalation.pl` | `exception_clause/3`, `cotm_weight/3`, `graph_depth_increase/2`, `specialist_gate/2` | mixed, nondet | collective queries threshold and weight proposals only; target lowerers still fail closed when exact native semantics do not exist |
 
-These predicates are **not** direct search drivers; Python materializes ontology and input facts, then lowers results through `logic_consolidation`/`logic_morphology` to `LogicProgram32` / `PTM` artifacts. See `docs/architecture/logic-*.md` contracts and `python/prolog_tsetlin/pta/*.py` for the Python ownership.
+`PTACollectiveService` is the execution boundary. It resolves all four files
+from one coherent checkout or installed-wheel data directory, maps field names
+and 64-bit semantic example/literal/clause/class IDs to small opaque Prolog
+integers, writes data-only facts, executes a bounded query, and decodes a small
+framed record grammar into `PTAInsight` and `PTAEscalationProposal` objects.
+Raw GNU Prolog stdout is not returned as an application API. Missing or
+non-executable interpreters/modules, launch failure, timeout, nonzero exit,
+streaming output overflow, and malformed protocol records are distinct typed
+failures.
+
+The execution budget independently caps encoded input bytes, captured output
+bytes, observations, examples, literals, clauses, classes, total facts, and
+results per product. Every product reports emitted/available counts, so a
+researcher can distinguish a complete result from bounded truncation without
+one high-cardinality category starving the others. De-escalation additionally
+requires exactly one truth value per participating literal/clause for every
+example in a nonempty evaluation domain.
+
+GNU Prolog's portable integer ceiling and floating midpoint behavior are part
+of the trust boundary. Semantic IDs are opaque-mapped; data terms are range
+checked; threshold inputs use the exact arithmetic magnitude; and Python
+independently verifies that returned boundaries lie strictly between an
+observed label flip. Rounded non-separating midpoints fail as protocol errors.
+
+Python validates, serializes, decodes, and later audits candidates. The
+threshold/interval midpoint is computed by GNU Prolog, not duplicated in the
+collective service. A typed proposal is still only a proposal: it must pass the
+target-specific exact-lowering and behavioral-oracle gates before publication.
 
 ## Validation trust boundary
 
@@ -115,6 +142,8 @@ Python re-evaluates every Prolog candidate rather than trusting syntax:
 * TA clause: `TAClauseSearchResult.matches` checked;
 * tree: `tree.evaluate(row) == label` plus `is_read_once`, `depth <= max_depth`, `feature < slot_count`.
 
-Compilation check: `scripts/verify.ps1` compiles both `.pl` files via `gplc --wpl` as a compiler-only gate; live solving still consults the source through a temporary driver.
+CI compiles the bounded-search templates and all four PTA files, runs live GNU
+Prolog service tests, and builds a wheel whose installed Prolog resources are
+exercised from outside the source checkout.
 
 See `python/prolog_tsetlin/prolog_bridge.py` docstrings for `ThresholdSearchProblem`, `FeatureTemplateSearchProblem`, `TAClauseSearchProblem`, `DecisionTreeSearchProblem`, and `GNUPrologSearch` class-level limits.

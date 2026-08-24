@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -38,6 +37,7 @@ from .logic_ast import (
 )
 from .logic_consolidation import LogicProgram32
 from .pa import PortSemantic
+from .prolog_resources import PrologResourceError, resolve_prolog_module
 
 
 _RESULT_PATTERN = re.compile(
@@ -211,15 +211,10 @@ def _default_gprolog_path() -> Path | None:
 
 
 def _default_prolog_source(filename: str) -> Path:
-    candidates = (
-        Path(__file__).resolve().parents[2] / "prolog" / filename,
-        Path(sys.prefix)
-        / "share"
-        / "prolog-tsetlin-machine"
-        / "prolog"
-        / filename,
-    )
-    return next((path for path in candidates if path.is_file()), candidates[0])
+    try:
+        return resolve_prolog_module(filename)
+    except PrologResourceError as exc:
+        raise PrologBridgeError(str(exc)) from exc
 
 
 def _prolog_process_environment(

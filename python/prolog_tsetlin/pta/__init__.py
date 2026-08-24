@@ -26,6 +26,18 @@ from .graph_pta import hypothesize_graph_relation, hypothesis_to_proposal as gra
 from .sequence import discover_sequence_patterns, pattern_to_proposal as seq_to_proposal
 from .composite import discover_specialist_gates, gate_to_proposal, smallest_specialist_subset
 from .session import PTAReasoningSession
+from .collective import (
+    PTACollectiveBudget,
+    PTACollectiveError,
+    PTACollectiveExecutionError,
+    PTACollectiveProtocolError,
+    PTACollectiveProductCount,
+    PTACollectiveQuery,
+    PTACollectiveResult,
+    PTACollectiveService,
+    PTACollectiveTimeout,
+    PTACollectiveUnavailable,
+)
 
 __all__ = [
     "PTAEscalationProposal",
@@ -64,4 +76,14 @@ __all__ = [
     "gate_to_proposal",
     "smallest_specialist_subset",
     "PTAReasoningSession",
+    "PTACollectiveBudget",
+    "PTACollectiveError",
+    "PTACollectiveExecutionError",
+    "PTACollectiveProtocolError",
+    "PTACollectiveProductCount",
+    "PTACollectiveQuery",
+    "PTACollectiveResult",
+    "PTACollectiveService",
+    "PTACollectiveTimeout",
+    "PTACollectiveUnavailable",
 ]

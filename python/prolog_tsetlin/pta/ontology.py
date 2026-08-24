@@ -8,33 +8,10 @@ consume a numeric de-escalation PTA's insight without re-discovery.
 Prolog source of truth is prolog/pta_ontology.pl (compiled); Python reads it via shared resolver.
 """
 
-from pathlib import Path
-import sys
+from ..prolog_resources import resolve_prolog_module
 
 def _resolve_ontology() -> str:
-    # Reuse mature resolver logic: check checkout then share/prolog-tsetlin-machine/prolog
-    candidates = (
-        Path(__file__).resolve().parents[3] / "prolog" / "pta_ontology.pl",
-        Path(sys.prefix) / "share" / "prolog-tsetlin-machine" / "prolog" / "pta_ontology.pl",
-    )
-    for cand in candidates:
-        if cand.is_file():
-            return cand.read_text(encoding="utf-8")
-    # Fallback stub
-    return r"""
-% PTA shared ontology — keep in sync with python/prolog_tsetlin/pta/proposal.py
-:- dynamic(observation/4).
-:- dynamic(feature_support/3).
-:- dynamic(feature_relation/3).
-:- dynamic(clause_support/2).
-:- dynamic(clause_conflict/2).
-:- dynamic(insight/4).
-:- dynamic(counterexample/4).
-:- dynamic(proposal/3).
-similar_failure(A,B) :-
-    clause_conflict(C,A), clause_conflict(C,B),
-    insight(_, thresholds_equivalent, _, _).
-"""
+    return resolve_prolog_module("pta_ontology.pl").read_text(encoding="utf-8")
 
 PROLOG_ONTOLOGY = _resolve_ontology()
 
