@@ -7,6 +7,7 @@ not become architecture until they are accepted and implemented.
 - [Semantic contract](semantic-contract.md)
 - [Packed TM execution](packed-tm.md)
 - [PTA threshold materialization](pta-threshold-materialization.md)
+- [Trained-parent PTA model generations](trained-parent-model-generation.md)
 - [CUDA packed TM execution](cuda-packed-tm.md)
 - [Typed Logic AST](logic-ast.md)
 - [Logic compiler](logic-compiler.md)
@@ -24,6 +25,7 @@ adr/0001-hybrid-runtime-boundaries
 semantic-contract
 packed-tm
 pta-threshold-materialization
+trained-parent-model-generation
 cuda-packed-tm
 logic-ast
 logic-compiler

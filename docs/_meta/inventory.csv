@@ -24,6 +24,7 @@ docs/architecture/logic-morphology.md,architecture,contract,current,authoritativ
 docs/architecture/packed-tm.md,architecture,contract,current,authoritative,yes,docs/architecture/packed-tm.md,retain
 docs/architecture/pta-threshold-materialization.md,architecture,contract,current,authoritative,yes,docs/architecture/pta-threshold-materialization.md,retain
 docs/architecture/semantic-contract.md,architecture,contract,current,authoritative,yes,docs/architecture/semantic-contract.md,retain
+docs/architecture/trained-parent-model-generation.md,architecture,contract,current,authoritative,yes,docs/architecture/trained-parent-model-generation.md,retain
 docs/archive/dashboard.md,archive,record,historical,record,yes,docs/archive/dashboard.md,retain
 docs/archive/gpu-handoff.md,archive,record,historical,record,yes,docs/archive/gpu-handoff.md,retain
 docs/archive/index.md,archive,landing,current,derived,yes,docs/archive/index.md,retain
