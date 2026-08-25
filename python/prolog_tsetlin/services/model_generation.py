@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
+from itertools import combinations
 from pathlib import Path
 from threading import RLock
 from types import MappingProxyType
@@ -43,6 +44,7 @@ from ..model_generation import (
     OrderedLiteralManifest,
     PromotionAuditPolicy,
     PromotionAuditSnapshot,
+    PromotionRuntimeConformanceEvidence,
     PrologInventionEvidence,
     PrologDeescalationEvidence,
     PrologThresholdCandidateSet,
@@ -505,6 +507,30 @@ class ModelGenerationStore:
             raise ModelGenerationError("promotion audit does not match its address")
         return result
 
+    def put_promotion_conformance(
+        self, value: PromotionRuntimeConformanceEvidence
+    ) -> Path:
+        return self._put_json(
+            "promotion-conformance", value.evidence_id, value.to_dict()
+        )
+
+    def load_promotion_conformance(
+        self, identifier: str
+    ) -> PromotionRuntimeConformanceEvidence:
+        try:
+            result = PromotionRuntimeConformanceEvidence.from_dict(
+                self._read_json("promotion-conformance", identifier)
+            )
+        except OSError as error:
+            raise ModelGenerationError(
+                "promotion conformance evidence is unavailable"
+            ) from error
+        if result.evidence_id != identifier:
+            raise ModelGenerationError(
+                "promotion conformance evidence does not match its address"
+            )
+        return result
+
     def put_live_conformance(self, value: LiveRuntimeConformanceEvidence) -> Path:
         return self._put_json(
             "live-conformance", value.evidence_id, value.to_dict()
@@ -733,6 +759,13 @@ class ModelGenerationController:
             self._bind_ptmrt_executable(ptmrt_executable)
         self._active_generation_id: str | None = None
         with self.store._event_lock:
+            state = self._reconcile_replay_state_under_event_lock()
+            self._active_generation_id = state.active_generation_id
+
+    def _reconcile_replay_state_under_event_lock(self) -> _LifecycleReplayState:
+        """Terminalize or complete every crash-interrupted durable transition."""
+
+        while True:
             state = self._replay_lifecycle_state()
             pending = (
                 state.pending_candidate_usage
@@ -741,8 +774,61 @@ class ModelGenerationController:
             )
             if pending is not None:
                 self._append_evidence_abandoned_under_event_lock(pending)
-                state = self._replay_lifecycle_state()
-            self._active_generation_id = state.active_generation_id
+                continue
+            if state.candidate is not None:
+                lineage = state.candidate
+                *_, audit, _ = self._validate_lineage_graph(lineage)
+                if audit.accepted and audit.conformance.exact:
+                    self.store.append_event(
+                        LifecycleEventKind.PROMOTION_APPROVED,
+                        lineage.child_generation_id,
+                        lineage_id=lineage.lineage_id,
+                        audit_id=audit.audit_id,
+                    )
+                else:
+                    self.store.append_event(
+                        LifecycleEventKind.CANDIDATE_REJECTED,
+                        lineage.child_generation_id,
+                        lineage_id=lineage.lineage_id,
+                        audit_id=audit.audit_id,
+                        parent_errors=audit.parent_errors,
+                        child_errors=audit.child_errors,
+                        improvements=audit.improvements,
+                        regressions=audit.regressions,
+                    )
+                continue
+            if state.approved is not None:
+                lineage = state.approved
+                parent, _, child, _, audit, _ = self._validate_lineage_graph(
+                    lineage
+                )
+                self.store.append_event(
+                    LifecycleEventKind.ACTIVATED,
+                    child.generation_id,
+                    previous_generation_id=parent.generation_id,
+                    lineage_id=lineage.lineage_id,
+                    adaptive_behavior_id=lineage.adaptive_behavior_id,
+                    audit_id=audit.audit_id,
+                )
+                continue
+            if state.reopen is not None:
+                lineage, bundle, drift = state.reopen
+                active_child_id = state.active_generation_id
+                if active_child_id is None:
+                    raise ModelGenerationError(
+                        "reopen recovery lacks an active child"
+                    )
+                self._resolve_restoration_bundle(bundle)
+                self.store.append_event(
+                    LifecycleEventKind.PARENT_RESTORED,
+                    bundle.parent_generation_id,
+                    restoration_bundle_id=bundle.bundle_id,
+                    previous_generation_id=active_child_id,
+                    lineage_id=lineage.lineage_id,
+                    drift_audit_id=drift.audit_id,
+                )
+                continue
+            return state
 
     @property
     def active_generation_id(self) -> str | None:
@@ -790,7 +876,7 @@ class ModelGenerationController:
             self._ptmrt_executable = candidate
         if self._ptmrt_executable is None:
             raise ModelGenerationError(
-                "durable live conformance requires a trusted ptmrt executable"
+                "durable runtime conformance requires a trusted ptmrt executable"
             )
         return self._ptmrt_executable
 
@@ -1106,6 +1192,80 @@ class ModelGenerationController:
             )
         return usage.corpora[0]
 
+    def _validate_promotion_conformance_evidence(
+        self,
+        evidence_id: str,
+        child: ModelGeneration,
+        child_snapshot: AdaptiveSnapshotEnvelope,
+        child_manifest: OrderedLiteralManifest,
+        artifact: PackedTMInferenceArtifact,
+        corpus: LabeledCorpus,
+    ) -> RuntimeConformanceReport:
+        evidence = self.store.load_promotion_conformance(evidence_id)
+        if corpus.role is not CorpusRole.PROMOTION:
+            raise ModelGenerationError(
+                "promotion conformance requires the promotion holdout"
+            )
+        if (
+            evidence.child_generation_id != child.generation_id
+            or evidence.artifact_id != child.inference_artifact_id
+            or evidence.snapshot_id != child.snapshot_id
+            or evidence.literal_manifest_id != child.literal_manifest_id
+            or evidence.corpus_digest != corpus.digest
+            or evidence.case_count != len(corpus.examples)
+        ):
+            raise ModelGenerationError(
+                "promotion conformance identity binding is inconsistent"
+            )
+        trusted_ptmrt = self._bind_ptmrt_executable()
+        executable_digest = _file_digest(
+            trusted_ptmrt,
+            maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
+        )
+        if executable_digest != evidence.ptmrt_binary_digest:
+            raise ModelGenerationError(
+                "promotion conformance ptmrt executable digest does not match"
+            )
+        native = _verify_snapshot_records_with_ptmrt(
+            trusted_ptmrt,
+            self.store.artifact_path(artifact.artifact_id),
+            child_snapshot,
+            child_manifest,
+            artifact,
+            corpus.records,
+        )
+        if (
+            _file_digest(
+                trusted_ptmrt,
+                maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
+            )
+            != evidence.ptmrt_binary_digest
+            or native.artifact_id != evidence.artifact_id
+            or native.scalar_features != evidence.scalar_features
+            or native.scalar_scores != evidence.scalar_scores
+            or native.scalar_predictions != evidence.scalar_predictions
+            or native.packed_predictions != evidence.packed_predictions
+            or native.native_features != evidence.native_features
+            or native.native_scores != evidence.native_scores
+            or native.native_predictions != evidence.native_predictions
+        ):
+            raise ModelGenerationError(
+                "promotion native execution cannot be reproduced"
+            )
+        report = audit_snapshot_runtime_conformance(
+            child_snapshot,
+            child_manifest,
+            artifact,
+            corpus.records,
+            ptmrt_verified=True,
+            ptmrt_artifact_id=evidence.artifact_id,
+        )
+        if not report.exact:
+            raise ModelGenerationError(
+                "promotion runtime conformance is not exact"
+            )
+        return report
+
     def _validate_lineage_graph(
         self, lineage: LifecycleLineage
     ) -> tuple[
@@ -1188,6 +1348,30 @@ class ModelGenerationController:
         usage_digests = tuple(
             (corpus.role.value, corpus.digest) for corpus in usage.corpora
         )
+        promotion_corpus = next(
+            (
+                corpus
+                for corpus in usage.corpora
+                if corpus.role is CorpusRole.PROMOTION
+            ),
+            None,
+        )
+        promotion_conformance: RuntimeConformanceReport | None = None
+        if lineage.promotion_conformance_evidence_id is not None:
+            if promotion_corpus is None:
+                raise ModelGenerationError(
+                    "lineage lacks its promotion holdout"
+                )
+            promotion_conformance = (
+                self._validate_promotion_conformance_evidence(
+                    lineage.promotion_conformance_evidence_id,
+                    child,
+                    AdaptiveSnapshotEnvelope(child_snapshot),
+                    child_manifest,
+                    child_artifact,
+                    promotion_corpus,
+                )
+            )
         if selection is None:
             invention_consistent = (
                 isinstance(evidence, PrologInventionEvidence)
@@ -1284,6 +1468,14 @@ class ModelGenerationController:
             or audit.corpus_role is not CorpusRole.PROMOTION
             or audit.corpus_digest != lineage.promotion_corpus_digest
             or audit.conformance.artifact_id != child.inference_artifact_id
+            or (
+                lineage.schema == LINEAGE_SCHEMA
+                and promotion_conformance is None
+            )
+            or (
+                promotion_conformance is not None
+                and audit.conformance != promotion_conformance
+            )
             or lineage.adaptive_behavior_id
             != AdaptiveBehaviorIdentity.from_generation(child).behavior_id
             or not isinstance(child_signature, Mapping)
@@ -1309,6 +1501,28 @@ class ModelGenerationController:
             or child_restoration != bundle.to_dict()
         ):
             raise ModelGenerationError("lineage object graph is inconsistent")
+        if lineage.schema == LINEAGE_SCHEMA:
+            if promotion_corpus is None or promotion_conformance is None:
+                raise ModelGenerationError(
+                    "current lineage lacks replayable promotion evidence"
+                )
+            reconstructed_promotion = audit_parent_child_snapshots(
+                parent_snapshot,
+                parent_manifest,
+                AdaptiveSnapshotEnvelope(child_snapshot),
+                child_manifest,
+                promotion_corpus,
+                promotion_conformance,
+                PromotionAuditPolicy(
+                    minimum_observations=audit.observations,
+                    require_strict_improvement=True,
+                    maximum_regressions=0,
+                ),
+            )
+            if reconstructed_promotion != audit:
+                raise ModelGenerationError(
+                    "promotion audit cannot be reconstructed"
+                )
         if selection is not None:
             if replayed_session is None or parent_training_corpus is None:
                 raise ModelGenerationError(
@@ -1584,6 +1798,14 @@ class ModelGenerationController:
         child_digests = contracted_digests + (
             (CorpusRole.PROMOTION.value, lineage.promotion_corpus_digest),
         )
+        promotion_conformance = self._validate_promotion_conformance_evidence(
+            lineage.promotion_conformance_evidence_id,
+            child,
+            child_snapshot,
+            child_manifest,
+            child_artifact,
+            promotion,
+        )
         if (
             parent.kind is not GenerationKind.TRAINED_PARENT
             or contracted.kind is not GenerationKind.CONTRACTED_PARENT
@@ -1628,6 +1850,7 @@ class ModelGenerationController:
             or audit.corpus_digest != lineage.promotion_corpus_digest
             or audit.conformance.artifact_id != child.inference_artifact_id
             or not audit.conformance.exact
+            or audit.conformance != promotion_conformance
             or lineage.adaptive_behavior_id
             != AdaptiveBehaviorIdentity.from_generation(child).behavior_id
             or not isinstance(signature, Mapping)
@@ -1681,21 +1904,13 @@ class ModelGenerationController:
             raise ModelGenerationError(
                 "literal-contraction construction cannot be reconstructed"
             )
-        reconstructed_conformance = audit_snapshot_runtime_conformance(
-            child_snapshot,
-            child_manifest,
-            child_artifact,
-            promotion.records,
-            ptmrt_verified=audit.conformance.ptmrt_verified,
-            ptmrt_artifact_id=audit.conformance.ptmrt_artifact_id,
-        )
         reconstructed_audit = audit_parent_child_snapshots(
             parent_snapshot,
             parent_manifest,
             child_snapshot,
             child_manifest,
             promotion,
-            reconstructed_conformance,
+            promotion_conformance,
             PromotionAuditPolicy(
                 minimum_observations=audit.observations,
                 require_strict_improvement=False,
@@ -2856,6 +3071,28 @@ def _run_complete_deescalation_collective(
         raise ModelGenerationError(
             "GNU Prolog returned duplicate literal-equivalence products"
         )
+    domain = set(session.example_domains)
+    vectors: dict[int, dict[int, int]] = {}
+    for literal, example, truth in session.literal_truths:
+        values = vectors.setdefault(literal, {})
+        if example in values:
+            raise ModelGenerationError(
+                "de-escalation proof contains duplicate literal truth rows"
+            )
+        values[example] = truth
+    if not domain or any(set(vector) != domain for vector in vectors.values()):
+        raise ModelGenerationError(
+            "de-escalation proof lacks complete Python truth vectors"
+        )
+    expected_pairs = tuple(
+        (left, right)
+        for left, right in combinations(sorted(vectors), 2)
+        if vectors[left] == vectors[right]
+    )
+    if pairs != expected_pairs:
+        raise ModelGenerationError(
+            "GNU Prolog literal-equivalence set differs from independent Python enumeration"
+        )
     return pairs, before
 
 
@@ -3384,6 +3621,36 @@ def _verify_snapshot_records_with_ptmrt(
     )
 
 
+def _promotion_conformance_evidence(
+    child: ModelGeneration,
+    corpus: LabeledCorpus,
+    vectors: _LiveRuntimeVectors,
+    ptmrt_executable: str | Path,
+) -> PromotionRuntimeConformanceEvidence:
+    if corpus.role is not CorpusRole.PROMOTION:
+        raise ModelGenerationError(
+            "promotion native evidence requires the promotion holdout"
+        )
+    return PromotionRuntimeConformanceEvidence(
+        child_generation_id=child.generation_id,
+        artifact_id=vectors.artifact_id,
+        snapshot_id=child.snapshot_id,
+        literal_manifest_id=child.literal_manifest_id,
+        corpus_digest=corpus.digest,
+        scalar_features=vectors.scalar_features,
+        scalar_scores=vectors.scalar_scores,
+        scalar_predictions=vectors.scalar_predictions,
+        packed_predictions=vectors.packed_predictions,
+        native_features=vectors.native_features,
+        native_scores=vectors.native_scores,
+        native_predictions=vectors.native_predictions,
+        ptmrt_binary_digest=_file_digest(
+            Path(ptmrt_executable).resolve(strict=True),
+            maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TrainedParentLifecycleResult:
     parent_generation: ModelGeneration
@@ -3394,6 +3661,7 @@ class TrainedParentLifecycleResult:
     child: AdaptedChild
     child_artifact: PackedTMInferenceArtifact
     conformance: RuntimeConformanceReport
+    promotion_conformance_evidence: PromotionRuntimeConformanceEvidence
     promotion_audit: PromotionAuditSnapshot
     lineage: ModelGenerationLineage
     invention_evidence: PrologInventionEvidence | PrologThresholdCandidateSet
@@ -3414,6 +3682,7 @@ class DeescalationLifecycleResult:
     contracted_parent: ContractedParent
     child_artifact: PackedTMInferenceArtifact
     conformance: RuntimeConformanceReport
+    promotion_conformance_evidence: PromotionRuntimeConformanceEvidence
     promotion_audit: PromotionAuditSnapshot
     lineage: LiteralContractionLineage
     deescalation_evidence: PrologDeescalationEvidence
@@ -3809,6 +4078,21 @@ def _execute_trained_parent_lifecycle_once(
     verified_id = verify_artifact_with_ptmrt(
         ptmrt_executable, child_artifact_path, child_artifact.artifact_id
     )
+    promotion_vectors = _verify_snapshot_records_with_ptmrt(
+        ptmrt_executable,
+        child_artifact_path,
+        child.snapshot,
+        child.manifest,
+        child_artifact,
+        corpora.promotion.records,
+    )
+    promotion_evidence = _promotion_conformance_evidence(
+        child_generation,
+        corpora.promotion,
+        promotion_vectors,
+        ptmrt_executable,
+    )
+    store.put_promotion_conformance(promotion_evidence)
     conformance = audit_runtime_conformance(
         child,
         child_artifact,
@@ -3832,6 +4116,7 @@ def _execute_trained_parent_lifecycle_once(
         adaptive_behavior_id=behavior.behavior_id,
         restoration_bundle_id=restoration_bundle.bundle_id,
         promotion_audit_id=promotion.audit_id,
+        promotion_conformance_evidence_id=promotion_evidence.evidence_id,
         invention_evidence_id=invention.evidence.evidence_id,
         evidence_usage_id=usage.usage_id,
         activation_sequence=activation_sequence,
@@ -3861,6 +4146,7 @@ def _execute_trained_parent_lifecycle_once(
         child,
         child_artifact,
         conformance,
+        promotion_evidence,
         promotion,
         lineage,
         invention.evidence,
@@ -4174,6 +4460,21 @@ def _execute_literal_deescalation_lifecycle_once(
     verified_id = verify_artifact_with_ptmrt(
         ptmrt_executable, child_artifact_path, child_artifact.artifact_id
     )
+    promotion_vectors = _verify_snapshot_records_with_ptmrt(
+        ptmrt_executable,
+        child_artifact_path,
+        contracted_parent.snapshot,
+        contracted_parent.manifest,
+        child_artifact,
+        corpora.promotion.records,
+    )
+    promotion_evidence = _promotion_conformance_evidence(
+        child_generation,
+        corpora.promotion,
+        promotion_vectors,
+        ptmrt_executable,
+    )
+    store.put_promotion_conformance(promotion_evidence)
     conformance = audit_snapshot_runtime_conformance(
         contracted_parent.snapshot,
         contracted_parent.manifest,
@@ -4199,6 +4500,7 @@ def _execute_literal_deescalation_lifecycle_once(
         adaptive_behavior_id=behavior.behavior_id,
         restoration_bundle_id=restoration_bundle.bundle_id,
         promotion_audit_id=promotion.audit_id,
+        promotion_conformance_evidence_id=promotion_evidence.evidence_id,
         deescalation_evidence_id=evidence.evidence_id,
         evidence_usage_id=usage.usage_id,
         activation_sequence=activation_sequence,
@@ -4226,6 +4528,7 @@ def _execute_literal_deescalation_lifecycle_once(
         contracted_parent,
         child_artifact,
         conformance,
+        promotion_evidence,
         promotion,
         lineage,
         evidence,

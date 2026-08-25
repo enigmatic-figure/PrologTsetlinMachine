@@ -56,8 +56,10 @@ subsumption, or clause-subsumption products. The durable
 Python does not trust the returned pair. The collective service first validates
 each redundancy against complete Python truth vectors. Candidate admission and
 recovery then reconstruct the session from durable proof rows, rerun the
-attested GNU Prolog query, require the complete pair set to match, and repeat
-the deterministic selection. The earlier feature position survives; the later
+attested GNU Prolog query, independently enumerate every equal pair of complete
+Python truth vectors, require exact set equality, and repeat the deterministic
+selection. A valid but incomplete subset fails even if Prolog self-reports the
+smaller set as complete. The earlier feature position survives; the later
 equivalent position is removed.
 
 `literal_redundant` does not become a new `lower_exact()` target. It authorizes
@@ -102,9 +104,14 @@ preprocessing contract, and versioned training semantics.
 
 Promotion uses a third immutable corpus. Runtime conformance remains exact:
 the scalar snapshot, packed Python artifact, embedded conformance vectors, and
-`ptmrt` must agree with zero mismatches. The paired promotion audit compares P
-and C against labels. Because an exact contraction is a consolidation rather
-than an improvement episode, the first policy requires:
+`ptmrt` must agree with zero mismatches. A content-addressed promotion receipt
+binds scalar, packed, and native feature/score/prediction vectors, the exact
+holdout and child identities, and the `ptmrt` executable digest. Controller
+admission and recovery hash the configured executable and rerun every holdout
+record natively; a serialized `ptmrt_verified` Boolean is not authorization.
+The paired promotion audit compares P and C against labels. Because an exact
+contraction is a consolidation rather than an improvement episode, the first
+policy requires:
 
 ```text
 minimum observations reached
@@ -120,13 +127,14 @@ complete rows are reserved before Prolog execution under the durable
 `deescalation_episode` evidence purpose. Failed attempts are abandoned but
 remain spent across future generations.
 
-The content-addressed `LiteralContractionLineage` binds the parent, contracted
+The content-addressed v2 `LiteralContractionLineage` binds the parent, contracted
 candidate, deployable child, adaptive behavior, restoration bundle, promotion
-audit, De-escalation evidence, evidence usage, activation sequence, selected
-literal IDs, and all three corpus digests. Controller replay reloads the child
-artifact and complete object graph, reruns GNU Prolog, reconstructs the exact TA
-contraction, and resolves the parent restoration bundle before accepting any
-candidate, activation, or recovered route.
+audit and native receipt, De-escalation evidence, evidence usage, activation
+sequence, selected literal IDs, and all three corpus digests. Controller replay
+reloads the child artifact and complete object graph, reruns GNU Prolog and
+`ptmrt`, reconstructs the exact TA contraction, and resolves the parent
+restoration bundle before accepting any candidate, activation, or recovered
+route.
 
 ## Drift and restoration
 
