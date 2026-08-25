@@ -8,6 +8,7 @@ not become architecture until they are accepted and implemented.
 - [Packed TM execution](packed-tm.md)
 - [PTA threshold materialization](pta-threshold-materialization.md)
 - [Trained-parent PTA model generations](trained-parent-model-generation.md)
+- [De-escalation PTA model generations](deescalation-model-generation.md)
 - [CUDA packed TM execution](cuda-packed-tm.md)
 - [Typed Logic AST](logic-ast.md)
 - [Logic compiler](logic-compiler.md)
@@ -26,6 +27,7 @@ semantic-contract
 packed-tm
 pta-threshold-materialization
 trained-parent-model-generation
+deescalation-model-generation
 cuda-packed-tm
 logic-ast
 logic-compiler

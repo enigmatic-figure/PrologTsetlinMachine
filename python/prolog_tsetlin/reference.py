@@ -72,6 +72,73 @@ def extend_snapshot_features(
     )
 
 
+def contract_snapshot_equivalent_feature(
+    snapshot: TMSnapshot,
+    survivor_position: int,
+    removed_position: int,
+) -> TMSnapshot:
+    """Consolidate one equivalent feature into another and remove its TA pair.
+
+    Scalar state rows are interleaved positive/negative TA pairs. For each
+    polarity the survivor receives the stronger of its own state and the
+    removed feature's state before the removed pair is spliced out. Therefore
+    inclusion is retained whenever either equivalent literal was included.
+    Behavioral equivalence still depends on the two feature columns being
+    equal and is proved by the model-generation layer over its authorized
+    evidence. The RNG trajectory and every unrelated TA state are preserved.
+    """
+
+    if not isinstance(snapshot, TMSnapshot):
+        raise TypeError("snapshot must be TMSnapshot")
+    if type(survivor_position) is not int or type(removed_position) is not int:
+        raise TypeError("feature positions must be integers")
+    if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError("snapshot schema version is unsupported")
+    if (
+        snapshot.number_of_clauses <= 0
+        or snapshot.number_of_features <= 1
+        or snapshot.states_per_action <= 0
+    ):
+        raise ValueError("snapshot configuration cannot be contracted")
+    if (
+        survivor_position == removed_position
+        or not 0 <= survivor_position < snapshot.number_of_features
+        or not 0 <= removed_position < snapshot.number_of_features
+    ):
+        raise ValueError("feature contraction positions are invalid")
+    ScalarBinaryTsetlinMachine._check_snapshot_states(
+        snapshot,
+        number_of_clauses=snapshot.number_of_clauses,
+        number_of_features=snapshot.number_of_features,
+        states_per_action=snapshot.states_per_action,
+    )
+
+    survivor_first = 2 * survivor_position
+    removed_first = 2 * removed_position
+    states: list[tuple[int, ...]] = []
+    for source in snapshot.states:
+        contracted = list(source)
+        contracted[survivor_first] = max(
+            source[survivor_first], source[removed_first]
+        )
+        contracted[survivor_first + 1] = max(
+            source[survivor_first + 1], source[removed_first + 1]
+        )
+        del contracted[removed_first : removed_first + 2]
+        states.append(tuple(contracted))
+
+    return TMSnapshot(
+        schema_version=snapshot.schema_version,
+        number_of_clauses=snapshot.number_of_clauses,
+        number_of_features=snapshot.number_of_features - 1,
+        states_per_action=snapshot.states_per_action,
+        specificity=snapshot.specificity,
+        threshold=snapshot.threshold,
+        states=tuple(states),
+        rng_state=copy.deepcopy(snapshot.rng_state),
+    )
+
+
 class ScalarBinaryTsetlinMachine:
     """Readable training oracle; it is intentionally not performance code."""
 

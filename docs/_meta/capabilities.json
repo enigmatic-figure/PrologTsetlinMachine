@@ -85,6 +85,16 @@
       "owner": "research"
     },
     {
+      "id": "deescalation-pta-lifecycle",
+      "maturity": "experimental",
+      "evidence": [
+        "docs/architecture/deescalation-model-generation.md",
+        "tests/python/test_model_generation_lifecycle.py",
+        "tests/python/test_reference_tm.py"
+      ],
+      "owner": "research"
+    },
+    {
       "id": "tui-workbench",
       "maturity": "experimental",
       "evidence": [

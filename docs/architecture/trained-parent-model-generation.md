@@ -164,7 +164,8 @@ not reusable merely by assigning it a new example ID.
 evidence enters through `reopen_and_restore_for_drift()` after activation.
 Episode-local separation is supplemented by a durable cross-generation
 ledger. An immutable `EvidenceUsage` stores the exact labeled corpora for one
-of three purposes: parent registration, candidate episode, or live drift. Its
+of four purposes: parent registration, Input-PTA candidate episode,
+De-escalation episode, or live drift. Its
 content identity covers the dataset, purpose, subject generation, corpus
 digests, observation identities, raw records, and labels.
 
@@ -186,7 +187,12 @@ rather than an implicit exception.
 Runtime conformance asks whether the child snapshot and portable execution
 mean exactly the same thing. Scalar reference and packed Python predictions
 must have zero mismatches, the artifact's embedded oracle must pass, and
-`ptmrt verify` must return the same artifact identity. There is no tolerance.
+`ptmrt verify` must return the same artifact identity. Promotion additionally
+stores scalar, packed, and native feature/score/prediction vectors plus the
+exact child, holdout, artifact, and `ptmrt` executable identities. Controller
+admission and recovery hash the configured executable and rerun every
+promotion record through `ptmrt`; copying a serialized `ptmrt_verified` bit
+cannot authorize activation. There is no tolerance.
 Before a live drift decision, the service additionally runs every bounded raw
 live record through `ptmrt run-record`. Native preprocessing outputs, score,
 prediction, and artifact identity must exactly match the scalar child and
@@ -263,7 +269,8 @@ the store then durably publishes:
 3. every alternative P+ and C adaptive snapshot;
 4. ordered literal and preprocessing manifests;
 5. the selected child `.ptm` bytes;
-6. the paired promotion audit and immutable lineage node.
+6. replayable native promotion evidence, the paired promotion audit, and the
+   immutable lineage node.
 
 Every object is content addressed. Atomic publication synchronizes the
 temporary file and, on POSIX, the containing directory after link or rename.
@@ -293,10 +300,18 @@ the live-conformance receipt, reconstruct scalar features and scores and packed
 predictions from the durable child and exact corpus, require the native vectors
 to agree, verify the configured `ptmrt` bytes against the receipt digest, rerun
 native inference, and reconstruct the complete paired drift audit. Controllers
-recovering a history that contains a reopen therefore require the trusted
-`ptmrt` path at construction. A self-asserted `ptmrt_verified` Boolean or a
+recovering a current child lineage—or a history that contains a reopen—require
+the trusted `ptmrt` path at construction. A self-asserted `ptmrt_verified` Boolean or a
 structurally valid receipt fabricated from scalar outputs cannot authorize
 restoration.
+
+Recovery also reconciles every crash-interrupted durable intermediate. An
+orphaned reservation is abandoned-but-spent; a durable candidate is
+deterministically approved or rejected from its immutable audit; an approved
+promotion is activated; and a durable reopen request restores its authorized
+parent. Reconciliation loops under the event lock until it reaches a terminal
+route. Kill-point tests cover reservation, `candidate_created`,
+`promotion_approved`, and `reopen_requested`.
 
 The same replay engine is authoritative while the process is live. It returns
 the active route, registered dataset, pending reservation, candidate,
@@ -328,16 +343,22 @@ restoration signatures must all agree with the durable child generation. A
 different valid artifact that merely matches the finite holdout cannot be
 attached to the child's adaptive lineage.
 
-New candidate-set lineages use `ptm.model-generation-lineage.v5` and bind the
-candidate selection ID. Recovery reloads the complete candidate set and
+New candidate-set lineages use `ptm.model-generation-lineage.v6` and bind the
+candidate-selection and native-promotion-evidence IDs. Recovery reloads the complete candidate set and
 selection, reconstructs the invention session from durable evidence, reruns
 the byte-attested GNU Prolog collective, repeats independent proposal review,
 and replays exact adaptation for all alternative snapshots/manifests and
 preprocessing contracts. It then recomputes paired metrics from the durable
 adaptation corpus and requires the selected outcome to match the deployed
-child. Legacy v4 lineage objects remain readable for previously durable
-exactly-one episodes, but `record_candidate()` rejects v4 for every new
-`candidate_created` transition; backward compatibility is recovery-only.
+child. Legacy v4 and v5 lineage objects remain readable for previously durable
+episodes, but `record_candidate()` rejects both for every new
+`candidate_created` transition; backward compatibility is recovery-only. That
+recovery never trusts the legacy audit's serialized native-verification bit.
+It requires a configured trusted `ptmrt`, hashes the executable before and
+after rerunning the durable promotion holdout, and reconstructs the complete
+promotion audit before routing or advancing a v4/v5 lineage. If fresh native
+re-attestation is unavailable or disagrees, recovery fails without appending a
+promotion or activation event.
 
 An `AdaptiveRestorationBundle` binds the parent generation to:
 
@@ -361,6 +382,11 @@ runtime. `python.random` state is explicitly versioned; long-term
 cross-version or Python/C++ adaptive continuation is not claimed. A future
 PTM-owned PRNG can replace that dependency under a new snapshot schema.
 
+Snapshot envelopes validate bounded dimensions, the clause-feature product,
+state-matrix shape and TA ranges, model configuration, and RNG state before
+constructing a scalar machine. A tiny hostile JSON object cannot force a large
+allocation merely by declaring enormous dimensions.
+
 ## Typed events
 
 The service emits lifecycle events such as `parent_registered`,
@@ -381,7 +407,8 @@ durable lifecycle transition.
 - the `ptmrt_trained_parent_*` CTest cases
 - the required `Trained-parent GNU Prolog / native lifecycle` CI job
 
-The next PTA breadth milestone should prove a De-escalation PTA lifecycle under
-this recurrent promotion/restoration substrate. Intervals, categorical groups,
-cross-PTA selection, CoTM/shared weights, regression, graph, patch/CTM, and
-other families remain outside the implemented exact target set.
+The first literal-equivalence contraction through this substrate is specified
+by [De-escalation PTA model generations](deescalation-model-generation.md).
+Intervals, categorical groups, literal/clause subsumption, cross-PTA selection,
+CoTM/shared weights, regression, graph, patch/CTM, and other families remain
+outside the implemented exact target set.

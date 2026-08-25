@@ -14,6 +14,7 @@ from prolog_tsetlin.model_generation import (
     AdaptiveSnapshotEnvelope,
     CorpusExample,
     CorpusRole,
+    DeescalationCorpora,
     DriftAuditPolicy,
     EvidenceUsage,
     EvidenceUsagePurpose,
@@ -21,13 +22,17 @@ from prolog_tsetlin.model_generation import (
     LabeledCorpus,
     LiveRuntimeConformanceEvidence,
     LifecycleCorpora,
+    LiteralContractionLineage,
     ModelGeneration,
     ModelGenerationError,
     ModelGenerationLineage,
     OrderedLiteralManifest,
+    PREVIOUS_LINEAGE_SCHEMA,
     PromotionAuditPolicy,
     PromotionAuditSnapshot,
+    PromotionRuntimeConformanceEvidence,
     PrologInventionEvidence,
+    PrologDeescalationEvidence,
     RuntimeConformanceReport,
     ThresholdCandidateBudget,
     ThresholdCandidateSelection,
@@ -40,6 +45,7 @@ from prolog_tsetlin.model_generation import (
 )
 from prolog_tsetlin.model_artifact import PackedTMInferenceArtifact
 from prolog_tsetlin.pta import (
+    PTACollectiveProductCount,
     PTAEscalationProposal,
     PTAInsight,
     PTAReasoningSession,
@@ -55,6 +61,8 @@ from prolog_tsetlin.services.model_generation import (
     compile_generation_artifact,
     execute_trained_parent_lifecycle,
     execute_trained_parent_lifecycle_with_candidates,
+    execute_literal_deescalation_lifecycle,
+    invent_literal_contraction_for_corpus,
     invent_threshold_candidates_for_corpus,
     reopen_and_restore_for_drift,
     verify_artifact_with_ptmrt,
@@ -318,6 +326,88 @@ def _multi_field_parent() -> tuple[ScalarBinaryTsetlinMachine, OrderedLiteralMan
     return machine, OrderedLiteralManifest.from_catalog(catalog)
 
 
+def _deescalation_fixture() -> tuple[
+    LabeledCorpus,
+    DeescalationCorpora,
+    LabeledCorpus,
+    ScalarBinaryTsetlinMachine,
+    OrderedLiteralManifest,
+]:
+    def make(
+        role: CorpusRole,
+        first_id: int,
+        values: tuple[float, ...],
+        labels: tuple[int, ...],
+    ) -> LabeledCorpus:
+        return LabeledCorpus(
+            "thermostat-deescalation-v1",
+            role,
+            tuple(
+                CorpusExample(
+                    first_id + index,
+                    {"temperature": value},
+                    label,
+                )
+                for index, (value, label) in enumerate(zip(values, labels))
+            ),
+        )
+
+    parent_training = make(
+        CorpusRole.PARENT_TRAINING,
+        20_000,
+        (50.0, 60.0, 70.0, 74.0, 76.0, 80.0, 90.0, 100.0),
+        (0, 0, 0, 0, 1, 1, 1, 1),
+    )
+    proof = make(
+        CorpusRole.DEESCALATION_PROOF,
+        20_100,
+        (51.0, 69.0, 77.0, 91.0),
+        (0, 0, 1, 1),
+    )
+    confirmation = make(
+        CorpusRole.DEESCALATION_CONFIRMATION,
+        20_200,
+        (52.0, 68.0, 78.0, 92.0),
+        (0, 0, 1, 1),
+    )
+    promotion = make(
+        CorpusRole.PROMOTION,
+        20_300,
+        (53.0, 67.0, 79.0, 93.0),
+        (0, 0, 1, 1),
+    )
+    live = make(
+        CorpusRole.LIVE,
+        20_400,
+        (54.0, 66.0, 75.25, 75.75),
+        (0, 0, 1, 1),
+    )
+    schema = FeatureSchema.from_fields(temperature=FieldKind.NUMBER)
+    catalog = LiteralCatalog(schema)
+    catalog.numeric_ge("temperature", 76.0)
+    catalog.numeric_ge("temperature", 75.0)
+    machine = ScalarBinaryTsetlinMachine(
+        1,
+        2,
+        states_per_action=20,
+        specificity=3.0,
+        threshold=10,
+        seed=23,
+    )
+    parent_snapshot = replace(
+        machine.snapshot(),
+        states=((20, 20, 21, 20),),
+    )
+    machine.restore(parent_snapshot)
+    return (
+        parent_training,
+        DeescalationCorpora(proof, confirmation, promotion),
+        live,
+        machine,
+        OrderedLiteralManifest.from_catalog(catalog),
+    )
+
+
 def _session(corpus: LabeledCorpus) -> PTAReasoningSession:
     session = PTAReasoningSession(corpus.dataset_id)
     for example in corpus.examples:
@@ -445,6 +535,286 @@ def test_input_pta_rejects_a_truncated_candidate_set() -> None:
         )
 
 
+@pytest.mark.skipif(not _has_gprolog(), reason="GNU Prolog is required")
+def test_deescalation_pta_attests_complete_literal_equivalence() -> None:
+    _, corpora, _, parent, manifest = _deescalation_fixture()
+
+    invention = invent_literal_contraction_for_corpus(
+        corpora.proof,
+        parent.snapshot(),
+        manifest,
+        maximum_candidates=4,
+    )
+
+    assert isinstance(invention.evidence, PrologDeescalationEvidence)
+    assert invention.evidence.equivalent_pairs == (
+        tuple(sorted(manifest.literal_ids)),
+    )
+    assert invention.evidence.surviving_literal_id == manifest.literal_ids[0]
+    assert invention.evidence.removed_literal_id == manifest.literal_ids[1]
+    assert invention.evidence.session_digest == (
+        model_generation_service.content_digest(invention.session.to_dict())
+    )
+    assert PrologDeescalationEvidence.from_dict(
+        invention.evidence.to_dict()
+    ) == invention.evidence
+
+
+@pytest.mark.skipif(not _has_gprolog(), reason="GNU Prolog is required")
+def test_deescalation_pta_rejects_truncated_equivalence_set() -> None:
+    schema = FeatureSchema.from_fields(temperature=FieldKind.NUMBER)
+    catalog = LiteralCatalog(schema)
+    catalog.numeric_ge("temperature", 76.0)
+    catalog.numeric_ge("temperature", 75.0)
+    catalog.numeric_ge("temperature", 74.0)
+    manifest = OrderedLiteralManifest.from_catalog(catalog)
+    machine = ScalarBinaryTsetlinMachine(1, 3, seed=5)
+    proof = LabeledCorpus(
+        "thermostat-deescalation-budget-v1",
+        CorpusRole.DEESCALATION_PROOF,
+        (
+            CorpusExample(0, {"temperature": 60.0}, 0),
+            CorpusExample(1, {"temperature": 80.0}, 1),
+        ),
+    )
+
+    with pytest.raises(ModelGenerationError, match="exceeds its explicit budget"):
+        invent_literal_contraction_for_corpus(
+            proof,
+            machine.snapshot(),
+            manifest,
+            maximum_candidates=2,
+        )
+
+
+@pytest.mark.skipif(not _has_gprolog(), reason="GNU Prolog is required")
+def test_deescalation_pta_rejects_self_attested_incomplete_valid_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = FeatureSchema.from_fields(temperature=FieldKind.NUMBER)
+    catalog = LiteralCatalog(schema)
+    for threshold in (76.0, 75.0, 74.0):
+        catalog.numeric_ge("temperature", threshold)
+    manifest = OrderedLiteralManifest.from_catalog(catalog)
+    machine = ScalarBinaryTsetlinMachine(1, 3, seed=5)
+    proof = LabeledCorpus(
+        "thermostat-deescalation-completeness-v1",
+        CorpusRole.DEESCALATION_PROOF,
+        (
+            CorpusExample(0, {"temperature": 60.0}, 0),
+            CorpusExample(1, {"temperature": 80.0}, 1),
+        ),
+    )
+    real_run = model_generation_service.PTACollectiveService.run
+
+    def omit_one_valid_pair(self, *args, **kwargs):
+        result = real_run(self, *args, **kwargs)
+        redundancies = tuple(
+            item for item in result.insights if item.kind == "literal_redundant"
+        )
+        assert len(redundancies) == 3
+        omitted = redundancies[0]
+        retained = tuple(item for item in result.insights if item != omitted)
+        counts = dict(result.product_counts)
+        counts["literal_redundancies"] = PTACollectiveProductCount(2, 2)
+        return replace(result, insights=retained, product_counts=counts)
+
+    monkeypatch.setattr(
+        model_generation_service.PTACollectiveService,
+        "run",
+        omit_one_valid_pair,
+    )
+    with pytest.raises(ModelGenerationError, match="independent Python"):
+        invent_literal_contraction_for_corpus(
+            proof,
+            machine.snapshot(),
+            manifest,
+            maximum_candidates=4,
+        )
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_literal_deescalation_lifecycle_contracts_promotes_and_restores(
+    tmp_path: Path,
+) -> None:
+    parent_training, corpora, live, parent, manifest = _deescalation_fixture()
+    original_snapshot = parent.snapshot()
+    store = ModelGenerationStore(tmp_path / "deescalation-store")
+
+    result = execute_literal_deescalation_lifecycle(
+        parent_snapshot=original_snapshot,
+        parent_manifest=manifest,
+        parent_training_corpus=parent_training,
+        corpora=corpora,
+        maximum_candidates=4,
+        promotion_policy=PromotionAuditPolicy(
+            4,
+            require_strict_improvement=False,
+            maximum_regressions=0,
+        ),
+        store=store,
+        ptmrt_executable=_ptmrt_path(),
+    )
+
+    assert isinstance(result.lineage, LiteralContractionLineage)
+    assert LiteralContractionLineage.from_dict(
+        result.lineage.to_dict()
+    ) == result.lineage
+    assert result.contracted_parent.snapshot.snapshot.number_of_features == 1
+    assert result.contracted_parent.manifest.literals == manifest.literals[:1]
+    assert result.contracted_parent.snapshot.snapshot.states == ((21, 20),)
+    assert result.contracted_parent.snapshot.snapshot.rng_state == (
+        original_snapshot.rng_state
+    )
+    assert result.promotion_audit.accepted
+    assert result.promotion_audit.parent_errors == (
+        result.promotion_audit.child_errors
+    )
+    assert result.promotion_audit.regressions == 0
+    assert result.conformance.exact
+    assert store.load_deescalation_evidence(
+        result.deescalation_evidence.evidence_id
+    ) == result.deescalation_evidence
+    assert PromotionRuntimeConformanceEvidence.from_dict(
+        result.promotion_conformance_evidence.to_dict()
+    ) == result.promotion_conformance_evidence
+    assert ModelGenerationController(
+        store, ptmrt_executable=_ptmrt_path()
+    ).active_generation_id == result.child_generation.generation_id
+
+    drift, restored = reopen_and_restore_for_drift(
+        result,
+        live,
+        DriftAuditPolicy(
+            minimum_observations=4,
+            minimum_regressions=2,
+            minimum_regression_rate=0.5,
+            minimum_error_increase=2,
+            minimum_observations_per_class=2,
+        ),
+    )
+    assert drift.parent_errors == 0
+    assert drift.child_errors == 2
+    assert drift.regressions == 2
+    assert restored.snapshot.snapshot == original_snapshot
+    assert restored.manifest == manifest
+    assert result.controller.active_generation_id == (
+        result.parent_generation.generation_id
+    )
+
+    original_next = ScalarBinaryTsetlinMachine(
+        original_snapshot.number_of_clauses,
+        original_snapshot.number_of_features,
+        states_per_action=original_snapshot.states_per_action,
+        specificity=original_snapshot.specificity,
+        threshold=original_snapshot.threshold,
+        seed=0,
+    )
+    original_next.restore(original_snapshot)
+    update = manifest.build_catalog().encode((parent_training.records[0],)).ta
+    original_next.fit_literal_batch(update, (parent_training.labels[0],), epochs=1)
+    restored.machine.fit_literal_batch(
+        update, (parent_training.labels[0],), epochs=1
+    )
+    assert restored.machine.snapshot() == original_next.snapshot()
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_literal_deescalation_rejects_confirmation_divergence(
+    tmp_path: Path,
+) -> None:
+    parent_training, corpora, _, parent, manifest = _deescalation_fixture()
+    divergent_confirmation = LabeledCorpus(
+        corpora.confirmation.dataset_id,
+        CorpusRole.DEESCALATION_CONFIRMATION,
+        (
+            CorpusExample(21_000, {"temperature": 55.5}, 0),
+            CorpusExample(21_001, {"temperature": 65.5}, 0),
+            CorpusExample(21_002, {"temperature": 75.5}, 1),
+            CorpusExample(21_003, {"temperature": 85.5}, 1),
+        ),
+    )
+    divergent = DeescalationCorpora(
+        corpora.proof,
+        divergent_confirmation,
+        corpora.promotion,
+    )
+    store = ModelGenerationStore(tmp_path / "deescalation-divergence-store")
+
+    with pytest.raises(ModelGenerationError, match="confirmation corpus"):
+        execute_literal_deescalation_lifecycle(
+            parent_snapshot=parent.snapshot(),
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=divergent,
+            maximum_candidates=4,
+            promotion_policy=PromotionAuditPolicy(
+                4,
+                require_strict_improvement=False,
+                maximum_regressions=0,
+            ),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+    assert store.read_events()[-1].kind is LifecycleEventKind.EVIDENCE_ABANDONED
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_literal_deescalation_admission_reconstructs_exact_contraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_training, corpora, _, parent, manifest = _deescalation_fixture()
+    real_contract = model_generation_service.contract_parent_with_equivalent_literal
+    calls = 0
+
+    def inject_unattested_contraction(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        contracted = real_contract(*args, **kwargs)
+        if calls != 1:
+            return contracted
+        snapshot = contracted.snapshot.snapshot
+        states = [list(row) for row in snapshot.states]
+        states[0][0] += 1
+        forged = replace(snapshot, states=tuple(tuple(row) for row in states))
+        return replace(
+            contracted,
+            snapshot=AdaptiveSnapshotEnvelope(forged),
+        )
+
+    monkeypatch.setattr(
+        model_generation_service,
+        "contract_parent_with_equivalent_literal",
+        inject_unattested_contraction,
+    )
+    store = ModelGenerationStore(tmp_path / "unattested-contraction-store")
+    with pytest.raises(ModelGenerationError, match="cannot be reconstructed"):
+        execute_literal_deescalation_lifecycle(
+            parent_snapshot=parent.snapshot(),
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=corpora,
+            maximum_candidates=4,
+            promotion_policy=PromotionAuditPolicy(
+                4,
+                require_strict_improvement=False,
+                maximum_regressions=0,
+            ),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+    assert calls >= 2
+
+
 @pytest.mark.skipif(
     not _has_gprolog() or _ptmrt_path() is None,
     reason="live GNU Prolog and a built ptmrt are required",
@@ -512,6 +882,7 @@ def test_multi_candidate_lifecycle_selects_before_promotion_and_recovers(
     legacy_lineage = replace(
         result.lineage,
         candidate_selection_id=None,
+        promotion_conformance_evidence_id=None,
         schema="ptm.model-generation-lineage.v4",
     )
     with pytest.raises(ModelGenerationError, match="current lineage schema"):
@@ -710,6 +1081,35 @@ def test_snapshot_envelope_round_trip_preserves_integer_specificity(
     assert restored == envelope
     assert type(restored.snapshot.specificity) is int
     assert restored.snapshot_id == envelope.snapshot_id
+
+
+def test_snapshot_envelope_rejects_huge_declared_dimensions_before_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent, _ = _parent()
+    forged = AdaptiveSnapshotEnvelope(parent.snapshot()).to_dict()
+    raw = forged["snapshot"]
+    raw["number_of_clauses"] = 1_000_000_000
+    raw["number_of_features"] = 1_000_000_000
+    raw["states"] = [[1, 1]]
+    forged["snapshot_id"] = model_generation_service.content_digest(
+        {
+            "schema": forged["schema"],
+            "rng_algorithm": forged["rng_algorithm"],
+            "snapshot": raw,
+        }
+    )
+
+    def allocation_must_not_run(*args, **kwargs):
+        raise AssertionError("hostile snapshot reached TM allocation")
+
+    monkeypatch.setattr(
+        model_generation_service.ScalarBinaryTsetlinMachine,
+        "__init__",
+        allocation_must_not_run,
+    )
+    with pytest.raises(ModelGenerationError, match="outside its bounds"):
+        AdaptiveSnapshotEnvelope.from_dict(forged)
 
 
 def test_promotion_is_paired_and_requires_exact_runtime_conformance() -> None:
@@ -1120,12 +1520,17 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         result.candidate_selection.selection_id
     )
     assert result.controller.active_generation_id == result.child_generation.generation_id
+    assert store.load_promotion_conformance(
+        result.promotion_conformance_evidence.evidence_id
+    ) == result.promotion_conformance_evidence
     assert isinstance(result.controller.last_telemetry_error, RuntimeError)
     assert str(result.controller.last_telemetry_error) == (
         "injected telemetry sink failure"
     )
     # A process restart derives routing from the durable event chain.
-    assert ModelGenerationController(store).active_generation_id == (
+    assert ModelGenerationController(
+        store, ptmrt_executable=_ptmrt_path()
+    ).active_generation_id == (
         result.child_generation.generation_id
     )
 
@@ -1154,10 +1559,35 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         dataset_id=forged_usage.dataset_id,
     )
     with pytest.raises(ModelGenerationError, match="fingerprint"):
-        ModelGenerationController(forged_evidence_store)
+        ModelGenerationController(
+            forged_evidence_store, ptmrt_executable=_ptmrt_path()
+        )
 
     with pytest.raises(ModelGenerationError, match="reopen request"):
         result.controller.restore_parent(result.restoration_bundle)
+
+    def prove_promotion_replay_runs_native(*args, **kwargs):
+        del args, kwargs
+        raise ModelGenerationError("injected promotion native replay")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            model_generation_service,
+            "_verify_snapshot_records_with_ptmrt",
+            prove_promotion_replay_runs_native,
+        )
+        with pytest.raises(ModelGenerationError, match="promotion native replay"):
+            result.controller.record_candidate(result.lineage)
+
+    self_attested_lineage = replace(
+        result.lineage,
+        promotion_conformance_evidence_id="sha256:" + "f" * 64,
+    )
+    store.put_lineage(self_attested_lineage)
+    with pytest.raises(
+        ModelGenerationError, match="promotion conformance evidence is unavailable"
+    ):
+        result.controller.record_candidate(self_attested_lineage)
 
     with pytest.raises(ModelGenerationError, match="active generation"):
         result.controller.record_candidate(result.lineage)
@@ -1272,7 +1702,9 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         drift_audit_id=result.promotion_audit.audit_id,
     )
     with pytest.raises(ModelGenerationError, match="reopen request"):
-        ModelGenerationController(unauthorized_restore_store)
+        ModelGenerationController(
+            unauthorized_restore_store, ptmrt_executable=_ptmrt_path()
+        )
 
     forged_reopen_root = tmp_path / "forged-reopen-store"
     shutil.copytree(store.root, forged_reopen_root)
@@ -1320,7 +1752,9 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         evidence_usage_id=forged_live_usage.usage_id,
     )
     with pytest.raises(ModelGenerationError, match="conformance evidence"):
-        ModelGenerationController(forged_reopen_store)
+        ModelGenerationController(
+            forged_reopen_store, ptmrt_executable=_ptmrt_path()
+        )
 
     forged_receipt_root = tmp_path / "forged-receipt-store"
     shutil.copytree(store.root, forged_receipt_root)
@@ -1382,21 +1816,29 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             forged_receipt_store, ptmrt_executable=_ptmrt_path()
         )
 
-    def block_native_verification(*args, **kwargs):
-        del args, kwargs
-        raise ModelGenerationError("injected native verification requirement")
-
     failed_live = _corpus(
         CorpusRole.LIVE,
         450,
         (45, 46, 47, 48, 102, 103, 104, 105),
         (1, 1, 1, 1, 0, 0, 0, 0),
     )
+    real_native_verification = (
+        model_generation_service._verify_snapshot_records_with_ptmrt
+    )
+
+    def block_live_native_verification(*args, **kwargs):
+        records = args[5] if len(args) > 5 else kwargs["records"]
+        if tuple(records) == failed_live.records:
+            raise ModelGenerationError(
+                "injected native verification requirement"
+            )
+        return real_native_verification(*args, **kwargs)
+
     with monkeypatch.context() as scoped:
         scoped.setattr(
             model_generation_service,
             "_verify_snapshot_records_with_ptmrt",
-            block_native_verification,
+            block_live_native_verification,
         )
         with pytest.raises(ModelGenerationError, match="native verification"):
             result.controller.request_reopen(
@@ -1608,6 +2050,25 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
         verified_id = verify_artifact_with_ptmrt(
             _ptmrt_path(), artifact_path, artifact.artifact_id
         )
+        promotion_vectors = (
+            model_generation_service._verify_snapshot_records_with_ptmrt(
+                _ptmrt_path(),
+                artifact_path,
+                adapted_child.snapshot,
+                adapted_child.manifest,
+                artifact,
+                promotion_corpus.records,
+            )
+        )
+        promotion_evidence = (
+            model_generation_service._promotion_conformance_evidence(
+                generation,
+                promotion_corpus,
+                promotion_vectors,
+                _ptmrt_path(),
+            )
+        )
+        store.put_promotion_conformance(promotion_evidence)
         conformance = audit_runtime_conformance(
             adapted_child,
             artifact,
@@ -1639,6 +2100,7 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
             adaptive_behavior_id=behavior.behavior_id,
             restoration_bundle_id=result.restoration_bundle.bundle_id,
             promotion_audit_id=audit.audit_id,
+            promotion_conformance_evidence_id=promotion_evidence.evidence_id,
             invention_evidence_id=result.candidate_set.candidate_set_id,
             evidence_usage_id=usage.usage_id,
             activation_sequence=2,
@@ -1654,7 +2116,7 @@ def test_live_trained_parent_loop_restores_bit_exact_parent(
                 result.lineage.origin_proposal_provenance_id
             ),
             candidate_selection_id=selection.selection_id,
-            schema="ptm.model-generation-lineage.v5",
+            schema=model_generation_service.LINEAGE_SCHEMA,
         )
         store.put_lineage(lineage)
         return generation, lineage, audit
@@ -1994,7 +2456,7 @@ def test_event_head_publication_failure_restores_previous_checkpoint(
     not _has_gprolog() or _ptmrt_path() is None,
     reason="live GNU Prolog and a built ptmrt are required",
 )
-def test_failed_activation_recovers_the_last_durable_parent_route(
+def test_failed_activation_is_completed_idempotently_during_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     parent_training, corpora, _ = _fixture_corpora()
@@ -2023,11 +2485,177 @@ def test_failed_activation_recovers_the_last_durable_parent_route(
 
     events = store.read_events()
     assert events[-1].kind is LifecycleEventKind.PROMOTION_APPROVED
-    parent_id = events[0].generation_id
-    controller = ModelGenerationController(store)
-    assert controller.active_generation_id == parent_id
-    lineage = store.load_lineage(events[-1].details["lineage_id"])
-    audit = store.load_audit(events[-1].details["audit_id"])
-    with pytest.raises(OSError, match="injected"):
-        controller.activate_child(lineage, audit)
-    assert controller.active_generation_id == parent_id
+    child_id = events[-1].generation_id
+    recovered_store = ModelGenerationStore(store.root)
+    controller = ModelGenerationController(
+        recovered_store, ptmrt_executable=_ptmrt_path()
+    )
+    assert controller.active_generation_id == child_id
+    assert recovered_store.read_events()[-1].kind is LifecycleEventKind.ACTIVATED
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_candidate_created_is_completed_idempotently_during_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_training, corpora, _ = _fixture_corpora()
+    parent, manifest = _parent()
+    store = ModelGenerationStore(tmp_path / "candidate-recovery-store")
+    append_event = store.append_event
+
+    def fail_approval(kind, generation_id, **details):
+        if kind is LifecycleEventKind.PROMOTION_APPROVED:
+            raise OSError("injected durable approval failure")
+        return append_event(kind, generation_id, **details)
+
+    monkeypatch.setattr(store, "append_event", fail_approval)
+    with pytest.raises(OSError, match="approval failure"):
+        execute_trained_parent_lifecycle(
+            parent_snapshot=parent.snapshot(),
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=corpora,
+            numeric_field="temperature",
+            adaptation_epochs=5,
+            promotion_policy=PromotionAuditPolicy(8),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+
+    events = store.read_events()
+    assert events[-1].kind is LifecycleEventKind.CANDIDATE_CREATED
+    child_id = events[-1].generation_id
+    recovered_store = ModelGenerationStore(store.root)
+    controller = ModelGenerationController(
+        recovered_store, ptmrt_executable=_ptmrt_path()
+    )
+    assert controller.active_generation_id == child_id
+    assert [event.kind for event in recovered_store.read_events()[-2:]] == [
+        LifecycleEventKind.PROMOTION_APPROVED,
+        LifecycleEventKind.ACTIVATED,
+    ]
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_legacy_v5_candidate_recovery_requires_fresh_native_reattestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_training, corpora, _ = _fixture_corpora()
+    parent, manifest = _parent()
+    store = ModelGenerationStore(tmp_path / "legacy-candidate-recovery-store")
+    append_event = store.append_event
+    put_lineage = store.put_lineage
+    captured: list[ModelGenerationLineage] = []
+
+    def capture_lineage(lineage):
+        assert isinstance(lineage, ModelGenerationLineage)
+        current_path = put_lineage(lineage)
+        legacy = replace(
+            lineage,
+            promotion_conformance_evidence_id=None,
+            schema=PREVIOUS_LINEAGE_SCHEMA,
+        )
+        put_lineage(legacy)
+        captured.append(legacy)
+        return current_path
+
+    def write_legacy_candidate(kind, generation_id, **details):
+        if kind is LifecycleEventKind.CANDIDATE_CREATED:
+            assert len(captured) == 1
+            details["lineage_id"] = captured[0].lineage_id
+        if kind is LifecycleEventKind.PROMOTION_APPROVED:
+            raise OSError("injected durable legacy approval failure")
+        return append_event(kind, generation_id, **details)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(store, "put_lineage", capture_lineage)
+        scoped.setattr(store, "append_event", write_legacy_candidate)
+        with pytest.raises(ModelGenerationError, match="legacy approval failure"):
+            execute_trained_parent_lifecycle(
+                parent_snapshot=parent.snapshot(),
+                parent_manifest=manifest,
+                parent_training_corpus=parent_training,
+                corpora=corpora,
+                numeric_field="temperature",
+                adaptation_epochs=5,
+                promotion_policy=PromotionAuditPolicy(8),
+                store=store,
+                ptmrt_executable=_ptmrt_path(),
+            )
+
+    assert len(captured) == 1
+    legacy = captured[0]
+    assert store.read_events()[-1].kind is LifecycleEventKind.CANDIDATE_CREATED
+    before = store.read_events()
+
+    def fail_native_reattestation(*args, **kwargs):
+        del args, kwargs
+        raise ModelGenerationError("injected legacy native re-attestation failure")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            model_generation_service,
+            "_verify_snapshot_records_with_ptmrt",
+            fail_native_reattestation,
+        )
+        with pytest.raises(ModelGenerationError, match="native re-attestation"):
+            ModelGenerationController(
+                store, ptmrt_executable=_ptmrt_path()
+            )
+    assert store.read_events() == before
+
+    controller = ModelGenerationController(
+        store, ptmrt_executable=_ptmrt_path()
+    )
+    assert controller.active_generation_id == legacy.child_generation_id
+    assert [event.kind for event in store.read_events()[-2:]] == [
+        LifecycleEventKind.PROMOTION_APPROVED,
+        LifecycleEventKind.ACTIVATED,
+    ]
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_reopen_requested_is_completed_idempotently_during_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_training, corpora, live = _fixture_corpora()
+    parent, manifest = _parent()
+    store = ModelGenerationStore(tmp_path / "reopen-recovery-store")
+    result = execute_trained_parent_lifecycle(
+        parent_snapshot=parent.snapshot(),
+        parent_manifest=manifest,
+        parent_training_corpus=parent_training,
+        corpora=corpora,
+        numeric_field="temperature",
+        adaptation_epochs=5,
+        promotion_policy=PromotionAuditPolicy(8),
+        store=store,
+        ptmrt_executable=_ptmrt_path(),
+    )
+    append_event = store.append_event
+
+    def fail_restoration(kind, generation_id, **details):
+        if kind is LifecycleEventKind.PARENT_RESTORED:
+            raise OSError("injected durable restoration failure")
+        return append_event(kind, generation_id, **details)
+
+    monkeypatch.setattr(store, "append_event", fail_restoration)
+    with pytest.raises(OSError, match="restoration failure"):
+        reopen_and_restore_for_drift(result, live, STRICT_DRIFT_POLICY)
+    assert store.read_events()[-1].kind is LifecycleEventKind.REOPEN_REQUESTED
+
+    recovered_store = ModelGenerationStore(store.root)
+    controller = ModelGenerationController(
+        recovered_store, ptmrt_executable=_ptmrt_path()
+    )
+    assert controller.active_generation_id == result.parent_generation.generation_id
+    assert recovered_store.read_events()[-1].kind is LifecycleEventKind.PARENT_RESTORED

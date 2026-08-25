@@ -16,6 +16,7 @@ docs/architecture/adr/template.md,architecture,adr,proposed,record,yes,docs/arch
 docs/architecture/class-ii-lifecycle.md,architecture,contract,current,authoritative,yes,docs/architecture/class-ii-lifecycle.md,retain
 docs/architecture/class-ii-persistence.md,architecture,contract,current,authoritative,yes,docs/architecture/class-ii-persistence.md,retain
 docs/architecture/cuda-packed-tm.md,architecture,contract,current,authoritative,yes,docs/architecture/cuda-packed-tm.md,retain
+docs/architecture/deescalation-model-generation.md,architecture,contract,current,authoritative,yes,docs/architecture/deescalation-model-generation.md,retain
 docs/architecture/index.md,architecture,landing,current,derived,yes,docs/architecture/index.md,retain
 docs/architecture/logic-ast.md,architecture,contract,current,authoritative,yes,docs/architecture/logic-ast.md,retain
 docs/architecture/logic-class-ii-consolidation.md,architecture,contract,current,authoritative,yes,docs/architecture/logic-class-ii-consolidation.md,retain

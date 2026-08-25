@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -28,6 +29,7 @@ from .reference import (
     SNAPSHOT_SCHEMA_VERSION,
     ScalarBinaryTsetlinMachine,
     TMSnapshot,
+    contract_snapshot_equivalent_feature,
     extend_snapshot_features,
 )
 from .representation import (
@@ -49,18 +51,25 @@ ADAPTIVE_BEHAVIOR_SCHEMA = "ptm.adaptive-behavior.v2"
 INVENTION_EVIDENCE_SCHEMA = "ptm.gnu-prolog-invention-evidence.v1"
 THRESHOLD_CANDIDATE_SET_SCHEMA = "ptm.threshold-candidate-set.v1"
 THRESHOLD_CANDIDATE_SELECTION_SCHEMA = "ptm.threshold-candidate-selection.v1"
+DEESCALATION_EVIDENCE_SCHEMA = "ptm.deescalation-evidence.v1"
 GENERATION_SCHEMA = "ptm.model-generation.v1"
 PROMOTION_AUDIT_SCHEMA = "ptm.promotion-audit.v1"
+PROMOTION_CONFORMANCE_SCHEMA = "ptm.promotion-runtime-conformance.v1"
 LIVE_CONFORMANCE_SCHEMA = "ptm.live-runtime-conformance.v1"
 EVIDENCE_USAGE_SCHEMA = "ptm.model-generation-evidence-usage.v1"
 LEGACY_LINEAGE_SCHEMA = "ptm.model-generation-lineage.v4"
-LINEAGE_SCHEMA = "ptm.model-generation-lineage.v5"
+PREVIOUS_LINEAGE_SCHEMA = "ptm.model-generation-lineage.v5"
+LINEAGE_SCHEMA = "ptm.model-generation-lineage.v6"
+CONTRACTION_LINEAGE_SCHEMA = "ptm.literal-contraction-lineage.v2"
 TRAINING_SEMANTICS_VERSION = "ptm.scalar-binary-training.v1"
 PYTHON_RNG_ALGORITHM = "python.random-mt19937-state-v1"
 MAX_CORPUS_EXAMPLES = 2_048
 MAX_ADAPTATION_EPOCHS = 10_000
 MAX_THRESHOLD_CANDIDATES = 64
 MAX_THRESHOLD_FIELDS = 32
+MAX_DEESCALATION_CANDIDATES = 64
+MAX_ADAPTIVE_DIMENSION = 1 << 20
+MAX_ADAPTIVE_CLAUSE_FEATURE_PRODUCT = 1 << 20
 
 
 class ModelGenerationError(ValueError):
@@ -153,6 +162,8 @@ class CorpusRole(str, Enum):
     PARENT_TRAINING = "parent_training"
     INVENTION = "invention"
     ADAPTATION = "adaptation"
+    DEESCALATION_PROOF = "deescalation_proof"
+    DEESCALATION_CONFIRMATION = "deescalation_confirmation"
     PROMOTION = "promotion_holdout"
     LIVE = "live_drift"
 
@@ -160,6 +171,7 @@ class CorpusRole(str, Enum):
 class EvidenceUsagePurpose(str, Enum):
     PARENT_REGISTRATION = "parent_registration"
     CANDIDATE_EPISODE = "candidate_episode"
+    DEESCALATION_EPISODE = "deescalation_episode"
     LIVE_DRIFT = "live_drift"
 
 
@@ -253,6 +265,52 @@ class LifecycleCorpora:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class DeescalationCorpora:
+    proof: LabeledCorpus
+    confirmation: LabeledCorpus
+    promotion: LabeledCorpus
+
+    def __post_init__(self) -> None:
+        expected = (
+            (self.proof, CorpusRole.DEESCALATION_PROOF),
+            (self.confirmation, CorpusRole.DEESCALATION_CONFIRMATION),
+            (self.promotion, CorpusRole.PROMOTION),
+        )
+        if any(corpus.role is not role for corpus, role in expected):
+            raise ModelGenerationError("de-escalation corpus role is misplaced")
+        if len({corpus.dataset_id for corpus, _ in expected}) != 1:
+            raise ModelGenerationError(
+                "de-escalation corpora must share one dataset ID"
+            )
+        seen: set[str | int] = set()
+        fingerprints: set[str] = set()
+        for corpus, _ in expected:
+            identifiers = {item.example_id for item in corpus.examples}
+            current = {
+                content_digest({"record": item.record, "label": item.label})
+                for item in corpus.examples
+            }
+            if seen & identifiers:
+                raise ModelGenerationError(
+                    "de-escalation corpus example IDs overlap"
+                )
+            if fingerprints & current:
+                raise ModelGenerationError(
+                    "de-escalation proof, confirmation, and promotion rows "
+                    "must be independent"
+                )
+            seen.update(identifiers)
+            fingerprints.update(current)
+
+    @property
+    def digests(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (corpus.role.value, corpus.digest)
+            for corpus in (self.proof, self.confirmation, self.promotion)
+        )
+
+
 def evidence_record_fingerprint(
     dataset_id: str, example: CorpusExample
 ) -> str:
@@ -299,6 +357,11 @@ class EvidenceUsage:
                 CorpusRole.ADAPTATION,
                 CorpusRole.PROMOTION,
             ),
+            EvidenceUsagePurpose.DEESCALATION_EPISODE: (
+                CorpusRole.DEESCALATION_PROOF,
+                CorpusRole.DEESCALATION_CONFIRMATION,
+                CorpusRole.PROMOTION,
+            ),
             EvidenceUsagePurpose.LIVE_DRIFT: (CorpusRole.LIVE,),
         }[self.purpose]
         if tuple(corpus.role for corpus in self.corpora) != expected_roles:
@@ -307,6 +370,8 @@ class EvidenceUsage:
             raise ModelGenerationError("evidence usage corpora must share one dataset")
         if self.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE:
             LifecycleCorpora(*self.corpora)
+        elif self.purpose is EvidenceUsagePurpose.DEESCALATION_EPISODE:
+            DeescalationCorpora(*self.corpora)
         identifiers: set[tuple[str, str, str | int]] = set()
         fingerprints: set[str] = set()
         for corpus in self.corpora:
@@ -604,6 +669,221 @@ class PrologInventionEvidence:
         )
         if result.evidence_id != value["evidence_id"]:
             raise ModelGenerationError("GNU Prolog invention evidence digest mismatch")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class PrologDeescalationEvidence:
+    """Complete attested literal-equivalence result for one proof corpus."""
+
+    proof_corpus_digest: str
+    session_digest: str
+    parent_snapshot_id: str
+    parent_manifest_id: str
+    maximum_candidates: int
+    equivalent_pairs: tuple[tuple[int, int], ...]
+    surviving_literal_id: int
+    removed_literal_id: int
+    collective_protocol: str
+    gprolog_version: str
+    gprolog_binary_digest: str
+    module_digests: tuple[tuple[str, str], ...]
+    schema: str = DEESCALATION_EVIDENCE_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != DEESCALATION_EVIDENCE_SCHEMA:
+            raise ModelGenerationError("de-escalation evidence schema is unsupported")
+        for label, value in (
+            ("de-escalation proof corpus", self.proof_corpus_digest),
+            ("de-escalation reasoning session", self.session_digest),
+            ("de-escalation parent snapshot", self.parent_snapshot_id),
+            ("de-escalation parent manifest", self.parent_manifest_id),
+            ("GNU Prolog executable", self.gprolog_binary_digest),
+        ):
+            _require_digest(value, label)
+        if (
+            type(self.maximum_candidates) is not int
+            or not 1 <= self.maximum_candidates <= MAX_DEESCALATION_CANDIDATES
+        ):
+            raise ModelGenerationError(
+                "de-escalation candidate budget is outside its bounds"
+            )
+        if (
+            type(self.equivalent_pairs) is not tuple
+            or not 0 < len(self.equivalent_pairs) <= self.maximum_candidates
+            or tuple(sorted(set(self.equivalent_pairs))) != self.equivalent_pairs
+        ):
+            raise ModelGenerationError(
+                "de-escalation equivalent pairs are not complete and canonical"
+            )
+        for pair in self.equivalent_pairs:
+            if (
+                type(pair) is not tuple
+                or len(pair) != 2
+                or any(type(item) is not int or not 0 <= item < 1 << 64 for item in pair)
+                or pair[0] >= pair[1]
+            ):
+                raise ModelGenerationError(
+                    "de-escalation equivalent literal pair is invalid"
+                )
+        selected = tuple(sorted((self.surviving_literal_id, self.removed_literal_id)))
+        if (
+            any(
+                type(item) is not int or not 0 <= item < 1 << 64
+                for item in (self.surviving_literal_id, self.removed_literal_id)
+            )
+            or self.surviving_literal_id == self.removed_literal_id
+            or selected not in self.equivalent_pairs
+        ):
+            raise ModelGenerationError("de-escalation selected literal pair is invalid")
+        if self.collective_protocol != "PTM_PTA_COLLECTIVE_V1":
+            raise ModelGenerationError("de-escalation collective protocol is unsupported")
+        if (
+            type(self.gprolog_version) is not str
+            or not self.gprolog_version
+            or len(self.gprolog_version) > 1_024
+            or any(ord(character) < 0x20 for character in self.gprolog_version)
+        ):
+            raise ModelGenerationError("GNU Prolog version evidence is invalid")
+        if (
+            type(self.module_digests) is not tuple
+            or not self.module_digests
+            or tuple(sorted(self.module_digests)) != self.module_digests
+            or len({name for name, _ in self.module_digests})
+            != len(self.module_digests)
+        ):
+            raise ModelGenerationError("Prolog module evidence is not canonical")
+        for name, digest in self.module_digests:
+            if type(name) is not str or not name:
+                raise ModelGenerationError("Prolog module name is invalid")
+            _require_digest(digest, f"{name} module")
+
+    @property
+    def query(self) -> Mapping[str, object]:
+        return MappingProxyType(
+            {
+                "numeric_fields": (),
+                "discover_thresholds": False,
+                "discover_intervals": False,
+                "derive_deescalation": True,
+                "derive_escalation": False,
+            }
+        )
+
+    @property
+    def evidence_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "proof_corpus_digest": self.proof_corpus_digest,
+            "session_digest": self.session_digest,
+            "parent_snapshot_id": self.parent_snapshot_id,
+            "parent_manifest_id": self.parent_manifest_id,
+            "query": _thaw_json(self.query),
+            "maximum_candidates": self.maximum_candidates,
+            "equivalent_pairs": [
+                [str(left), str(right)] for left, right in self.equivalent_pairs
+            ],
+            "surviving_literal_id": str(self.surviving_literal_id),
+            "removed_literal_id": str(self.removed_literal_id),
+            "collective_protocol": self.collective_protocol,
+            "gprolog_version": self.gprolog_version,
+            "gprolog_binary_digest": self.gprolog_binary_digest,
+            "module_digests": [list(item) for item in self.module_digests],
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        result = self.canonical_payload()
+        result["evidence_id"] = self.evidence_id
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "PrologDeescalationEvidence":
+        expected = {
+            "schema",
+            "proof_corpus_digest",
+            "session_digest",
+            "parent_snapshot_id",
+            "parent_manifest_id",
+            "query",
+            "maximum_candidates",
+            "equivalent_pairs",
+            "surviving_literal_id",
+            "removed_literal_id",
+            "collective_protocol",
+            "gprolog_version",
+            "gprolog_binary_digest",
+            "module_digests",
+            "evidence_id",
+        }
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected
+            or any(
+                type(value[key]) is not str
+                for key in expected
+                - {"query", "maximum_candidates", "equivalent_pairs", "module_digests"}
+            )
+            or type(value["maximum_candidates"]) is not int
+            or not isinstance(value["query"], Mapping)
+            or not isinstance(value["equivalent_pairs"], list)
+            or not isinstance(value["module_digests"], list)
+        ):
+            raise ModelGenerationError("de-escalation evidence is malformed")
+        query = value["query"]
+        if (
+            set(query)
+            != {
+                "numeric_fields",
+                "discover_thresholds",
+                "discover_intervals",
+                "derive_deescalation",
+                "derive_escalation",
+            }
+            or query["numeric_fields"] != []
+            or query["discover_thresholds"] is not False
+            or query["discover_intervals"] is not False
+            or query["derive_deescalation"] is not True
+            or query["derive_escalation"] is not False
+            or any(
+                not isinstance(pair, list)
+                or len(pair) != 2
+                or any(type(item) is not str or not item.isdigit() for item in pair)
+                for pair in value["equivalent_pairs"]
+            )
+            or any(
+                not isinstance(item, list)
+                or len(item) != 2
+                or any(type(part) is not str for part in item)
+                for item in value["module_digests"]
+            )
+        ):
+            raise ModelGenerationError("de-escalation evidence query is malformed")
+        try:
+            result = cls(
+                proof_corpus_digest=value["proof_corpus_digest"],
+                session_digest=value["session_digest"],
+                parent_snapshot_id=value["parent_snapshot_id"],
+                parent_manifest_id=value["parent_manifest_id"],
+                maximum_candidates=value["maximum_candidates"],
+                equivalent_pairs=tuple(
+                    (int(pair[0]), int(pair[1]))
+                    for pair in value["equivalent_pairs"]
+                ),
+                surviving_literal_id=int(value["surviving_literal_id"]),
+                removed_literal_id=int(value["removed_literal_id"]),
+                collective_protocol=value["collective_protocol"],
+                gprolog_version=value["gprolog_version"],
+                gprolog_binary_digest=value["gprolog_binary_digest"],
+                module_digests=tuple(tuple(item) for item in value["module_digests"]),
+                schema=value["schema"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError("de-escalation evidence is malformed") from error
+        if result.evidence_id != value["evidence_id"]:
+            raise ModelGenerationError("de-escalation evidence digest mismatch")
         return result
 
 
@@ -1440,18 +1720,37 @@ class OrderedLiteralManifest:
 
 
 def _validate_adaptive_snapshot(snapshot: TMSnapshot) -> None:
+    if not isinstance(snapshot, TMSnapshot):
+        raise TypeError("adaptive snapshot must be TMSnapshot")
     if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION:
         raise ModelGenerationError("adaptive snapshot schema is unsupported")
-    machine = ScalarBinaryTsetlinMachine(
-        snapshot.number_of_clauses,
-        snapshot.number_of_features,
-        states_per_action=snapshot.states_per_action,
-        specificity=snapshot.specificity,
-        threshold=snapshot.threshold,
-        seed=0,
-    )
+    if (
+        type(snapshot.number_of_clauses) is not int
+        or type(snapshot.number_of_features) is not int
+        or type(snapshot.states_per_action) is not int
+        or type(snapshot.threshold) is not int
+        or type(snapshot.specificity) not in (int, float)
+        or not 0 < snapshot.number_of_clauses <= MAX_ADAPTIVE_DIMENSION
+        or not 0 < snapshot.number_of_features <= MAX_ADAPTIVE_DIMENSION
+        or snapshot.number_of_clauses * snapshot.number_of_features
+        > MAX_ADAPTIVE_CLAUSE_FEATURE_PRODUCT
+        or not 0 < snapshot.states_per_action <= 0x7FFF
+        or not 0 < snapshot.threshold <= 0x7FFFFFFF
+        or not math.isfinite(float(snapshot.specificity))
+        or snapshot.specificity <= 1.0
+    ):
+        raise ModelGenerationError(
+            "adaptive snapshot configuration is outside its bounds"
+        )
     try:
-        machine.restore(snapshot)
+        ScalarBinaryTsetlinMachine._check_snapshot_states(
+            snapshot,
+            number_of_clauses=snapshot.number_of_clauses,
+            number_of_features=snapshot.number_of_features,
+            states_per_action=snapshot.states_per_action,
+        )
+        probe = random.Random()
+        probe.setstate(snapshot.rng_state)
     except (TypeError, ValueError) as error:
         raise ModelGenerationError("adaptive snapshot is invalid") from error
 
@@ -1563,6 +1862,8 @@ class GenerationKind(str, Enum):
     TRAINED_PARENT = "trained_parent"
     EXTENDED_PARENT = "extended_parent"
     ADAPTED_CHILD = "adapted_child"
+    CONTRACTED_PARENT = "contracted_parent"
+    CONTRACTED_CHILD = "contracted_child"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1722,8 +2023,11 @@ class AdaptiveBehaviorIdentity:
 
     @classmethod
     def from_generation(cls, generation: ModelGeneration) -> "AdaptiveBehaviorIdentity":
-        if generation.kind is not GenerationKind.ADAPTED_CHILD:
-            raise ModelGenerationError("adaptive behavior requires an adapted child")
+        if generation.kind not in (
+            GenerationKind.ADAPTED_CHILD,
+            GenerationKind.CONTRACTED_CHILD,
+        ):
+            raise ModelGenerationError("adaptive behavior requires a deployable child")
         return cls(
             generation.snapshot_id,
             generation.literal_manifest_id,
@@ -1850,6 +2154,146 @@ class ExtendedParent:
     manifest: OrderedLiteralManifest
     materialized: MaterializedThresholdClause
     equivalence_case_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContractedParent:
+    parent_snapshot: AdaptiveSnapshotEnvelope
+    parent_manifest: OrderedLiteralManifest
+    snapshot: AdaptiveSnapshotEnvelope
+    manifest: OrderedLiteralManifest
+    evidence: PrologDeescalationEvidence
+    proof_case_count: int
+    confirmation_case_count: int
+
+
+def contract_parent_with_equivalent_literal(
+    parent_snapshot: TMSnapshot,
+    parent_manifest: OrderedLiteralManifest,
+    evidence: PrologDeescalationEvidence,
+    *,
+    proof_records: Sequence[Mapping[str, object]],
+    confirmation_records: Sequence[Mapping[str, object]],
+) -> ContractedParent:
+    """Build a smaller adaptive generation from an attested equivalent pair."""
+
+    parent_envelope = AdaptiveSnapshotEnvelope(parent_snapshot)
+    if (
+        parent_snapshot.number_of_features != len(parent_manifest.literals)
+        or evidence.parent_snapshot_id != parent_envelope.snapshot_id
+        or evidence.parent_manifest_id != parent_manifest.manifest_id
+    ):
+        raise ModelGenerationError(
+            "de-escalation evidence names a different parent representation"
+        )
+    try:
+        survivor_position = parent_manifest.literal_ids.index(
+            evidence.surviving_literal_id
+        )
+        removed_position = parent_manifest.literal_ids.index(
+            evidence.removed_literal_id
+        )
+    except ValueError as error:
+        raise ModelGenerationError(
+            "de-escalation literal is absent from the parent manifest"
+        ) from error
+    if survivor_position >= removed_position:
+        raise ModelGenerationError(
+            "de-escalation must preserve the earliest equivalent feature position"
+        )
+
+    proof = tuple(proof_records)
+    confirmation = tuple(confirmation_records)
+    if not proof or not confirmation:
+        raise ModelGenerationError(
+            "de-escalation requires nonempty proof and confirmation records"
+        )
+    parent_catalog = parent_manifest.build_catalog()
+    for label, records in (("proof", proof), ("confirmation", confirmation)):
+        batch = parent_catalog.encode(records).ta
+        survivor_column = tuple(
+            batch.bit(row, survivor_position) for row in range(batch.row_count)
+        )
+        removed_column = tuple(
+            batch.bit(row, removed_position) for row in range(batch.row_count)
+        )
+        if survivor_column != removed_column:
+            raise ModelGenerationError(
+                f"de-escalation literals differ on the {label} corpus"
+            )
+
+    contracted_literals = (
+        parent_manifest.literals[:removed_position]
+        + parent_manifest.literals[removed_position + 1 :]
+    )
+    contracted_manifest = OrderedLiteralManifest(
+        parent_manifest.fields, contracted_literals
+    )
+    contracted_snapshot = contract_snapshot_equivalent_feature(
+        parent_snapshot, survivor_position, removed_position
+    )
+    if (
+        contracted_manifest.literals != contracted_literals
+        or contracted_snapshot.number_of_features
+        != parent_snapshot.number_of_features - 1
+        or contracted_snapshot.number_of_clauses
+        != parent_snapshot.number_of_clauses
+        or contracted_snapshot.states_per_action != parent_snapshot.states_per_action
+        or contracted_snapshot.specificity != parent_snapshot.specificity
+        or contracted_snapshot.threshold != parent_snapshot.threshold
+        or contracted_snapshot.rng_state != parent_snapshot.rng_state
+    ):
+        raise ModelGenerationError("de-escalation structural contraction failed")
+
+    contracted_catalog = contracted_manifest.build_catalog()
+    parent_machine = _machine_from_snapshot(parent_snapshot)
+    contracted_machine = _machine_from_snapshot(contracted_snapshot)
+    for label, records in (("proof", proof), ("confirmation", confirmation)):
+        parent_batch = parent_catalog.encode(records).ta
+        contracted_batch = contracted_catalog.encode(records).ta
+        parent_rows = tuple(
+            parent_batch.row_values(index) for index in range(parent_batch.row_count)
+        )
+        contracted_rows = tuple(
+            contracted_batch.row_values(index)
+            for index in range(contracted_batch.row_count)
+        )
+        parent_results = tuple(
+            (
+                tuple(
+                    parent_machine.clause_output(clause, row)
+                    for clause in range(parent_snapshot.number_of_clauses)
+                ),
+                parent_machine.score(row),
+                parent_machine.predict_one(row),
+            )
+            for row in parent_rows
+        )
+        contracted_results = tuple(
+            (
+                tuple(
+                    contracted_machine.clause_output(clause, row)
+                    for clause in range(contracted_snapshot.number_of_clauses)
+                ),
+                contracted_machine.score(row),
+                contracted_machine.predict_one(row),
+            )
+            for row in contracted_rows
+        )
+        if parent_results != contracted_results:
+            raise ModelGenerationError(
+                f"de-escalation behavioral equivalence failed on the {label} corpus"
+            )
+
+    return ContractedParent(
+        parent_envelope,
+        parent_manifest,
+        AdaptiveSnapshotEnvelope(contracted_snapshot),
+        contracted_manifest,
+        evidence,
+        len(proof),
+        len(confirmation),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2171,6 +2615,214 @@ class RuntimeConformanceReport:
             value["ptmrt_verified"],
             value["ptmrt_artifact_id"],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionRuntimeConformanceEvidence:
+    """Replayable scalar/packed/native evidence for one promotion holdout."""
+
+    child_generation_id: str
+    artifact_id: str
+    snapshot_id: str
+    literal_manifest_id: str
+    corpus_digest: str
+    scalar_features: tuple[tuple[bool, ...], ...]
+    scalar_scores: tuple[int, ...]
+    scalar_predictions: tuple[int, ...]
+    packed_predictions: tuple[int, ...]
+    native_features: tuple[tuple[int, ...], ...]
+    native_scores: tuple[int, ...]
+    native_predictions: tuple[int, ...]
+    ptmrt_binary_digest: str
+    schema: str = PROMOTION_CONFORMANCE_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != PROMOTION_CONFORMANCE_SCHEMA:
+            raise ModelGenerationError(
+                "promotion conformance evidence schema is unsupported"
+            )
+        for label, value in (
+            ("child generation", self.child_generation_id),
+            ("artifact", self.artifact_id),
+            ("snapshot", self.snapshot_id),
+            ("literal manifest", self.literal_manifest_id),
+            ("promotion corpus", self.corpus_digest),
+            ("ptmrt executable", self.ptmrt_binary_digest),
+        ):
+            _require_digest(value, label)
+        count = len(self.scalar_features)
+        vectors = (
+            self.scalar_scores,
+            self.scalar_predictions,
+            self.packed_predictions,
+            self.native_scores,
+            self.native_predictions,
+        )
+        if (
+            count <= 0
+            or type(self.scalar_features) is not tuple
+            or type(self.native_features) is not tuple
+            or any(type(vector) is not tuple or len(vector) != count for vector in vectors)
+            or len(self.native_features) != count
+            or any(
+                type(row) is not tuple
+                or not row
+                or any(type(value) is not bool for value in row)
+                for row in self.scalar_features
+            )
+            or len({len(row) for row in self.scalar_features}) != 1
+            or any(
+                type(row) is not tuple
+                or any(type(value) is not int or value not in (0, 1) for value in row)
+                for row in self.native_features
+            )
+            or tuple(
+                tuple(int(value) for value in row)
+                for row in self.scalar_features
+            )
+            != self.native_features
+        ):
+            raise ModelGenerationError(
+                "promotion conformance vectors are invalid"
+            )
+        if any(
+            type(value) is not int
+            for value in (*self.scalar_scores, *self.native_scores)
+        ):
+            raise ModelGenerationError(
+                "promotion conformance scores must be integers"
+            )
+        if any(
+            type(value) is not int or value not in (0, 1)
+            for vector in (
+                self.scalar_predictions,
+                self.packed_predictions,
+                self.native_predictions,
+            )
+            for value in vector
+        ):
+            raise ModelGenerationError(
+                "promotion conformance predictions are invalid"
+            )
+        expected = tuple(int(score > 0) for score in self.scalar_scores)
+        if (
+            self.scalar_scores != self.native_scores
+            or self.scalar_predictions != expected
+            or self.packed_predictions != expected
+            or self.native_predictions != expected
+        ):
+            raise ModelGenerationError(
+                "promotion runtimes do not agree exactly"
+            )
+
+    @property
+    def case_count(self) -> int:
+        return len(self.scalar_features)
+
+    @property
+    def evidence_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "child_generation_id": self.child_generation_id,
+            "artifact_id": self.artifact_id,
+            "snapshot_id": self.snapshot_id,
+            "literal_manifest_id": self.literal_manifest_id,
+            "corpus_digest": self.corpus_digest,
+            "scalar_features": [list(row) for row in self.scalar_features],
+            "scalar_scores": list(self.scalar_scores),
+            "scalar_predictions": list(self.scalar_predictions),
+            "packed_predictions": list(self.packed_predictions),
+            "native_features": [list(row) for row in self.native_features],
+            "native_scores": list(self.native_scores),
+            "native_predictions": list(self.native_predictions),
+            "ptmrt_binary_digest": self.ptmrt_binary_digest,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        result = self.canonical_payload()
+        result["evidence_id"] = self.evidence_id
+        return result
+
+    @classmethod
+    def from_dict(
+        cls, value: Mapping[str, object]
+    ) -> "PromotionRuntimeConformanceEvidence":
+        expected = {
+            "schema",
+            "child_generation_id",
+            "artifact_id",
+            "snapshot_id",
+            "literal_manifest_id",
+            "corpus_digest",
+            "scalar_features",
+            "scalar_scores",
+            "scalar_predictions",
+            "packed_predictions",
+            "native_features",
+            "native_scores",
+            "native_predictions",
+            "ptmrt_binary_digest",
+            "evidence_id",
+        }
+        matrix_fields = ("scalar_features", "native_features")
+        vector_fields = (
+            "scalar_scores",
+            "scalar_predictions",
+            "packed_predictions",
+            "native_scores",
+            "native_predictions",
+        )
+        scalar_fields = expected - set(matrix_fields) - set(vector_fields)
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected
+            or any(type(value[name]) is not str for name in scalar_fields)
+            or any(
+                not isinstance(value[name], list)
+                for name in (*matrix_fields, *vector_fields)
+            )
+            or any(
+                not isinstance(row, list)
+                for name in matrix_fields
+                for row in value[name]
+            )
+        ):
+            raise ModelGenerationError(
+                "promotion conformance evidence is malformed"
+            )
+        try:
+            result = cls(
+                child_generation_id=value["child_generation_id"],
+                artifact_id=value["artifact_id"],
+                snapshot_id=value["snapshot_id"],
+                literal_manifest_id=value["literal_manifest_id"],
+                corpus_digest=value["corpus_digest"],
+                scalar_features=tuple(
+                    tuple(row) for row in value["scalar_features"]
+                ),
+                scalar_scores=tuple(value["scalar_scores"]),
+                scalar_predictions=tuple(value["scalar_predictions"]),
+                packed_predictions=tuple(value["packed_predictions"]),
+                native_features=tuple(
+                    tuple(row) for row in value["native_features"]
+                ),
+                native_scores=tuple(value["native_scores"]),
+                native_predictions=tuple(value["native_predictions"]),
+                ptmrt_binary_digest=value["ptmrt_binary_digest"],
+                schema=value["schema"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError(
+                "promotion conformance evidence is malformed"
+            ) from error
+        if result.evidence_id != value["evidence_id"]:
+            raise ModelGenerationError(
+                "promotion conformance evidence digest mismatch"
+            )
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -2748,6 +3400,7 @@ class ModelGenerationLineage:
     adaptive_behavior_id: str
     restoration_bundle_id: str
     promotion_audit_id: str
+    promotion_conformance_evidence_id: str | None
     invention_evidence_id: str
     evidence_usage_id: str
     activation_sequence: int
@@ -2762,7 +3415,11 @@ class ModelGenerationLineage:
     schema: str = LEGACY_LINEAGE_SCHEMA
 
     def __post_init__(self) -> None:
-        if self.schema not in (LEGACY_LINEAGE_SCHEMA, LINEAGE_SCHEMA):
+        if self.schema not in (
+            LEGACY_LINEAGE_SCHEMA,
+            PREVIOUS_LINEAGE_SCHEMA,
+            LINEAGE_SCHEMA,
+        ):
             raise ModelGenerationError("model-generation lineage schema is unsupported")
         for label, value in (
             ("parent generation", self.parent_generation_id),
@@ -2792,8 +3449,22 @@ class ModelGenerationLineage:
             )
         if self.schema == LINEAGE_SCHEMA:
             _require_digest(self.candidate_selection_id, "candidate selection")
+            _require_digest(
+                self.promotion_conformance_evidence_id,
+                "promotion conformance evidence",
+            )
+        elif self.schema == PREVIOUS_LINEAGE_SCHEMA:
+            _require_digest(self.candidate_selection_id, "candidate selection")
+            if self.promotion_conformance_evidence_id is not None:
+                raise ModelGenerationError(
+                    "v5 lineage cannot reference promotion conformance evidence"
+                )
         elif self.candidate_selection_id is not None:
             raise ModelGenerationError("legacy lineage cannot reference candidate selection")
+        elif self.promotion_conformance_evidence_id is not None:
+            raise ModelGenerationError(
+                "legacy lineage cannot reference promotion conformance evidence"
+            )
         if type(self.invented_literal_id) is not int or not 0 <= self.invented_literal_id < 1 << 64:
             raise ModelGenerationError("invented literal ID must be unsigned 64-bit")
 
@@ -2821,8 +3492,12 @@ class ModelGenerationLineage:
             "origin_proposal_semantic_id": self.origin_proposal_semantic_id,
             "origin_proposal_provenance_id": self.origin_proposal_provenance_id,
         }
-        if self.schema == LINEAGE_SCHEMA:
+        if self.schema in (PREVIOUS_LINEAGE_SCHEMA, LINEAGE_SCHEMA):
             result["candidate_selection_id"] = self.candidate_selection_id
+        if self.schema == LINEAGE_SCHEMA:
+            result["promotion_conformance_evidence_id"] = (
+                self.promotion_conformance_evidence_id
+            )
         return result
 
     def to_dict(self) -> dict[str, object]:
@@ -2852,8 +3527,13 @@ class ModelGenerationLineage:
             "origin_proposal_provenance_id",
             "lineage_id",
         }
-        if isinstance(value, Mapping) and value.get("schema") == LINEAGE_SCHEMA:
+        if isinstance(value, Mapping) and value.get("schema") in (
+            PREVIOUS_LINEAGE_SCHEMA,
+            LINEAGE_SCHEMA,
+        ):
             expected.add("candidate_selection_id")
+        if isinstance(value, Mapping) and value.get("schema") == LINEAGE_SCHEMA:
+            expected.add("promotion_conformance_evidence_id")
         if (
             not isinstance(value, Mapping)
             or set(value) != expected
@@ -2880,6 +3560,9 @@ class ModelGenerationLineage:
                 adaptive_behavior_id=value["adaptive_behavior_id"],
                 restoration_bundle_id=value["restoration_bundle_id"],
                 promotion_audit_id=value["promotion_audit_id"],
+                promotion_conformance_evidence_id=value.get(
+                    "promotion_conformance_evidence_id"
+                ),
                 invention_evidence_id=value["invention_evidence_id"],
                 evidence_usage_id=value["evidence_usage_id"],
                 activation_sequence=value["activation_sequence"],
@@ -2899,4 +3582,174 @@ class ModelGenerationLineage:
             raise ModelGenerationError("model-generation lineage is malformed") from error
         if result.lineage_id != value["lineage_id"]:
             raise ModelGenerationError("model-generation lineage digest mismatch")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class LiteralContractionLineage:
+    parent_generation_id: str
+    contracted_generation_id: str
+    child_generation_id: str
+    adaptive_behavior_id: str
+    restoration_bundle_id: str
+    promotion_audit_id: str
+    promotion_conformance_evidence_id: str
+    deescalation_evidence_id: str
+    evidence_usage_id: str
+    activation_sequence: int
+    previous_activated_lineage_id: str | None
+    surviving_literal_id: int
+    removed_literal_id: int
+    proof_corpus_digest: str
+    confirmation_corpus_digest: str
+    promotion_corpus_digest: str
+    schema: str = CONTRACTION_LINEAGE_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != CONTRACTION_LINEAGE_SCHEMA:
+            raise ModelGenerationError("literal-contraction lineage schema is unsupported")
+        for label, value in (
+            ("parent generation", self.parent_generation_id),
+            ("contracted generation", self.contracted_generation_id),
+            ("child generation", self.child_generation_id),
+            ("adaptive behavior", self.adaptive_behavior_id),
+            ("restoration bundle", self.restoration_bundle_id),
+            ("promotion audit", self.promotion_audit_id),
+            (
+                "promotion conformance evidence",
+                self.promotion_conformance_evidence_id,
+            ),
+            ("de-escalation evidence", self.deescalation_evidence_id),
+            ("evidence usage", self.evidence_usage_id),
+            ("de-escalation proof corpus", self.proof_corpus_digest),
+            ("de-escalation confirmation corpus", self.confirmation_corpus_digest),
+            ("promotion corpus", self.promotion_corpus_digest),
+        ):
+            _require_digest(value, label)
+        if (
+            type(self.activation_sequence) is not int
+            or self.activation_sequence <= 0
+        ):
+            raise ModelGenerationError("activation sequence must be positive")
+        if self.previous_activated_lineage_id is not None:
+            _require_digest(
+                self.previous_activated_lineage_id,
+                "previous activated lineage",
+            )
+        if (
+            any(
+                type(item) is not int or not 0 <= item < 1 << 64
+                for item in (self.surviving_literal_id, self.removed_literal_id)
+            )
+            or self.surviving_literal_id == self.removed_literal_id
+        ):
+            raise ModelGenerationError("literal-contraction identities are invalid")
+
+    @property
+    def extended_generation_id(self) -> str:
+        """Compatibility name used by the generic lifecycle event envelope."""
+
+        return self.contracted_generation_id
+
+    @property
+    def lineage_id(self) -> str:
+        return content_digest(self.canonical_payload())
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "parent_generation_id": self.parent_generation_id,
+            "contracted_generation_id": self.contracted_generation_id,
+            "child_generation_id": self.child_generation_id,
+            "adaptive_behavior_id": self.adaptive_behavior_id,
+            "restoration_bundle_id": self.restoration_bundle_id,
+            "promotion_audit_id": self.promotion_audit_id,
+            "promotion_conformance_evidence_id": (
+                self.promotion_conformance_evidence_id
+            ),
+            "deescalation_evidence_id": self.deescalation_evidence_id,
+            "evidence_usage_id": self.evidence_usage_id,
+            "activation_sequence": self.activation_sequence,
+            "previous_activated_lineage_id": self.previous_activated_lineage_id,
+            "surviving_literal_id": str(self.surviving_literal_id),
+            "removed_literal_id": str(self.removed_literal_id),
+            "proof_corpus_digest": self.proof_corpus_digest,
+            "confirmation_corpus_digest": self.confirmation_corpus_digest,
+            "promotion_corpus_digest": self.promotion_corpus_digest,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        result = self.canonical_payload()
+        result["lineage_id"] = self.lineage_id
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "LiteralContractionLineage":
+        expected = {
+            "schema",
+            "parent_generation_id",
+            "contracted_generation_id",
+            "child_generation_id",
+            "adaptive_behavior_id",
+            "restoration_bundle_id",
+            "promotion_audit_id",
+            "promotion_conformance_evidence_id",
+            "deescalation_evidence_id",
+            "evidence_usage_id",
+            "activation_sequence",
+            "previous_activated_lineage_id",
+            "surviving_literal_id",
+            "removed_literal_id",
+            "proof_corpus_digest",
+            "confirmation_corpus_digest",
+            "promotion_corpus_digest",
+            "lineage_id",
+        }
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected
+            or any(
+                type(value[key]) is not str
+                for key in expected
+                - {"activation_sequence", "previous_activated_lineage_id"}
+            )
+            or type(value["activation_sequence"]) is not int
+            or (
+                value["previous_activated_lineage_id"] is not None
+                and type(value["previous_activated_lineage_id"]) is not str
+            )
+            or not value["surviving_literal_id"].isdigit()
+            or not value["removed_literal_id"].isdigit()
+        ):
+            raise ModelGenerationError("literal-contraction lineage is malformed")
+        try:
+            result = cls(
+                parent_generation_id=value["parent_generation_id"],
+                contracted_generation_id=value["contracted_generation_id"],
+                child_generation_id=value["child_generation_id"],
+                adaptive_behavior_id=value["adaptive_behavior_id"],
+                restoration_bundle_id=value["restoration_bundle_id"],
+                promotion_audit_id=value["promotion_audit_id"],
+                promotion_conformance_evidence_id=value[
+                    "promotion_conformance_evidence_id"
+                ],
+                deescalation_evidence_id=value["deescalation_evidence_id"],
+                evidence_usage_id=value["evidence_usage_id"],
+                activation_sequence=value["activation_sequence"],
+                previous_activated_lineage_id=value[
+                    "previous_activated_lineage_id"
+                ],
+                surviving_literal_id=int(value["surviving_literal_id"]),
+                removed_literal_id=int(value["removed_literal_id"]),
+                proof_corpus_digest=value["proof_corpus_digest"],
+                confirmation_corpus_digest=value["confirmation_corpus_digest"],
+                promotion_corpus_digest=value["promotion_corpus_digest"],
+                schema=value["schema"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelGenerationError(
+                "literal-contraction lineage is malformed"
+            ) from error
+        if result.lineage_id != value["lineage_id"]:
+            raise ModelGenerationError("literal-contraction lineage digest mismatch")
         return result
