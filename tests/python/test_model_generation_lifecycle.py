@@ -27,6 +27,7 @@ from prolog_tsetlin.model_generation import (
     ModelGenerationError,
     ModelGenerationLineage,
     OrderedLiteralManifest,
+    PREVIOUS_LINEAGE_SCHEMA,
     PromotionAuditPolicy,
     PromotionAuditSnapshot,
     PromotionRuntimeConformanceEvidence,
@@ -2533,6 +2534,87 @@ def test_candidate_created_is_completed_idempotently_during_recovery(
     )
     assert controller.active_generation_id == child_id
     assert [event.kind for event in recovered_store.read_events()[-2:]] == [
+        LifecycleEventKind.PROMOTION_APPROVED,
+        LifecycleEventKind.ACTIVATED,
+    ]
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_legacy_v5_candidate_recovery_requires_fresh_native_reattestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_training, corpora, _ = _fixture_corpora()
+    parent, manifest = _parent()
+    store = ModelGenerationStore(tmp_path / "legacy-candidate-recovery-store")
+    append_event = store.append_event
+    put_lineage = store.put_lineage
+    captured: list[ModelGenerationLineage] = []
+
+    def capture_lineage(lineage):
+        assert isinstance(lineage, ModelGenerationLineage)
+        current_path = put_lineage(lineage)
+        legacy = replace(
+            lineage,
+            promotion_conformance_evidence_id=None,
+            schema=PREVIOUS_LINEAGE_SCHEMA,
+        )
+        put_lineage(legacy)
+        captured.append(legacy)
+        return current_path
+
+    def write_legacy_candidate(kind, generation_id, **details):
+        if kind is LifecycleEventKind.CANDIDATE_CREATED:
+            assert len(captured) == 1
+            details["lineage_id"] = captured[0].lineage_id
+        if kind is LifecycleEventKind.PROMOTION_APPROVED:
+            raise OSError("injected durable legacy approval failure")
+        return append_event(kind, generation_id, **details)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(store, "put_lineage", capture_lineage)
+        scoped.setattr(store, "append_event", write_legacy_candidate)
+        with pytest.raises(ModelGenerationError, match="legacy approval failure"):
+            execute_trained_parent_lifecycle(
+                parent_snapshot=parent.snapshot(),
+                parent_manifest=manifest,
+                parent_training_corpus=parent_training,
+                corpora=corpora,
+                numeric_field="temperature",
+                adaptation_epochs=5,
+                promotion_policy=PromotionAuditPolicy(8),
+                store=store,
+                ptmrt_executable=_ptmrt_path(),
+            )
+
+    assert len(captured) == 1
+    legacy = captured[0]
+    assert store.read_events()[-1].kind is LifecycleEventKind.CANDIDATE_CREATED
+    before = store.read_events()
+
+    def fail_native_reattestation(*args, **kwargs):
+        del args, kwargs
+        raise ModelGenerationError("injected legacy native re-attestation failure")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            model_generation_service,
+            "_verify_snapshot_records_with_ptmrt",
+            fail_native_reattestation,
+        )
+        with pytest.raises(ModelGenerationError, match="native re-attestation"):
+            ModelGenerationController(
+                store, ptmrt_executable=_ptmrt_path()
+            )
+    assert store.read_events() == before
+
+    controller = ModelGenerationController(
+        store, ptmrt_executable=_ptmrt_path()
+    )
+    assert controller.active_generation_id == legacy.child_generation_id
+    assert [event.kind for event in store.read_events()[-2:]] == [
         LifecycleEventKind.PROMOTION_APPROVED,
         LifecycleEventKind.ACTIVATED,
     ]

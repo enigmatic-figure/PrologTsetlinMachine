@@ -352,7 +352,13 @@ preprocessing contracts. It then recomputes paired metrics from the durable
 adaptation corpus and requires the selected outcome to match the deployed
 child. Legacy v4 and v5 lineage objects remain readable for previously durable
 episodes, but `record_candidate()` rejects both for every new
-`candidate_created` transition; backward compatibility is recovery-only.
+`candidate_created` transition; backward compatibility is recovery-only. That
+recovery never trusts the legacy audit's serialized native-verification bit.
+It requires a configured trusted `ptmrt`, hashes the executable before and
+after rerunning the durable promotion holdout, and reconstructs the complete
+promotion audit before routing or advancing a v4/v5 lineage. If fresh native
+re-attestation is unavailable or disagrees, recovery fails without appending a
+promotion or activation event.
 
 An `AdaptiveRestorationBundle` binds the parent generation to:
 

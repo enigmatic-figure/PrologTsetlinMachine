@@ -1266,6 +1266,57 @@ class ModelGenerationController:
             )
         return report
 
+    def _reattest_legacy_promotion_conformance(
+        self,
+        child_snapshot: AdaptiveSnapshotEnvelope,
+        child_manifest: OrderedLiteralManifest,
+        artifact: PackedTMInferenceArtifact,
+        corpus: LabeledCorpus,
+    ) -> RuntimeConformanceReport:
+        """Re-run native promotion evidence absent from legacy lineages."""
+
+        if corpus.role is not CorpusRole.PROMOTION:
+            raise ModelGenerationError(
+                "legacy promotion re-attestation requires the promotion holdout"
+            )
+        trusted_ptmrt = self._bind_ptmrt_executable()
+        executable_digest = _file_digest(
+            trusted_ptmrt,
+            maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
+        )
+        native = _verify_snapshot_records_with_ptmrt(
+            trusted_ptmrt,
+            self.store.artifact_path(artifact.artifact_id),
+            child_snapshot,
+            child_manifest,
+            artifact,
+            corpus.records,
+        )
+        if (
+            _file_digest(
+                trusted_ptmrt,
+                maximum_bytes=_MAX_ATTESTED_EXECUTABLE_BYTES,
+            )
+            != executable_digest
+            or native.artifact_id != artifact.artifact_id
+        ):
+            raise ModelGenerationError(
+                "legacy promotion native execution cannot be reproduced"
+            )
+        report = audit_snapshot_runtime_conformance(
+            child_snapshot,
+            child_manifest,
+            artifact,
+            corpus.records,
+            ptmrt_verified=True,
+            ptmrt_artifact_id=artifact.artifact_id,
+        )
+        if not report.exact:
+            raise ModelGenerationError(
+                "legacy promotion runtime conformance is not exact"
+            )
+        return report
+
     def _validate_lineage_graph(
         self, lineage: LifecycleLineage
     ) -> tuple[
@@ -1356,12 +1407,9 @@ class ModelGenerationController:
             ),
             None,
         )
-        promotion_conformance: RuntimeConformanceReport | None = None
+        if promotion_corpus is None:
+            raise ModelGenerationError("lineage lacks its promotion holdout")
         if lineage.promotion_conformance_evidence_id is not None:
-            if promotion_corpus is None:
-                raise ModelGenerationError(
-                    "lineage lacks its promotion holdout"
-                )
             promotion_conformance = (
                 self._validate_promotion_conformance_evidence(
                     lineage.promotion_conformance_evidence_id,
@@ -1371,6 +1419,13 @@ class ModelGenerationController:
                     child_artifact,
                     promotion_corpus,
                 )
+            )
+        else:
+            promotion_conformance = self._reattest_legacy_promotion_conformance(
+                AdaptiveSnapshotEnvelope(child_snapshot),
+                child_manifest,
+                child_artifact,
+                promotion_corpus,
             )
         if selection is None:
             invention_consistent = (
@@ -1468,14 +1523,7 @@ class ModelGenerationController:
             or audit.corpus_role is not CorpusRole.PROMOTION
             or audit.corpus_digest != lineage.promotion_corpus_digest
             or audit.conformance.artifact_id != child.inference_artifact_id
-            or (
-                lineage.schema == LINEAGE_SCHEMA
-                and promotion_conformance is None
-            )
-            or (
-                promotion_conformance is not None
-                and audit.conformance != promotion_conformance
-            )
+            or audit.conformance != promotion_conformance
             or lineage.adaptive_behavior_id
             != AdaptiveBehaviorIdentity.from_generation(child).behavior_id
             or not isinstance(child_signature, Mapping)
@@ -1501,28 +1549,23 @@ class ModelGenerationController:
             or child_restoration != bundle.to_dict()
         ):
             raise ModelGenerationError("lineage object graph is inconsistent")
-        if lineage.schema == LINEAGE_SCHEMA:
-            if promotion_corpus is None or promotion_conformance is None:
-                raise ModelGenerationError(
-                    "current lineage lacks replayable promotion evidence"
-                )
-            reconstructed_promotion = audit_parent_child_snapshots(
-                parent_snapshot,
-                parent_manifest,
-                AdaptiveSnapshotEnvelope(child_snapshot),
-                child_manifest,
-                promotion_corpus,
-                promotion_conformance,
-                PromotionAuditPolicy(
-                    minimum_observations=audit.observations,
-                    require_strict_improvement=True,
-                    maximum_regressions=0,
-                ),
+        reconstructed_promotion = audit_parent_child_snapshots(
+            parent_snapshot,
+            parent_manifest,
+            AdaptiveSnapshotEnvelope(child_snapshot),
+            child_manifest,
+            promotion_corpus,
+            promotion_conformance,
+            PromotionAuditPolicy(
+                minimum_observations=audit.observations,
+                require_strict_improvement=True,
+                maximum_regressions=0,
+            ),
+        )
+        if reconstructed_promotion != audit:
+            raise ModelGenerationError(
+                "promotion audit cannot be reconstructed"
             )
-            if reconstructed_promotion != audit:
-                raise ModelGenerationError(
-                    "promotion audit cannot be reconstructed"
-                )
         if selection is not None:
             if replayed_session is None or parent_training_corpus is None:
                 raise ModelGenerationError(
