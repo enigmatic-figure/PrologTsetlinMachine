@@ -23,6 +23,8 @@ from ..model_generation import (
     AdaptiveRestorationBundle,
     AdaptiveSnapshotEnvelope,
     CorpusRole,
+    ContractedParent,
+    DeescalationCorpora,
     DriftAuditPolicy,
     EvidenceUsage,
     EvidenceUsagePurpose,
@@ -30,15 +32,19 @@ from ..model_generation import (
     LabeledCorpus,
     LiveRuntimeConformanceEvidence,
     LifecycleCorpora,
+    LiteralContractionLineage,
+    MAX_DEESCALATION_CANDIDATES,
     ModelGeneration,
     ModelGenerationError,
     ModelGenerationLineage,
+    CONTRACTION_LINEAGE_SCHEMA,
     LINEAGE_SCHEMA,
     GenerationKind,
     OrderedLiteralManifest,
     PromotionAuditPolicy,
     PromotionAuditSnapshot,
     PrologInventionEvidence,
+    PrologDeescalationEvidence,
     PrologThresholdCandidateSet,
     RuntimeConformanceReport,
     ThresholdCandidateBudget,
@@ -53,6 +59,7 @@ from ..model_generation import (
     audit_snapshot_runtime_conformance,
     canonical_json_bytes,
     content_digest,
+    contract_parent_with_equivalent_literal,
     drift_requires_reopen,
     extend_parent_with_threshold,
     preprocessing_contract_id,
@@ -81,6 +88,12 @@ _MAX_STORED_JSON_BYTES = 4 * 1024 * 1024
 _MAX_ATTESTED_EXECUTABLE_BYTES = 128 * 1024 * 1024
 _STORE_LOCKS_GUARD = RLock()
 _STORE_EVENT_LOCKS: dict[Path, RLock] = {}
+_CANDIDATE_EVIDENCE_PURPOSES = frozenset(
+    {
+        EvidenceUsagePurpose.CANDIDATE_EPISODE,
+        EvidenceUsagePurpose.DEESCALATION_EPISODE,
+    }
+)
 
 
 def _event_lock_for_root(root: Path) -> RLock:
@@ -451,6 +464,25 @@ class ModelGenerationStore:
             )
         return result
 
+    def put_deescalation_evidence(
+        self, value: PrologDeescalationEvidence
+    ) -> Path:
+        return self._put_json(
+            "deescalation-evidence", value.evidence_id, value.to_dict()
+        )
+
+    def load_deescalation_evidence(
+        self, identifier: str
+    ) -> PrologDeescalationEvidence:
+        result = PrologDeescalationEvidence.from_dict(
+            self._read_json("deescalation-evidence", identifier)
+        )
+        if result.evidence_id != identifier:
+            raise ModelGenerationError(
+                "de-escalation evidence does not match its address"
+            )
+        return result
+
     def put_evidence_usage(self, value: EvidenceUsage) -> Path:
         return self._put_json("evidence-usage", value.usage_id, value.to_dict())
 
@@ -495,13 +527,19 @@ class ModelGenerationStore:
             )
         return result
 
-    def put_lineage(self, value: ModelGenerationLineage) -> Path:
+    def put_lineage(
+        self, value: ModelGenerationLineage | LiteralContractionLineage
+    ) -> Path:
         return self._put_json("lineage", value.lineage_id, value.to_dict())
 
-    def load_lineage(self, identifier: str) -> ModelGenerationLineage:
-        result = ModelGenerationLineage.from_dict(
-            self._read_json("lineage", identifier)
-        )
+    def load_lineage(
+        self, identifier: str
+    ) -> ModelGenerationLineage | LiteralContractionLineage:
+        raw = self._read_json("lineage", identifier)
+        if raw.get("schema") == CONTRACTION_LINEAGE_SCHEMA:
+            result = LiteralContractionLineage.from_dict(raw)
+        else:
+            result = ModelGenerationLineage.from_dict(raw)
         if result.lineage_id != identifier:
             raise ModelGenerationError("model-generation lineage does not match its address")
         return result
@@ -627,6 +665,7 @@ class ModelGenerationStore:
             return event
 
 TelemetrySink = Callable[[TelemetryEvent], None]
+LifecycleLineage = ModelGenerationLineage | LiteralContractionLineage
 
 
 @dataclass(frozen=True, slots=True)
@@ -657,12 +696,12 @@ class _LifecycleReplayState:
     active_generation_id: str | None
     registered_dataset_id: str | None
     pending_candidate_usage: EvidenceUsage | None
-    candidate: ModelGenerationLineage | None
-    approved: ModelGenerationLineage | None
-    activated: ModelGenerationLineage | None
+    candidate: LifecycleLineage | None
+    approved: LifecycleLineage | None
+    activated: LifecycleLineage | None
     pending_live_usage: EvidenceUsage | None
     reopen: tuple[
-        ModelGenerationLineage,
+        LifecycleLineage,
         AdaptiveRestorationBundle,
         PromotionAuditSnapshot,
     ] | None
@@ -804,7 +843,7 @@ class ModelGenerationController:
         state = self._replay_lifecycle_state()
         pending = (
             state.pending_candidate_usage
-            if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE
+            if usage.purpose in _CANDIDATE_EVIDENCE_PURPOSES
             else state.pending_live_usage
         )
         if pending != usage:
@@ -823,7 +862,7 @@ class ModelGenerationController:
             state = self._authoritative_state_under_event_lock()
             pending = (
                 state.pending_candidate_usage
-                if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE
+                if usage.purpose in _CANDIDATE_EVIDENCE_PURPOSES
                 else state.pending_live_usage
             )
             if pending == usage:
@@ -836,7 +875,7 @@ class ModelGenerationController:
     ) -> _LifecycleReplayState:
         pending = (
             state.pending_candidate_usage
-            if purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE
+            if purpose in _CANDIDATE_EVIDENCE_PURPOSES
             else state.pending_live_usage
         )
         if pending is None:
@@ -857,7 +896,7 @@ class ModelGenerationController:
             raise ModelGenerationError(
                 "evidence usage belongs to a different registered dataset"
             )
-        if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE:
+        if usage.purpose in _CANDIDATE_EVIDENCE_PURPOSES:
             subject = self.store.load_generation(usage.subject_generation_id)
             if (
                 subject.kind is not GenerationKind.TRAINED_PARENT
@@ -873,7 +912,11 @@ class ModelGenerationController:
         elif usage.purpose is EvidenceUsagePurpose.LIVE_DRIFT:
             subject = self.store.load_generation(usage.subject_generation_id)
             if (
-                subject.kind is not GenerationKind.ADAPTED_CHILD
+                subject.kind
+                not in (
+                    GenerationKind.ADAPTED_CHILD,
+                    GenerationKind.CONTRACTED_CHILD,
+                )
                 or state.activated is None
                 or state.candidate is not None
                 or state.approved is not None
@@ -920,6 +963,30 @@ class ModelGenerationController:
                     state.last_activated_lineage_id,
                 )
 
+    def reserve_deescalation_evidence(
+        self, corpora: DeescalationCorpora
+    ) -> tuple[EvidenceUsage, int, str | None]:
+        with self._control_lock:
+            if self._active_generation_id is None:
+                raise ModelGenerationError(
+                    "de-escalation evidence requires an active trained parent"
+                )
+            usage = EvidenceUsage(
+                EvidenceUsagePurpose.DEESCALATION_EPISODE,
+                self._active_generation_id,
+                (corpora.proof, corpora.confirmation, corpora.promotion),
+            )
+            with self.store._event_lock:
+                state = self._authoritative_state_under_event_lock()
+                state = self._abandon_pending_for_purpose_under_event_lock(
+                    state, EvidenceUsagePurpose.DEESCALATION_EPISODE
+                )
+                self._reserve_evidence_under_event_lock(usage, state)
+                return (
+                    usage,
+                    state.activation_count + 1,
+                    state.last_activated_lineage_id,
+                )
     def _validate_deployable_generation(
         self, generation: ModelGeneration
     ) -> tuple[
@@ -931,6 +998,7 @@ class ModelGenerationController:
         if generation.kind not in (
             GenerationKind.TRAINED_PARENT,
             GenerationKind.ADAPTED_CHILD,
+            GenerationKind.CONTRACTED_CHILD,
         ) or generation.inference_artifact_id is None:
             raise ModelGenerationError("generation is not deployable")
         if self.store.load_generation(generation.generation_id) != generation:
@@ -960,11 +1028,11 @@ class ModelGenerationController:
                     expected_positive[mask_index] |= bit
                 if states[feature * 2 + 1] > snapshot.snapshot.states_per_action:
                     expected_negative[mask_index] |= bit
-        expected_stage = (
-            "trained_parent"
-            if generation.kind is GenerationKind.TRAINED_PARENT
-            else "adapted_child"
-        )
+        expected_stage = {
+            GenerationKind.TRAINED_PARENT: "trained_parent",
+            GenerationKind.ADAPTED_CHILD: "adapted_child",
+            GenerationKind.CONTRACTED_CHILD: "contracted_child",
+        }[generation.kind]
         if (
             snapshot.snapshot.number_of_features != len(manifest.literals)
             or tuple(preprocessing.literal_ids) != manifest.literal_ids
@@ -1039,6 +1107,24 @@ class ModelGenerationController:
         return usage.corpora[0]
 
     def _validate_lineage_graph(
+        self, lineage: LifecycleLineage
+    ) -> tuple[
+        ModelGeneration,
+        ModelGeneration,
+        ModelGeneration,
+        AdaptiveRestorationBundle,
+        PromotionAuditSnapshot,
+        PrologInventionEvidence
+        | PrologThresholdCandidateSet
+        | PrologDeescalationEvidence,
+    ]:
+        if isinstance(lineage, LiteralContractionLineage):
+            return self._validate_contraction_lineage_graph(lineage)
+        if isinstance(lineage, ModelGenerationLineage):
+            return self._validate_threshold_lineage_graph(lineage)
+        raise TypeError("unsupported lifecycle lineage type")
+
+    def _validate_threshold_lineage_graph(
         self, lineage: ModelGenerationLineage
     ) -> tuple[
         ModelGeneration,
@@ -1436,9 +1522,221 @@ class ModelGenerationController:
         self._resolve_restoration_bundle(bundle)
         return parent, extended, child, bundle, audit, evidence
 
+    def _validate_contraction_lineage_graph(
+        self, lineage: LiteralContractionLineage
+    ) -> tuple[
+        ModelGeneration,
+        ModelGeneration,
+        ModelGeneration,
+        AdaptiveRestorationBundle,
+        PromotionAuditSnapshot,
+        PrologDeescalationEvidence,
+    ]:
+        if self.store.load_lineage(lineage.lineage_id) != lineage:
+            raise ModelGenerationError("lineage differs from its durable object")
+        parent = self.store.load_generation(lineage.parent_generation_id)
+        contracted = self.store.load_generation(lineage.contracted_generation_id)
+        child = self.store.load_generation(lineage.child_generation_id)
+        bundle = self.store.load_restoration_bundle(lineage.restoration_bundle_id)
+        audit = self.store.load_audit(lineage.promotion_audit_id)
+        evidence = self.store.load_deescalation_evidence(
+            lineage.deescalation_evidence_id
+        )
+        usage = self.store.load_evidence_usage(lineage.evidence_usage_id)
+        if (
+            len(usage.corpora) != 3
+            or tuple(corpus.role for corpus in usage.corpora)
+            != (
+                CorpusRole.DEESCALATION_PROOF,
+                CorpusRole.DEESCALATION_CONFIRMATION,
+                CorpusRole.PROMOTION,
+            )
+        ):
+            raise ModelGenerationError(
+                "literal-contraction evidence roles are inconsistent"
+            )
+        proof, confirmation, promotion = usage.corpora
+        parent_manifest = self.store.load_manifest(parent.literal_manifest_id)
+        parent_snapshot = self.store.load_snapshot(parent.snapshot_id).snapshot
+        contracted_manifest = self.store.load_manifest(
+            contracted.literal_manifest_id
+        )
+        contracted_snapshot = self.store.load_snapshot(contracted.snapshot_id).snapshot
+        child_snapshot, child_manifest, child_preprocessing, child_artifact = (
+            self._validate_deployable_generation(child)
+        )
+        validation = child_artifact.manifest.get("validation")
+        signature = (
+            validation.get("signature")
+            if isinstance(validation, Mapping)
+            else None
+        )
+        restoration_reference = child_artifact.manifest.get(
+            "restoration_reference"
+        )
+        contracted_digests = (
+            (CorpusRole.DEESCALATION_PROOF.value, lineage.proof_corpus_digest),
+            (
+                CorpusRole.DEESCALATION_CONFIRMATION.value,
+                lineage.confirmation_corpus_digest,
+            ),
+        )
+        child_digests = contracted_digests + (
+            (CorpusRole.PROMOTION.value, lineage.promotion_corpus_digest),
+        )
+        if (
+            parent.kind is not GenerationKind.TRAINED_PARENT
+            or contracted.kind is not GenerationKind.CONTRACTED_PARENT
+            or child.kind is not GenerationKind.CONTRACTED_CHILD
+            or contracted.parent_generation_id != parent.generation_id
+            or child.parent_generation_id != contracted.generation_id
+            or contracted.restoration_bundle_id != bundle.bundle_id
+            or child.restoration_bundle_id != bundle.bundle_id
+            or bundle.parent_generation_id != parent.generation_id
+            or contracted.inference_artifact_id is not None
+            or contracted.corpus_digests != contracted_digests
+            or child.corpus_digests != child_digests
+            or any(
+                value is not None
+                for value in (
+                    contracted.origin_proposal_semantic_id,
+                    contracted.origin_proposal_provenance_id,
+                    child.origin_proposal_semantic_id,
+                    child.origin_proposal_provenance_id,
+                )
+            )
+            or usage.purpose is not EvidenceUsagePurpose.DEESCALATION_EPISODE
+            or usage.subject_generation_id != parent.generation_id
+            or tuple((corpus.role.value, corpus.digest) for corpus in usage.corpora)
+            != child_digests
+            or evidence.proof_corpus_digest != lineage.proof_corpus_digest
+            or proof.digest != lineage.proof_corpus_digest
+            or confirmation.digest != lineage.confirmation_corpus_digest
+            or promotion.digest != lineage.promotion_corpus_digest
+            or evidence.parent_snapshot_id != parent.snapshot_id
+            or evidence.parent_manifest_id != parent.literal_manifest_id
+            or evidence.surviving_literal_id != lineage.surviving_literal_id
+            or evidence.removed_literal_id != lineage.removed_literal_id
+            or contracted.snapshot_id != child.snapshot_id
+            or contracted.literal_manifest_id != child.literal_manifest_id
+            or contracted.preprocessing_contract_id
+            != child.preprocessing_contract_id
+            or contracted_snapshot != child_snapshot.snapshot
+            or contracted_manifest != child_manifest
+            or tuple(child_preprocessing.literal_ids) != child_manifest.literal_ids
+            or audit.corpus_role is not CorpusRole.PROMOTION
+            or audit.corpus_digest != lineage.promotion_corpus_digest
+            or audit.conformance.artifact_id != child.inference_artifact_id
+            or not audit.conformance.exact
+            or lineage.adaptive_behavior_id
+            != AdaptiveBehaviorIdentity.from_generation(child).behavior_id
+            or not isinstance(signature, Mapping)
+            or signature.get("generation_stage") != "contracted_child"
+            or signature.get("adaptive_behavior_id")
+            != lineage.adaptive_behavior_id
+            or signature.get("adaptive_snapshot_id") != child.snapshot_id
+            or signature.get("ordered_literal_manifest_id")
+            != child.literal_manifest_id
+            or signature.get("deescalation_proof_corpus_digest")
+            != lineage.proof_corpus_digest
+            or signature.get("deescalation_confirmation_corpus_digest")
+            != lineage.confirmation_corpus_digest
+            or signature.get("promotion_corpus_digest")
+            != lineage.promotion_corpus_digest
+            or signature.get("deescalation_evidence_id")
+            != evidence.evidence_id
+            or signature.get("surviving_literal_id")
+            != str(lineage.surviving_literal_id)
+            or signature.get("removed_literal_id")
+            != str(lineage.removed_literal_id)
+            or restoration_reference != bundle.to_dict()
+        ):
+            raise ModelGenerationError(
+                "literal-contraction lineage object graph is inconsistent"
+            )
+
+        _validate_literal_contraction_derivation(
+            evidence,
+            proof,
+            parent_snapshot,
+            parent_manifest,
+        )
+        reconstructed = contract_parent_with_equivalent_literal(
+            parent_snapshot,
+            parent_manifest,
+            evidence,
+            proof_records=proof.records,
+            confirmation_records=confirmation.records,
+        )
+        if (
+            reconstructed.snapshot.snapshot_id != contracted.snapshot_id
+            or reconstructed.manifest.manifest_id
+            != contracted.literal_manifest_id
+            or reconstructed.snapshot.snapshot != contracted_snapshot
+            or reconstructed.manifest != contracted_manifest
+            or reconstructed.proof_case_count != len(proof.examples)
+            or reconstructed.confirmation_case_count
+            != len(confirmation.examples)
+        ):
+            raise ModelGenerationError(
+                "literal-contraction construction cannot be reconstructed"
+            )
+        reconstructed_conformance = audit_snapshot_runtime_conformance(
+            child_snapshot,
+            child_manifest,
+            child_artifact,
+            promotion.records,
+            ptmrt_verified=audit.conformance.ptmrt_verified,
+            ptmrt_artifact_id=audit.conformance.ptmrt_artifact_id,
+        )
+        reconstructed_audit = audit_parent_child_snapshots(
+            parent_snapshot,
+            parent_manifest,
+            child_snapshot,
+            child_manifest,
+            promotion,
+            reconstructed_conformance,
+            PromotionAuditPolicy(
+                minimum_observations=audit.observations,
+                require_strict_improvement=False,
+                maximum_regressions=0,
+            ),
+        )
+        if reconstructed_audit != audit:
+            raise ModelGenerationError(
+                "literal-contraction promotion audit cannot be reconstructed"
+            )
+        contracted_preprocessing = self.store.load_preprocessing(
+            contracted.preprocessing_contract_id
+        )
+        if (
+            tuple(contracted_preprocessing.literal_ids)
+            != contracted_manifest.literal_ids
+            or preprocessing_contract_id(contracted_preprocessing)
+            != contracted.preprocessing_contract_id
+        ):
+            raise ModelGenerationError(
+                "contracted preprocessing differs from its literal manifest"
+            )
+        parent_digests = dict(parent.corpus_digests)
+        if (
+            parent.snapshot_id != bundle.adaptive_snapshot_id
+            or parent.literal_manifest_id != bundle.ordered_literal_manifest_id
+            or parent.preprocessing_contract_id != bundle.preprocessing_contract_id
+            or parent.inference_artifact_id != bundle.deployed_parent_artifact_id
+            or parent_digests.get(CorpusRole.PARENT_TRAINING.value)
+            != bundle.parent_training_corpus_digest
+            or len(parent_digests) != 1
+        ):
+            raise ModelGenerationError(
+                "literal-contraction restoration bundle is inconsistent"
+            )
+        self._resolve_restoration_bundle(bundle)
+        return parent, contracted, child, bundle, audit, evidence
+
     def _validate_live_conformance_evidence(
         self,
-        lineage: ModelGenerationLineage,
+        lineage: LifecycleLineage,
         drift: PromotionAuditSnapshot,
         evidence: LiveRuntimeConformanceEvidence,
     ) -> None:
@@ -1562,13 +1860,13 @@ class ModelGenerationController:
                 spent_record_fingerprints=frozenset(),
             )
         active: str | None = None
-        candidate: ModelGenerationLineage | None = None
-        approved: ModelGenerationLineage | None = None
-        activated: ModelGenerationLineage | None = None
+        candidate: LifecycleLineage | None = None
+        approved: LifecycleLineage | None = None
+        activated: LifecycleLineage | None = None
         pending_candidate_usage: EvidenceUsage | None = None
         pending_live_usage: EvidenceUsage | None = None
         reopen: tuple[
-            ModelGenerationLineage,
+            LifecycleLineage,
             AdaptiveRestorationBundle,
             PromotionAuditSnapshot,
         ] | None = None
@@ -1586,7 +1884,9 @@ class ModelGenerationController:
                 ModelGeneration,
                 AdaptiveRestorationBundle,
                 PromotionAuditSnapshot,
-                PrologInventionEvidence | PrologThresholdCandidateSet,
+                PrologInventionEvidence
+                | PrologThresholdCandidateSet
+                | PrologDeescalationEvidence,
             ],
         ] = {}
 
@@ -1661,7 +1961,7 @@ class ModelGenerationController:
                     or reopen is not None
                 ):
                     raise ModelGenerationError("invalid evidence-reserved transition")
-                if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE:
+                if usage.purpose in _CANDIDATE_EVIDENCE_PURPOSES:
                     subject = self.store.load_generation(active)
                     if (
                         subject.kind is not GenerationKind.TRAINED_PARENT
@@ -1675,7 +1975,11 @@ class ModelGenerationController:
                 elif usage.purpose is EvidenceUsagePurpose.LIVE_DRIFT:
                     subject = self.store.load_generation(active)
                     if (
-                        subject.kind is not GenerationKind.ADAPTED_CHILD
+                        subject.kind
+                        not in (
+                            GenerationKind.ADAPTED_CHILD,
+                            GenerationKind.CONTRACTED_CHILD,
+                        )
                         or activated is None
                         or pending_live_usage is not None
                     ):
@@ -1715,7 +2019,7 @@ class ModelGenerationController:
                     raise ModelGenerationError(
                         "invalid evidence-abandoned transition"
                     )
-                if usage.purpose is EvidenceUsagePurpose.CANDIDATE_EPISODE:
+                if usage.purpose in _CANDIDATE_EVIDENCE_PURPOSES:
                     if pending_candidate_usage != usage or activated is not None:
                         raise ModelGenerationError(
                             "candidate evidence abandonment lacks a pending reservation"
@@ -2028,8 +2332,8 @@ class ModelGenerationController:
             self._active_generation_id = generation.generation_id
         self._emit("parent_registered", generation_id=generation.generation_id)
 
-    def record_candidate(self, lineage: ModelGenerationLineage) -> None:
-        if lineage.schema != LINEAGE_SCHEMA:
+    def record_candidate(self, lineage: LifecycleLineage) -> None:
+        if lineage.schema not in (LINEAGE_SCHEMA, CONTRACTION_LINEAGE_SCHEMA):
             raise ModelGenerationError(
                 "new candidate admission requires the current lineage schema"
             )
@@ -2109,7 +2413,7 @@ class ModelGenerationController:
         )
 
     def approve_promotion(
-        self, lineage: ModelGenerationLineage, audit: PromotionAuditSnapshot
+        self, lineage: LifecycleLineage, audit: PromotionAuditSnapshot
     ) -> None:
         if not audit.accepted or not audit.conformance.exact:
             raise ModelGenerationError("only an accepted exact audit may approve promotion")
@@ -2139,7 +2443,7 @@ class ModelGenerationController:
         )
 
     def activate_child(
-        self, lineage: ModelGenerationLineage, audit: PromotionAuditSnapshot
+        self, lineage: LifecycleLineage, audit: PromotionAuditSnapshot
     ) -> None:
         if not audit.accepted or lineage.promotion_audit_id != audit.audit_id:
             raise ModelGenerationError("child activation lacks an accepted promotion audit")
@@ -2456,6 +2760,217 @@ def _run_complete_threshold_collective(
             "the bounded collective returned an incomplete threshold candidate set"
         )
     return tuple(sorted(proposals, key=lambda item: item.semantic_id())), before
+
+
+def _deescalation_session(
+    corpus: LabeledCorpus,
+    parent_manifest: OrderedLiteralManifest,
+) -> PTAReasoningSession:
+    """Encode complete literal truth vectors for one bounded proof corpus."""
+
+    if corpus.role is not CorpusRole.DEESCALATION_PROOF:
+        raise ModelGenerationError(
+            "de-escalation reasoning requires the proof corpus"
+        )
+    catalog = parent_manifest.build_catalog()
+    batch = catalog.encode(corpus.records).ta
+    session = PTAReasoningSession(corpus.dataset_id)
+    for example_position, example in enumerate(corpus.examples):
+        session.add_example_label(example_position, example.label)
+        for literal_position, literal_id in enumerate(parent_manifest.literal_ids):
+            session.add_literal_truth(
+                literal_id,
+                example_position,
+                int(batch.bit(example_position, literal_position)),
+            )
+    return session
+
+
+def _run_complete_deescalation_collective(
+    session: PTAReasoningSession,
+    maximum_candidates: int,
+    *,
+    expected_evidence: PrologDeescalationEvidence | None = None,
+) -> tuple[
+    tuple[tuple[int, int], ...],
+    tuple[str, str, tuple[tuple[str, str], ...]],
+]:
+    """Run and attest a complete bounded literal-equivalence derivation."""
+
+    service = PTACollectiveService()
+    before = _collective_attestation(service)
+    if expected_evidence is not None and before != (
+        expected_evidence.gprolog_version,
+        expected_evidence.gprolog_binary_digest,
+        expected_evidence.module_digests,
+    ):
+        raise ModelGenerationError(
+            "de-escalation evidence names a different GNU Prolog implementation"
+        )
+    query = PTACollectiveQuery(
+        numeric_fields=(),
+        discover_thresholds=False,
+        discover_intervals=False,
+        derive_deescalation=True,
+        derive_escalation=False,
+    )
+    result = service.run(
+        session,
+        query=query,
+        budget=PTACollectiveBudget(max_results_per_product=maximum_candidates),
+    )
+    after = _collective_attestation(service)
+    if after != before:
+        raise ModelGenerationError("GNU Prolog collective changed during execution")
+    for name in (
+        "literal_redundancies",
+        "literal_subsumptions",
+        "clause_subsumptions",
+    ):
+        if result.product_counts[name].truncated:
+            raise ModelGenerationError(
+                "the complete de-escalation result exceeds its explicit budget"
+            )
+    redundancies = tuple(
+        item for item in result.insights if item.kind == "literal_redundant"
+    )
+    count = result.product_counts["literal_redundancies"]
+    if (
+        not redundancies
+        or count.available != len(redundancies)
+        or count.emitted != len(redundancies)
+        or len(redundancies) > maximum_candidates
+    ):
+        raise ModelGenerationError(
+            "the bounded collective returned an incomplete literal-equivalence set"
+        )
+    pairs = tuple(
+        sorted(
+            {
+                tuple(sorted((int(item.evidence[0]), int(item.evidence[1]))))
+                for item in redundancies
+            }
+        )
+    )
+    if len(pairs) != len(redundancies):
+        raise ModelGenerationError(
+            "GNU Prolog returned duplicate literal-equivalence products"
+        )
+    return pairs, before
+
+
+@dataclass(frozen=True, slots=True)
+class LiteralContractionInvention:
+    """In-memory proof session plus its durable De-escalation attestation."""
+
+    session: PTAReasoningSession
+    evidence: PrologDeescalationEvidence
+
+
+def invent_literal_contraction_for_corpus(
+    proof_corpus: LabeledCorpus,
+    parent_snapshot: TMSnapshot,
+    parent_manifest: OrderedLiteralManifest,
+    *,
+    maximum_candidates: int = MAX_DEESCALATION_CANDIDATES,
+) -> LiteralContractionInvention:
+    parent_envelope = AdaptiveSnapshotEnvelope(parent_snapshot)
+    if parent_snapshot.number_of_features != len(parent_manifest.literals):
+        raise ModelGenerationError(
+            "de-escalation parent snapshot and manifest widths differ"
+        )
+    session = _deescalation_session(proof_corpus, parent_manifest)
+    pairs, attestation = _run_complete_deescalation_collective(
+        session, maximum_candidates
+    )
+    positions = {
+        literal_id: position
+        for position, literal_id in enumerate(parent_manifest.literal_ids)
+    }
+    candidates: list[tuple[int, int, int, int]] = []
+    for left, right in pairs:
+        try:
+            left_position = positions[left]
+            right_position = positions[right]
+        except KeyError as error:
+            raise ModelGenerationError(
+                "de-escalation result names a literal outside the parent manifest"
+            ) from error
+        if left_position < right_position:
+            candidates.append((left_position, right_position, left, right))
+        else:
+            candidates.append((right_position, left_position, right, left))
+    _, _, survivor, removed = min(candidates)
+    version, binary_digest, module_digests = attestation
+    evidence = PrologDeescalationEvidence(
+        proof_corpus_digest=proof_corpus.digest,
+        session_digest=content_digest(session.to_dict()),
+        parent_snapshot_id=parent_envelope.snapshot_id,
+        parent_manifest_id=parent_manifest.manifest_id,
+        maximum_candidates=maximum_candidates,
+        equivalent_pairs=pairs,
+        surviving_literal_id=survivor,
+        removed_literal_id=removed,
+        collective_protocol="PTM_PTA_COLLECTIVE_V1",
+        gprolog_version=version,
+        gprolog_binary_digest=binary_digest,
+        module_digests=module_digests,
+    )
+    return LiteralContractionInvention(session, evidence)
+
+
+def _validate_literal_contraction_derivation(
+    evidence: PrologDeescalationEvidence,
+    proof_corpus: LabeledCorpus,
+    parent_snapshot: TMSnapshot,
+    parent_manifest: OrderedLiteralManifest,
+) -> PTAReasoningSession:
+    if (
+        evidence.proof_corpus_digest != proof_corpus.digest
+        or evidence.parent_snapshot_id
+        != AdaptiveSnapshotEnvelope(parent_snapshot).snapshot_id
+        or evidence.parent_manifest_id != parent_manifest.manifest_id
+    ):
+        raise ModelGenerationError(
+            "de-escalation evidence differs from its proof inputs"
+        )
+    session = _deescalation_session(proof_corpus, parent_manifest)
+    if content_digest(session.to_dict()) != evidence.session_digest:
+        raise ModelGenerationError(
+            "de-escalation proof session cannot be reconstructed"
+        )
+    pairs, _ = _run_complete_deescalation_collective(
+        session,
+        evidence.maximum_candidates,
+        expected_evidence=evidence,
+    )
+    if pairs != evidence.equivalent_pairs:
+        raise ModelGenerationError(
+            "de-escalation equivalence products cannot be reconstructed"
+        )
+    positions = {
+        literal_id: position
+        for position, literal_id in enumerate(parent_manifest.literal_ids)
+    }
+    ordered: list[tuple[int, int, int, int]] = []
+    for left, right in pairs:
+        if left not in positions or right not in positions:
+            raise ModelGenerationError(
+                "de-escalation result names an unknown parent literal"
+            )
+        if positions[left] < positions[right]:
+            ordered.append((positions[left], positions[right], left, right))
+        else:
+            ordered.append((positions[right], positions[left], right, left))
+    *_, expected_survivor, expected_removed = min(ordered)
+    if (
+        evidence.surviving_literal_id != expected_survivor
+        or evidence.removed_literal_id != expected_removed
+    ):
+        raise ModelGenerationError(
+            "de-escalation selection differs from the deterministic policy"
+        )
+    return session
 
 
 @dataclass(frozen=True, slots=True)
@@ -2884,6 +3399,24 @@ class TrainedParentLifecycleResult:
     invention_evidence: PrologInventionEvidence | PrologThresholdCandidateSet
     candidate_set: PrologThresholdCandidateSet
     candidate_selection: ThresholdCandidateSelection
+    dataset_id: str
+    preactivation_example_ids: frozenset[str | int]
+    ptmrt_executable: Path
+    controller: ModelGenerationController
+
+
+@dataclass(frozen=True, slots=True)
+class DeescalationLifecycleResult:
+    parent_generation: ModelGeneration
+    contracted_generation: ModelGeneration
+    child_generation: ModelGeneration
+    restoration_bundle: AdaptiveRestorationBundle
+    contracted_parent: ContractedParent
+    child_artifact: PackedTMInferenceArtifact
+    conformance: RuntimeConformanceReport
+    promotion_audit: PromotionAuditSnapshot
+    lineage: LiteralContractionLineage
+    deescalation_evidence: PrologDeescalationEvidence
     dataset_id: str
     preactivation_example_ids: frozenset[str | int]
     ptmrt_executable: Path
@@ -3432,8 +3965,321 @@ def execute_trained_parent_lifecycle(
     return replace(result, invention_evidence=legacy_evidence)
 
 
+def _execute_literal_deescalation_lifecycle_once(
+    *,
+    parent_snapshot: TMSnapshot,
+    parent_manifest: OrderedLiteralManifest,
+    parent_training_corpus: LabeledCorpus,
+    corpora: DeescalationCorpora,
+    maximum_candidates: int,
+    promotion_policy: PromotionAuditPolicy,
+    store: ModelGenerationStore,
+    ptmrt_executable: str | Path,
+    telemetry: TelemetrySession | None = None,
+    event_sink: TelemetrySink | None = None,
+) -> DeescalationLifecycleResult:
+    """Execute one exact literal-equivalence contraction episode."""
+
+    if parent_training_corpus.role is not CorpusRole.PARENT_TRAINING:
+        raise ModelGenerationError("parent training evidence has the wrong corpus role")
+    if parent_training_corpus.dataset_id != corpora.proof.dataset_id:
+        raise ModelGenerationError(
+            "parent and de-escalation corpora use different datasets"
+        )
+    if (
+        promotion_policy.require_strict_improvement
+        or promotion_policy.maximum_regressions != 0
+    ):
+        raise ModelGenerationError(
+            "the first De-escalation loop requires non-strict zero-regression promotion"
+        )
+    lifecycle_ids = {
+        example.example_id
+        for corpus in (corpora.proof, corpora.confirmation, corpora.promotion)
+        for example in corpus.examples
+    }
+    if lifecycle_ids & {
+        example.example_id for example in parent_training_corpus.examples
+    }:
+        raise ModelGenerationError(
+            "parent training IDs overlap de-escalation corpora"
+        )
+    preactivation_example_ids = frozenset(
+        lifecycle_ids
+        | {example.example_id for example in parent_training_corpus.examples}
+    )
+
+    parent_envelope = AdaptiveSnapshotEnvelope(parent_snapshot)
+    parent_preprocessing, parent_artifact = compile_generation_artifact(
+        parent_snapshot,
+        parent_manifest,
+        name="PTM trained adaptive parent",
+        validation_records=parent_training_corpus.records,
+        validation_signature={
+            "generation_stage": "trained_parent",
+            "training_corpus_digest": parent_training_corpus.digest,
+        },
+    )
+    parent_preprocessing_id, _ = store.put_preprocessing(parent_preprocessing)
+    store.put_snapshot(parent_envelope)
+    store.put_manifest(parent_manifest)
+    store.put_artifact(parent_artifact)
+    parent_generation = ModelGeneration(
+        GenerationKind.TRAINED_PARENT,
+        parent_envelope.snapshot_id,
+        parent_manifest.manifest_id,
+        parent_preprocessing_id,
+        parent_artifact.artifact_id,
+        None,
+        None,
+        ((CorpusRole.PARENT_TRAINING.value, parent_training_corpus.digest),),
+    )
+    store.put_generation(parent_generation)
+    restoration_bundle = AdaptiveRestorationBundle(
+        parent_generation.generation_id,
+        parent_envelope.snapshot_id,
+        parent_manifest.manifest_id,
+        parent_preprocessing_id,
+        parent_artifact.artifact_id,
+        parent_training_corpus.digest,
+    )
+    store.put_restoration_bundle(restoration_bundle)
+    controller = ModelGenerationController(
+        store,
+        ptmrt_executable=ptmrt_executable,
+        telemetry=telemetry,
+        event_sink=event_sink,
+    )
+    if controller.active_generation_id is None:
+        controller.register_parent(parent_generation, parent_training_corpus)
+    elif controller.active_generation_id != parent_generation.generation_id:
+        raise ModelGenerationError("store already routes a different active generation")
+    else:
+        events = store.read_events()
+        parent_usage = EvidenceUsage(
+            EvidenceUsagePurpose.PARENT_REGISTRATION,
+            parent_generation.generation_id,
+            (parent_training_corpus,),
+        )
+        registered_usage_id = (
+            events[0].details.get("evidence_usage_id") if events else None
+        )
+        if (
+            type(registered_usage_id) is not str
+            or store.load_evidence_usage(registered_usage_id) != parent_usage
+        ):
+            raise ModelGenerationError(
+                "active parent has different durable training evidence"
+            )
+
+    usage, activation_sequence, previous_lineage_id = (
+        controller.reserve_deescalation_evidence(corpora)
+    )
+    invention = invent_literal_contraction_for_corpus(
+        corpora.proof,
+        parent_snapshot,
+        parent_manifest,
+        maximum_candidates=maximum_candidates,
+    )
+    evidence = invention.evidence
+    store.put_deescalation_evidence(evidence)
+    contracted_parent = contract_parent_with_equivalent_literal(
+        parent_snapshot,
+        parent_manifest,
+        evidence,
+        proof_records=corpora.proof.records,
+        confirmation_records=corpora.confirmation.records,
+    )
+    contracted_preprocessing = PreprocessingContract.from_catalog(
+        contracted_parent.manifest.build_catalog()
+    )
+    contracted_preprocessing_id, _ = store.put_preprocessing(
+        contracted_preprocessing
+    )
+    store.put_snapshot(contracted_parent.snapshot)
+    store.put_manifest(contracted_parent.manifest)
+    contracted_generation = ModelGeneration(
+        GenerationKind.CONTRACTED_PARENT,
+        contracted_parent.snapshot.snapshot_id,
+        contracted_parent.manifest.manifest_id,
+        contracted_preprocessing_id,
+        None,
+        parent_generation.generation_id,
+        restoration_bundle.bundle_id,
+        (
+            (CorpusRole.DEESCALATION_PROOF.value, corpora.proof.digest),
+            (
+                CorpusRole.DEESCALATION_CONFIRMATION.value,
+                corpora.confirmation.digest,
+            ),
+        ),
+    )
+    store.put_generation(contracted_generation)
+
+    behavior = AdaptiveBehaviorIdentity(
+        contracted_parent.snapshot.snapshot_id,
+        contracted_parent.manifest.manifest_id,
+        contracted_preprocessing_id,
+    )
+    child_preprocessing, child_artifact = compile_generation_artifact(
+        contracted_parent.snapshot.snapshot,
+        contracted_parent.manifest,
+        name="PTM De-escalation literal-contraction child",
+        validation_records=corpora.promotion.records,
+        validation_signature={
+            "generation_stage": "contracted_child",
+            "deescalation_proof_corpus_digest": corpora.proof.digest,
+            "deescalation_confirmation_corpus_digest": corpora.confirmation.digest,
+            "promotion_corpus_digest": corpora.promotion.digest,
+            "deescalation_evidence_id": evidence.evidence_id,
+            "surviving_literal_id": str(evidence.surviving_literal_id),
+            "removed_literal_id": str(evidence.removed_literal_id),
+            "adaptive_behavior_id": behavior.behavior_id,
+        },
+        restoration_reference=restoration_bundle.to_dict(),
+    )
+    child_preprocessing_id, _ = store.put_preprocessing(child_preprocessing)
+    if (
+        child_preprocessing != contracted_preprocessing
+        or child_preprocessing_id != contracted_preprocessing_id
+    ):
+        raise ModelGenerationError(
+            "contracted child preprocessing changed during compilation"
+        )
+    child_artifact_path = store.put_artifact(child_artifact)
+    child_generation = ModelGeneration(
+        GenerationKind.CONTRACTED_CHILD,
+        contracted_parent.snapshot.snapshot_id,
+        contracted_parent.manifest.manifest_id,
+        child_preprocessing_id,
+        child_artifact.artifact_id,
+        contracted_generation.generation_id,
+        restoration_bundle.bundle_id,
+        (
+            (CorpusRole.DEESCALATION_PROOF.value, corpora.proof.digest),
+            (
+                CorpusRole.DEESCALATION_CONFIRMATION.value,
+                corpora.confirmation.digest,
+            ),
+            (CorpusRole.PROMOTION.value, corpora.promotion.digest),
+        ),
+    )
+    if (
+        AdaptiveBehaviorIdentity.from_generation(child_generation).behavior_id
+        != behavior.behavior_id
+    ):
+        raise ModelGenerationError("contracted child behavior identity changed")
+    store.put_generation(child_generation)
+
+    verified_id = verify_artifact_with_ptmrt(
+        ptmrt_executable, child_artifact_path, child_artifact.artifact_id
+    )
+    conformance = audit_snapshot_runtime_conformance(
+        contracted_parent.snapshot,
+        contracted_parent.manifest,
+        child_artifact,
+        corpora.promotion.records,
+        ptmrt_verified=True,
+        ptmrt_artifact_id=verified_id,
+    )
+    promotion = audit_parent_child_snapshots(
+        parent_snapshot,
+        parent_manifest,
+        contracted_parent.snapshot,
+        contracted_parent.manifest,
+        corpora.promotion,
+        conformance,
+        promotion_policy,
+    )
+    store.put_audit(promotion)
+    lineage = LiteralContractionLineage(
+        parent_generation_id=parent_generation.generation_id,
+        contracted_generation_id=contracted_generation.generation_id,
+        child_generation_id=child_generation.generation_id,
+        adaptive_behavior_id=behavior.behavior_id,
+        restoration_bundle_id=restoration_bundle.bundle_id,
+        promotion_audit_id=promotion.audit_id,
+        deescalation_evidence_id=evidence.evidence_id,
+        evidence_usage_id=usage.usage_id,
+        activation_sequence=activation_sequence,
+        previous_activated_lineage_id=previous_lineage_id,
+        surviving_literal_id=evidence.surviving_literal_id,
+        removed_literal_id=evidence.removed_literal_id,
+        proof_corpus_digest=corpora.proof.digest,
+        confirmation_corpus_digest=corpora.confirmation.digest,
+        promotion_corpus_digest=corpora.promotion.digest,
+    )
+    store.put_lineage(lineage)
+    controller.record_candidate(lineage)
+    if not promotion.accepted:
+        controller.reject_candidate(child_generation.generation_id, promotion)
+        raise ModelGenerationError(
+            "non-strict promotion policy rejected the contracted child"
+        )
+    controller.approve_promotion(lineage, promotion)
+    controller.activate_child(lineage, promotion)
+    return DeescalationLifecycleResult(
+        parent_generation,
+        contracted_generation,
+        child_generation,
+        restoration_bundle,
+        contracted_parent,
+        child_artifact,
+        conformance,
+        promotion,
+        lineage,
+        evidence,
+        parent_training_corpus.dataset_id,
+        preactivation_example_ids,
+        Path(ptmrt_executable),
+        controller,
+    )
+
+
+def execute_literal_deescalation_lifecycle(
+    *,
+    parent_snapshot: TMSnapshot,
+    parent_manifest: OrderedLiteralManifest,
+    parent_training_corpus: LabeledCorpus,
+    corpora: DeescalationCorpora,
+    promotion_policy: PromotionAuditPolicy,
+    store: ModelGenerationStore,
+    ptmrt_executable: str | Path,
+    maximum_candidates: int = MAX_DEESCALATION_CANDIDATES,
+    telemetry: TelemetrySession | None = None,
+    event_sink: TelemetrySink | None = None,
+) -> DeescalationLifecycleResult:
+    """Run one bounded De-escalation PTA contraction and terminalize failures."""
+
+    try:
+        return _execute_literal_deescalation_lifecycle_once(
+            parent_snapshot=parent_snapshot,
+            parent_manifest=parent_manifest,
+            parent_training_corpus=parent_training_corpus,
+            corpora=corpora,
+            maximum_candidates=maximum_candidates,
+            promotion_policy=promotion_policy,
+            store=store,
+            ptmrt_executable=ptmrt_executable,
+            telemetry=telemetry,
+            event_sink=event_sink,
+        )
+    except BaseException as error:
+        try:
+            ModelGenerationController(
+                store,
+                ptmrt_executable=ptmrt_executable,
+            )
+        except Exception as recovery_error:
+            error.add_note(
+                "de-escalation evidence recovery also failed: "
+                f"{recovery_error}"
+            )
+        raise
+
+
 def reopen_and_restore_for_drift(
-    result: TrainedParentLifecycleResult,
+    result: TrainedParentLifecycleResult | DeescalationLifecycleResult,
     live_corpus: LabeledCorpus,
     drift_policy: DriftAuditPolicy,
 ) -> tuple[PromotionAuditSnapshot, RestoredAdaptiveParent]:

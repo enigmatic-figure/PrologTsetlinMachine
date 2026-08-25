@@ -154,5 +154,10 @@ GNU Prolog, and `ptmrt`, with durable cross-generation evidence-use accounting.
 That scalar-binary slice also supports complete bounded threshold candidate
 sets across several numeric fields, independent per-candidate review,
 adaptation-only deterministic comparison, and selection provenance that is
-sealed before promotion holdout inspection. Intervals, categorical groups,
-and the multi-PTA general control plane remain proposed.
+sealed before promotion holdout inspection. A second experimental scalar-
+binary slice now executes one complete bounded De-escalation
+`literal_redundant` derivation through independent confirmation, deterministic
+TA/manifest contraction, non-regression promotion, native activation, labeled
+drift, and bit-exact restoration. Literal/clause subsumption, multi-literal
+contraction, intervals, categorical groups, and the multi-PTA general control
+plane remain proposed.

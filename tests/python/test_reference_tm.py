@@ -8,6 +8,7 @@ from prolog_tsetlin import (
     LiteralCatalog,
     ScalarBinaryTsetlinMachine,
 )
+from prolog_tsetlin.reference import contract_snapshot_equivalent_feature
 
 
 def configured_xor_machine() -> ScalarBinaryTsetlinMachine:
@@ -84,6 +85,50 @@ class ScalarTMTests(unittest.TestCase):
                 machine.set_state(clause, literal, 4)
         self.assertFalse(machine.clause_output(0, (False, False)))
         self.assertEqual(machine.predict_one((False, False)), 0)
+
+    def test_contract_equivalent_feature_merges_tas_and_preserves_rng(self) -> None:
+        machine = ScalarBinaryTsetlinMachine(
+            2,
+            3,
+            states_per_action=10,
+            specificity=3.0,
+            threshold=5,
+            seed=9,
+        )
+        machine.set_state(0, 0, 8)
+        machine.set_state(0, 1, 14)
+        machine.set_state(0, 4, 17)
+        machine.set_state(0, 5, 6)
+        snapshot = machine.snapshot()
+
+        contracted = contract_snapshot_equivalent_feature(snapshot, 0, 2)
+
+        self.assertEqual(contracted.number_of_features, 2)
+        self.assertEqual(contracted.states[0], (17, 14, *snapshot.states[0][2:4]))
+        expected_second = list(snapshot.states[1])
+        expected_second[0] = max(snapshot.states[1][0], snapshot.states[1][4])
+        expected_second[1] = max(snapshot.states[1][1], snapshot.states[1][5])
+        del expected_second[4:6]
+        self.assertEqual(contracted.states[1], tuple(expected_second))
+        self.assertEqual(contracted.rng_state, snapshot.rng_state)
+        restored = ScalarBinaryTsetlinMachine(
+            2,
+            2,
+            states_per_action=10,
+            specificity=3.0,
+            threshold=5,
+            seed=0,
+        )
+        restored.restore(contracted)
+
+    def test_contract_equivalent_feature_rejects_invalid_positions(self) -> None:
+        snapshot = ScalarBinaryTsetlinMachine(2, 3, seed=4).snapshot()
+        for survivor, removed in ((0, 0), (-1, 1), (0, 3)):
+            with self.subTest(survivor=survivor, removed=removed):
+                with self.assertRaisesRegex(ValueError, "positions"):
+                    contract_snapshot_equivalent_feature(
+                        snapshot, survivor, removed
+                    )
 
 
 if __name__ == "__main__":

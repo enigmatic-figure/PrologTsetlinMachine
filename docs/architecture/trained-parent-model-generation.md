@@ -381,7 +381,8 @@ durable lifecycle transition.
 - the `ptmrt_trained_parent_*` CTest cases
 - the required `Trained-parent GNU Prolog / native lifecycle` CI job
 
-The next PTA breadth milestone should prove a De-escalation PTA lifecycle under
-this recurrent promotion/restoration substrate. Intervals, categorical groups,
-cross-PTA selection, CoTM/shared weights, regression, graph, patch/CTM, and
-other families remain outside the implemented exact target set.
+The first literal-equivalence contraction through this substrate is specified
+by [De-escalation PTA model generations](deescalation-model-generation.md).
+Intervals, categorical groups, literal/clause subsumption, cross-PTA selection,
+CoTM/shared weights, regression, graph, patch/CTM, and other families remain
+outside the implemented exact target set.

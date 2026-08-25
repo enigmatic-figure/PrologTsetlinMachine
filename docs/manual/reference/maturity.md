@@ -16,6 +16,7 @@ This page lists PTM capabilities and their evidence-backed maturity stages. The 
 | pta-threshold-native-slice | experimental | `docs/architecture/pta-threshold-materialization.md`, cross-runtime tests |
 | trained-parent-pta-lifecycle | experimental | `docs/architecture/trained-parent-model-generation.md`, Python and `ptmrt` lifecycle tests |
 | bounded-input-pta-selection | experimental | `docs/architecture/trained-parent-model-generation.md`, multi-candidate lifecycle tests |
+| deescalation-pta-lifecycle | experimental | `docs/architecture/deescalation-model-generation.md`, Python and `ptmrt` lifecycle tests |
 | tui-workbench | experimental | `docs/manual/how-to/tui.md` |
 
 See [Architecture and contracts](../../architecture/index.md) for contracts and [RFCs](../../rfcs/index.md) for proposed directions.

@@ -14,6 +14,7 @@ from prolog_tsetlin.model_generation import (
     AdaptiveSnapshotEnvelope,
     CorpusExample,
     CorpusRole,
+    DeescalationCorpora,
     DriftAuditPolicy,
     EvidenceUsage,
     EvidenceUsagePurpose,
@@ -21,6 +22,7 @@ from prolog_tsetlin.model_generation import (
     LabeledCorpus,
     LiveRuntimeConformanceEvidence,
     LifecycleCorpora,
+    LiteralContractionLineage,
     ModelGeneration,
     ModelGenerationError,
     ModelGenerationLineage,
@@ -28,6 +30,7 @@ from prolog_tsetlin.model_generation import (
     PromotionAuditPolicy,
     PromotionAuditSnapshot,
     PrologInventionEvidence,
+    PrologDeescalationEvidence,
     RuntimeConformanceReport,
     ThresholdCandidateBudget,
     ThresholdCandidateSelection,
@@ -55,6 +58,8 @@ from prolog_tsetlin.services.model_generation import (
     compile_generation_artifact,
     execute_trained_parent_lifecycle,
     execute_trained_parent_lifecycle_with_candidates,
+    execute_literal_deescalation_lifecycle,
+    invent_literal_contraction_for_corpus,
     invent_threshold_candidates_for_corpus,
     reopen_and_restore_for_drift,
     verify_artifact_with_ptmrt,
@@ -318,6 +323,88 @@ def _multi_field_parent() -> tuple[ScalarBinaryTsetlinMachine, OrderedLiteralMan
     return machine, OrderedLiteralManifest.from_catalog(catalog)
 
 
+def _deescalation_fixture() -> tuple[
+    LabeledCorpus,
+    DeescalationCorpora,
+    LabeledCorpus,
+    ScalarBinaryTsetlinMachine,
+    OrderedLiteralManifest,
+]:
+    def make(
+        role: CorpusRole,
+        first_id: int,
+        values: tuple[float, ...],
+        labels: tuple[int, ...],
+    ) -> LabeledCorpus:
+        return LabeledCorpus(
+            "thermostat-deescalation-v1",
+            role,
+            tuple(
+                CorpusExample(
+                    first_id + index,
+                    {"temperature": value},
+                    label,
+                )
+                for index, (value, label) in enumerate(zip(values, labels))
+            ),
+        )
+
+    parent_training = make(
+        CorpusRole.PARENT_TRAINING,
+        20_000,
+        (50.0, 60.0, 70.0, 74.0, 76.0, 80.0, 90.0, 100.0),
+        (0, 0, 0, 0, 1, 1, 1, 1),
+    )
+    proof = make(
+        CorpusRole.DEESCALATION_PROOF,
+        20_100,
+        (51.0, 69.0, 77.0, 91.0),
+        (0, 0, 1, 1),
+    )
+    confirmation = make(
+        CorpusRole.DEESCALATION_CONFIRMATION,
+        20_200,
+        (52.0, 68.0, 78.0, 92.0),
+        (0, 0, 1, 1),
+    )
+    promotion = make(
+        CorpusRole.PROMOTION,
+        20_300,
+        (53.0, 67.0, 79.0, 93.0),
+        (0, 0, 1, 1),
+    )
+    live = make(
+        CorpusRole.LIVE,
+        20_400,
+        (54.0, 66.0, 75.25, 75.75),
+        (0, 0, 1, 1),
+    )
+    schema = FeatureSchema.from_fields(temperature=FieldKind.NUMBER)
+    catalog = LiteralCatalog(schema)
+    catalog.numeric_ge("temperature", 76.0)
+    catalog.numeric_ge("temperature", 75.0)
+    machine = ScalarBinaryTsetlinMachine(
+        1,
+        2,
+        states_per_action=20,
+        specificity=3.0,
+        threshold=10,
+        seed=23,
+    )
+    parent_snapshot = replace(
+        machine.snapshot(),
+        states=((20, 20, 21, 20),),
+    )
+    machine.restore(parent_snapshot)
+    return (
+        parent_training,
+        DeescalationCorpora(proof, confirmation, promotion),
+        live,
+        machine,
+        OrderedLiteralManifest.from_catalog(catalog),
+    )
+
+
 def _session(corpus: LabeledCorpus) -> PTAReasoningSession:
     session = PTAReasoningSession(corpus.dataset_id)
     for example in corpus.examples:
@@ -443,6 +530,237 @@ def test_input_pta_rejects_a_truncated_candidate_set() -> None:
                 maximum_fields=1, maximum_candidates=2
             ),
         )
+
+
+@pytest.mark.skipif(not _has_gprolog(), reason="GNU Prolog is required")
+def test_deescalation_pta_attests_complete_literal_equivalence() -> None:
+    _, corpora, _, parent, manifest = _deescalation_fixture()
+
+    invention = invent_literal_contraction_for_corpus(
+        corpora.proof,
+        parent.snapshot(),
+        manifest,
+        maximum_candidates=4,
+    )
+
+    assert isinstance(invention.evidence, PrologDeescalationEvidence)
+    assert invention.evidence.equivalent_pairs == (
+        tuple(sorted(manifest.literal_ids)),
+    )
+    assert invention.evidence.surviving_literal_id == manifest.literal_ids[0]
+    assert invention.evidence.removed_literal_id == manifest.literal_ids[1]
+    assert invention.evidence.session_digest == (
+        model_generation_service.content_digest(invention.session.to_dict())
+    )
+    assert PrologDeescalationEvidence.from_dict(
+        invention.evidence.to_dict()
+    ) == invention.evidence
+
+
+@pytest.mark.skipif(not _has_gprolog(), reason="GNU Prolog is required")
+def test_deescalation_pta_rejects_truncated_equivalence_set() -> None:
+    schema = FeatureSchema.from_fields(temperature=FieldKind.NUMBER)
+    catalog = LiteralCatalog(schema)
+    catalog.numeric_ge("temperature", 76.0)
+    catalog.numeric_ge("temperature", 75.0)
+    catalog.numeric_ge("temperature", 74.0)
+    manifest = OrderedLiteralManifest.from_catalog(catalog)
+    machine = ScalarBinaryTsetlinMachine(1, 3, seed=5)
+    proof = LabeledCorpus(
+        "thermostat-deescalation-budget-v1",
+        CorpusRole.DEESCALATION_PROOF,
+        (
+            CorpusExample(0, {"temperature": 60.0}, 0),
+            CorpusExample(1, {"temperature": 80.0}, 1),
+        ),
+    )
+
+    with pytest.raises(ModelGenerationError, match="exceeds its explicit budget"):
+        invent_literal_contraction_for_corpus(
+            proof,
+            machine.snapshot(),
+            manifest,
+            maximum_candidates=2,
+        )
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_literal_deescalation_lifecycle_contracts_promotes_and_restores(
+    tmp_path: Path,
+) -> None:
+    parent_training, corpora, live, parent, manifest = _deescalation_fixture()
+    original_snapshot = parent.snapshot()
+    store = ModelGenerationStore(tmp_path / "deescalation-store")
+
+    result = execute_literal_deescalation_lifecycle(
+        parent_snapshot=original_snapshot,
+        parent_manifest=manifest,
+        parent_training_corpus=parent_training,
+        corpora=corpora,
+        maximum_candidates=4,
+        promotion_policy=PromotionAuditPolicy(
+            4,
+            require_strict_improvement=False,
+            maximum_regressions=0,
+        ),
+        store=store,
+        ptmrt_executable=_ptmrt_path(),
+    )
+
+    assert isinstance(result.lineage, LiteralContractionLineage)
+    assert LiteralContractionLineage.from_dict(
+        result.lineage.to_dict()
+    ) == result.lineage
+    assert result.contracted_parent.snapshot.snapshot.number_of_features == 1
+    assert result.contracted_parent.manifest.literals == manifest.literals[:1]
+    assert result.contracted_parent.snapshot.snapshot.states == ((21, 20),)
+    assert result.contracted_parent.snapshot.snapshot.rng_state == (
+        original_snapshot.rng_state
+    )
+    assert result.promotion_audit.accepted
+    assert result.promotion_audit.parent_errors == (
+        result.promotion_audit.child_errors
+    )
+    assert result.promotion_audit.regressions == 0
+    assert result.conformance.exact
+    assert store.load_deescalation_evidence(
+        result.deescalation_evidence.evidence_id
+    ) == result.deescalation_evidence
+    assert ModelGenerationController(
+        store, ptmrt_executable=_ptmrt_path()
+    ).active_generation_id == result.child_generation.generation_id
+
+    drift, restored = reopen_and_restore_for_drift(
+        result,
+        live,
+        DriftAuditPolicy(
+            minimum_observations=4,
+            minimum_regressions=2,
+            minimum_regression_rate=0.5,
+            minimum_error_increase=2,
+            minimum_observations_per_class=2,
+        ),
+    )
+    assert drift.parent_errors == 0
+    assert drift.child_errors == 2
+    assert drift.regressions == 2
+    assert restored.snapshot.snapshot == original_snapshot
+    assert restored.manifest == manifest
+    assert result.controller.active_generation_id == (
+        result.parent_generation.generation_id
+    )
+
+    original_next = ScalarBinaryTsetlinMachine(
+        original_snapshot.number_of_clauses,
+        original_snapshot.number_of_features,
+        states_per_action=original_snapshot.states_per_action,
+        specificity=original_snapshot.specificity,
+        threshold=original_snapshot.threshold,
+        seed=0,
+    )
+    original_next.restore(original_snapshot)
+    update = manifest.build_catalog().encode((parent_training.records[0],)).ta
+    original_next.fit_literal_batch(update, (parent_training.labels[0],), epochs=1)
+    restored.machine.fit_literal_batch(
+        update, (parent_training.labels[0],), epochs=1
+    )
+    assert restored.machine.snapshot() == original_next.snapshot()
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_literal_deescalation_rejects_confirmation_divergence(
+    tmp_path: Path,
+) -> None:
+    parent_training, corpora, _, parent, manifest = _deescalation_fixture()
+    divergent_confirmation = LabeledCorpus(
+        corpora.confirmation.dataset_id,
+        CorpusRole.DEESCALATION_CONFIRMATION,
+        (
+            CorpusExample(21_000, {"temperature": 55.5}, 0),
+            CorpusExample(21_001, {"temperature": 65.5}, 0),
+            CorpusExample(21_002, {"temperature": 75.5}, 1),
+            CorpusExample(21_003, {"temperature": 85.5}, 1),
+        ),
+    )
+    divergent = DeescalationCorpora(
+        corpora.proof,
+        divergent_confirmation,
+        corpora.promotion,
+    )
+    store = ModelGenerationStore(tmp_path / "deescalation-divergence-store")
+
+    with pytest.raises(ModelGenerationError, match="confirmation corpus"):
+        execute_literal_deescalation_lifecycle(
+            parent_snapshot=parent.snapshot(),
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=divergent,
+            maximum_candidates=4,
+            promotion_policy=PromotionAuditPolicy(
+                4,
+                require_strict_improvement=False,
+                maximum_regressions=0,
+            ),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+    assert store.read_events()[-1].kind is LifecycleEventKind.EVIDENCE_ABANDONED
+
+
+@pytest.mark.skipif(
+    not _has_gprolog() or _ptmrt_path() is None,
+    reason="live GNU Prolog and a built ptmrt are required",
+)
+def test_literal_deescalation_admission_reconstructs_exact_contraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_training, corpora, _, parent, manifest = _deescalation_fixture()
+    real_contract = model_generation_service.contract_parent_with_equivalent_literal
+    calls = 0
+
+    def inject_unattested_contraction(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        contracted = real_contract(*args, **kwargs)
+        if calls != 1:
+            return contracted
+        snapshot = contracted.snapshot.snapshot
+        states = [list(row) for row in snapshot.states]
+        states[0][0] += 1
+        forged = replace(snapshot, states=tuple(tuple(row) for row in states))
+        return replace(
+            contracted,
+            snapshot=AdaptiveSnapshotEnvelope(forged),
+        )
+
+    monkeypatch.setattr(
+        model_generation_service,
+        "contract_parent_with_equivalent_literal",
+        inject_unattested_contraction,
+    )
+    store = ModelGenerationStore(tmp_path / "unattested-contraction-store")
+    with pytest.raises(ModelGenerationError, match="cannot be reconstructed"):
+        execute_literal_deescalation_lifecycle(
+            parent_snapshot=parent.snapshot(),
+            parent_manifest=manifest,
+            parent_training_corpus=parent_training,
+            corpora=corpora,
+            maximum_candidates=4,
+            promotion_policy=PromotionAuditPolicy(
+                4,
+                require_strict_improvement=False,
+                maximum_regressions=0,
+            ),
+            store=store,
+            ptmrt_executable=_ptmrt_path(),
+        )
+    assert calls >= 2
 
 
 @pytest.mark.skipif(
