@@ -65,6 +65,10 @@ host environment, duplicate run IDs, or records outside the declared matrix:
 PYTHONPATH=python python3 benchmarks/initial_capacity/run_local_matrix.py --project-root . --material-root out/benchmark-campaign/materials --incumbent-root out/benchmark-campaign/incumbents-linux --ptm-native-executable out/benchmark-campaign/ptm-native/ptm_campaign_native_runner --ptm-commit <commit> --output out/benchmark-campaign/local-scout
 ```
 
+Repeat `--variant` to restrict the material variants in a plan. By default the
+driver scores validation when available; an explicit `--score-split
+evaluation` is intended for a configuration frozen after validation.
+
 `package_colab.py` creates the deterministic allowlisted input archive consumed
 by `colab_smoke.py`. On a CPU runtime the remote driver repeats the four-route
 smoke. When both a GPU and `nvcc` are present, it additionally builds PTM with

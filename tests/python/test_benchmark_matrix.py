@@ -101,3 +101,25 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
     assert summary["attempts_recorded"] == 1
     assert summary["statuses"] == {"ok": 1}
     assert summary["environment_digest"] == environment["environment_digest"]
+
+    evaluation_output = tmp_path / "evaluation-plan"
+    evaluation_command = command.copy()
+    output_index = evaluation_command.index(str(output))
+    evaluation_command[output_index] = str(evaluation_output)
+    evaluation_command.extend(
+        [
+            "--variant",
+            "n-03",
+            "--score-split",
+            "evaluation",
+            "--plan-only",
+        ]
+    )
+    subprocess.run(evaluation_command, check=True, capture_output=True, text=True)
+    evaluation_plan = json.loads(
+        (evaluation_output / "plan.json").read_text(encoding="utf-8")
+    )
+    assert len(evaluation_plan["attempts"]) == 1
+    assert evaluation_plan["variants"] == ["n-03"]
+    assert evaluation_plan["requested_score_splits"] == ["evaluation"]
+    assert evaluation_plan["attempts"][0]["score_splits"] == ["evaluation"]

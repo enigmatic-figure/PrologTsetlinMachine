@@ -49,18 +49,33 @@ def _require_existing_file(path: Path, label: str) -> Path:
 def _selected_manifests(
     material_root: Path,
     families: Sequence[str],
+    variants: Sequence[str],
+    requested_score_splits: Sequence[str],
 ) -> tuple[tuple[Path, CampaignDatasetManifest, tuple[str, ...]], ...]:
     wanted = {FAMILY_DATASETS[family] for family in families}
+    wanted_variants = set(variants)
     selected = []
     for path in sorted(material_root.resolve().rglob("manifest.json")):
         manifest = CampaignDatasetManifest.load(path)
         if manifest.dataset_id not in wanted:
             continue
+        if wanted_variants and manifest.variant_id not in wanted_variants:
+            continue
         score_splits = (
-            ("validation",)
-            if "validation" in manifest.split_map
-            else ("evaluation",)
+            tuple(requested_score_splits)
+            if requested_score_splits
+            else (
+                ("validation",)
+                if "validation" in manifest.split_map
+                else ("evaluation",)
+            )
         )
+        missing_splits = sorted(set(score_splits) - set(manifest.split_map))
+        if missing_splits:
+            raise ValueError(
+                f"campaign variant {manifest.variant_id} lacks requested score splits: "
+                + ", ".join(missing_splits)
+            )
         selected.append((path, manifest, score_splits))
     if not selected:
         raise ValueError("the selected campaign families have no material manifests")
@@ -68,6 +83,13 @@ def _selected_manifests(
     missing = sorted(wanted - represented)
     if missing:
         raise ValueError("campaign material is missing dataset families: " + ", ".join(missing))
+    represented_variants = {manifest.variant_id for _, manifest, _ in selected}
+    missing_variants = sorted(wanted_variants - represented_variants)
+    if missing_variants:
+        raise ValueError(
+            "campaign material is missing requested variants: "
+            + ", ".join(missing_variants)
+        )
     return tuple(selected)
 
 
@@ -259,6 +281,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--pass-name", default="scout")
     parser.add_argument("--family", action="append", choices=sorted(FAMILY_DATASETS))
+    parser.add_argument("--variant", action="append")
+    parser.add_argument(
+        "--score-split",
+        action="append",
+        choices=("validation", "evaluation"),
+    )
     parser.add_argument(
         "--route",
         action="append",
@@ -293,9 +321,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     families = tuple(arguments.family or sorted(FAMILY_DATASETS))
     routes = tuple(arguments.route or DEFAULT_ROUTES)
     seeds = tuple(arguments.seed or (20260826,))
+    variants = tuple(arguments.variant or ())
+    score_splits = tuple(arguments.score_split or ())
     if any(seed < 0 for seed in seeds) or len(seeds) != len(set(seeds)):
         parser.error("--seed values must be unique nonnegative integers")
-    manifests = _selected_manifests(arguments.material_root, families)
+    if len(variants) != len(set(variants)):
+        parser.error("--variant values must be unique")
+    if len(score_splits) != len(set(score_splits)):
+        parser.error("--score-split values must be unique")
+    manifests = _selected_manifests(
+        arguments.material_root,
+        families,
+        variants,
+        score_splits,
+    )
 
     attempts = []
     for manifest_path, manifest, score_splits in manifests:
@@ -338,6 +377,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "campaign_id": "initial-capacity-local-v1",
         "pass": arguments.pass_name,
         "families": list(families),
+        "variants": list(variants),
+        "requested_score_splits": list(score_splits),
         "routes": list(routes),
         "seeds": list(seeds),
         "attempts": attempts,
