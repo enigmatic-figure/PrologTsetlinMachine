@@ -895,6 +895,10 @@ class CampaignRunRequest:
             _require_identifier(name, "score split")
         if not isinstance(self.model, Mapping) or not self.model:
             raise BenchmarkCampaignError("model request must be a nonempty mapping")
+        for name in ("implementation", "backend", "commit"):
+            _require_string(self.model.get(name), f"model {name}")
+        if not isinstance(self.model.get("config"), Mapping):
+            raise BenchmarkCampaignError("model config must be a mapping")
         try:
             canonical_json_bytes(dict(self.model))
         except (TypeError, ValueError) as error:
@@ -1118,11 +1122,10 @@ def run_campaign_attempt(
                 diagnostics = _canonical_mapping(
                     wrapper_result["diagnostics"], "wrapper diagnostics"
                 )
-                environment.update(
-                    _canonical_mapping(
-                        wrapper_result["environment"], "wrapper environment"
-                    )
+                wrapper_environment = _canonical_mapping(
+                    wrapper_result["environment"], "wrapper environment"
                 )
+                environment.update(wrapper_environment)
                 artifacts["wrapper"] = _canonical_mapping(
                     wrapper_result["artifacts"], "wrapper artifacts"
                 )
@@ -1130,7 +1133,19 @@ def run_campaign_attempt(
             except BenchmarkCampaignError as error:
                 failure = {"class": "invalid_output", "message": str(error)}
             if failure is None and status == "ok":
-                if wrapper_result["failure"] is not None:
+                if (
+                    wrapper_environment.get("source_commit")
+                    != request.model["commit"]
+                    or wrapper_environment.get("backend_requested")
+                    != request.model["backend"]
+                    or type(wrapper_environment.get("backend_actual")) is not str
+                    or not wrapper_environment["backend_actual"]
+                ):
+                    failure = {
+                        "class": "invalid_output",
+                        "message": "wrapper execution identity contradicts the request",
+                    }
+                elif wrapper_result["failure"] is not None:
                     failure = {
                         "class": "invalid_output",
                         "message": "successful wrapper result carries a failure",
@@ -1272,10 +1287,8 @@ def _ptm_scalar_wrapper(request_path: Path) -> dict[str, object]:
     inference_samples: dict[str, list[float]] = {}
     for split_name in request.score_splits:
         rows = score_rows[split_name]
-        warmup_started = time.perf_counter()
         for _ in range(inference_warmup_repeats):
             machine.predict(rows)
-        preprocessing_elapsed += time.perf_counter() - warmup_started
         samples: list[float] = []
         selected: list[int] | None = None
         for _ in range(inference_repeats):
@@ -1324,6 +1337,8 @@ def _ptm_scalar_wrapper(request_path: Path) -> dict[str, object]:
         },
         "environment": {
             "wrapper_python": platform.python_version(),
+            "source_commit": model["commit"],
+            "backend_requested": model["backend"],
             "backend_actual": "python-scalar-reference",
         },
         "artifacts": {},
@@ -1421,6 +1436,7 @@ def _ptm_native_wrapper(
             command,
             timeout_seconds=600,
             max_output_bytes=_MAX_RESULT_BYTES,
+            isolate_process_tree=False,
         )
     except BoundedProcessError as error:
         raise BenchmarkCampaignError(
@@ -1490,6 +1506,7 @@ def _ptm_native_wrapper(
         "environment": {
             "wrapper_python": platform.python_version(),
             "backend_actual": f"cpp-scalar-train+packed-{backend}",
+            "backend_requested": model["backend"],
             "source_commit": model.get("commit", "unknown"),
         },
         "artifacts": {

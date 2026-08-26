@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import runpy
+import subprocess
 import sys
 
 import pytest
@@ -242,3 +244,220 @@ def test_failed_and_unsupported_attempts_are_both_retained(tmp_path: Path) -> No
     assert unsupported["failure"]["class"] == "unsupported"
     persisted = [json.loads(line) for line in raw_jsonl.read_text(encoding="utf-8").splitlines()]
     assert [item["status"] for item in persisted] == ["failed", "unsupported"]
+
+
+def test_successful_wrapper_identity_must_match_the_request(tmp_path: Path) -> None:
+    manifest_path = prepare_parity_ladder(
+        tmp_path / "materials", seed=41, widths=(3,)
+    )[0]
+    request = _request(
+        manifest_path,
+        tmp_path / "run-identity-mismatch",
+        run_id="identity-mismatch",
+    )
+    wrapper = """
+import json
+import pathlib
+import sys
+
+request = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+manifest_path = pathlib.Path(request["dataset_manifest"])
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+output = pathlib.Path(request["output_directory"])
+predictions = {}
+for name in request["score_splits"]:
+    source = manifest_path.parent / manifest["splits"][name]["path"]
+    target = output / f"predictions-{name}.txt"
+    target.write_text("".join(line.split()[-1] + "\\n" for line in source.read_text().splitlines()))
+    predictions[name] = target.name
+print(json.dumps({
+    "schema": "ptm.campaign-wrapper-result.v1",
+    "run_id": request["run_id"],
+    "status": "ok",
+    "predictions": predictions,
+    "timing": {},
+    "diagnostics": {},
+    "environment": {
+        "source_commit": "wrong-commit",
+        "backend_requested": request["model"]["backend"],
+        "backend_actual": request["model"]["backend"],
+    },
+    "artifacts": {},
+    "failure": None,
+}))
+"""
+
+    record = run_campaign_attempt(
+        request,
+        [sys.executable, "-c", wrapper],
+        raw_jsonl=tmp_path / "raw.jsonl",
+        timeout_seconds=30,
+    )
+
+    assert record["status"] == "failed"
+    assert record["failure"] == {
+        "class": "invalid_output",
+        "message": "wrapper execution identity contradicts the request",
+    }
+
+
+def test_colab_gpu_smoke_requires_a_correct_measured_backend(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    validator = runpy.run_path(
+        str(project_root / "benchmarks" / "initial_capacity" / "colab_smoke.py")
+    )["validate_gpu_smoke"]
+    backend = "cuda_warp_tile_fused_vote"
+    capabilities = {
+        "schema": "ptm.runtime-benchmark.v1",
+        "event": "capabilities",
+        "gpu": {
+            "available": True,
+            "status": "ok",
+            "supported_backends": [backend],
+        },
+    }
+    measurement = {
+        "schema": "ptm.runtime-benchmark.v1",
+        "event": "measurement",
+        "backend_requested": backend,
+        "backend_selected": backend,
+        "correctness_gate": "pass",
+        "cuda_error_status": "ok",
+        "timing_scope": "kernel_only",
+    }
+    valid = tmp_path / "valid.jsonl"
+    valid.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                capabilities,
+                measurement,
+                {
+                    "schema": "ptm.runtime-benchmark.v1",
+                    "event": "run_end",
+                    "measurements": 1,
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert validator(valid, backend)["measurements"] == 1
+
+    skipped = tmp_path / "skipped.jsonl"
+    skipped.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                capabilities,
+                {
+                    "schema": "ptm.runtime-benchmark.v1",
+                    "event": "skip",
+                    "backend": backend,
+                },
+                {
+                    "schema": "ptm.runtime-benchmark.v1",
+                    "event": "run_end",
+                    "measurements": 0,
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="complete measured run"):
+        validator(skipped, backend)
+
+
+@pytest.mark.parametrize(
+    (
+        "wrapper_backend",
+        "implementation",
+        "commit",
+        "requested_backend",
+        "platform_name",
+        "message",
+    ),
+    (
+        (
+            "pytsetlinmachine",
+            "pytsetlinmachine.multiclass",
+            "wrong-commit",
+            "cpu",
+            None,
+            "requested incumbent commit does not match the wrapper pin",
+        ),
+        (
+            "tmu",
+            "tmu.vanilla-classifier",
+            "5605ff070a18549328028c907a9acf68e063346e",
+            "cpu",
+            "CUDA",
+            "requested TMU backend disagrees with model platform",
+        ),
+    ),
+)
+def test_incumbent_wrapper_rejects_requested_identity_mismatch(
+    tmp_path: Path,
+    wrapper_backend: str,
+    implementation: str,
+    commit: str,
+    requested_backend: str,
+    platform_name: str | None,
+    message: str,
+) -> None:
+    manifest_path = prepare_parity_ladder(
+        tmp_path / f"materials-{wrapper_backend}", seed=43, widths=(3,)
+    )[0]
+    manifest = _load(manifest_path)
+    config: dict[str, object] = {
+        "clauses": 4,
+        "threshold": 5,
+        "specificity": 3,
+        "epochs": 1,
+        "inference_repeats": 1,
+        "inference_warmup_repeats": 0,
+        "seed": 7,
+        "boost_true_positive_feedback": 1,
+        "weighted_clauses": False,
+        "feature_negation": True,
+        "number_of_state_bits": 8,
+        "max_included_literals": None,
+    }
+    if platform_name is not None:
+        config["platform"] = platform_name
+    request = CampaignRunRequest(
+        campaign_id="identity-check-v1",
+        run_id=f"{wrapper_backend}-identity-mismatch",
+        pass_name="smoke",
+        track="shared",
+        dataset_manifest=str(manifest_path.resolve()),
+        dataset_manifest_digest=manifest.manifest_digest,
+        train_split="train",
+        score_splits=("evaluation",),
+        model={
+            "implementation": implementation,
+            "backend": requested_backend,
+            "commit": commit,
+            "config": config,
+        },
+        output_directory=str((tmp_path / f"run-{wrapper_backend}").resolve()),
+    )
+    request_path = tmp_path / f"request-{wrapper_backend}.json"
+    request.write(request_path)
+    wrapper = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks"
+        / "initial_capacity"
+        / "incumbent_wrapper.py"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(wrapper), wrapper_backend, str(request_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    assert result["status"] == "failed"
+    assert message in result["failure"]

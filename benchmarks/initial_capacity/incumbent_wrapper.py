@@ -141,6 +141,11 @@ def _run(backend: str, request_path: Path) -> dict[str, object]:
         return _unsupported(
             run_id, f"wrapper supports only {expected_implementation}"
         )
+    if model.get("commit") != PINS[backend]:
+        raise WrapperError("requested incumbent commit does not match the wrapper pin")
+    requested_backend = model.get("backend")
+    if type(requested_backend) is not str:
+        raise WrapperError("requested incumbent backend is invalid")
     config = model.get("config")
     if not isinstance(config, Mapping):
         raise WrapperError("campaign model config is malformed")
@@ -187,6 +192,8 @@ def _run(backend: str, request_path: Path) -> dict[str, object]:
         raise WrapperError("model max_included_literals must be null or positive")
 
     if backend == "pytsetlinmachine":
+        if requested_backend != "cpu":
+            raise WrapperError("pyTsetlinMachine wrapper supports only the CPU backend")
         from pyTsetlinMachine.tm import MultiClassTsetlinMachine
 
         indexed = _boolean(config, "indexed", True)
@@ -206,11 +213,13 @@ def _run(backend: str, request_path: Path) -> dict[str, object]:
         backend_actual = "pytsetlinmachine-cpu"
         seed_control = "fixed-library-stream-no-public-seed"
     else:
-        from tmu.models.classification.vanilla_classifier import TMClassifier
-
         platform_name = config.get("platform", "CPU")
         if platform_name not in ("CPU", "CUDA"):
             return _unsupported(run_id, "TMU platform must be CPU or CUDA")
+        if requested_backend != platform_name.lower():
+            raise WrapperError("requested TMU backend disagrees with model platform")
+        from tmu.models.classification.vanilla_classifier import TMClassifier
+
         shuffle = _boolean(config, "shuffle", True)
         machine = TMClassifier(
             number_of_clauses=clauses,
@@ -243,10 +252,8 @@ def _run(backend: str, request_path: Path) -> dict[str, object]:
     for name in score_names:
         selected = None
         samples: list[float] = []
-        warmup_started = time.perf_counter()
         for _ in range(warmup_repeats):
             machine.predict(score_rows[name])
-        preprocessing_elapsed += time.perf_counter() - warmup_started
         for _ in range(repeats):
             started = time.perf_counter()
             current = machine.predict(score_rows[name])
@@ -283,6 +290,7 @@ def _run(backend: str, request_path: Path) -> dict[str, object]:
             "package": package_name,
             "package_version": package_version,
             "source_commit": PINS[backend],
+            "backend_requested": requested_backend,
             "backend_actual": backend_actual,
         },
         "artifacts": {},

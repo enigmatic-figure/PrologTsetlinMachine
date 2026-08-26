@@ -149,11 +149,27 @@ class _WindowsJob:
 
 
 class _ProcessTree:
-    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        isolate_process_tree: bool,
+    ) -> None:
         self.process = process
-        self.windows_job = _WindowsJob(process) if os.name == "nt" else None
+        self.isolate_process_tree = isolate_process_tree
+        self.windows_job = (
+            _WindowsJob(process)
+            if isolate_process_tree and os.name == "nt"
+            else None
+        )
 
     def terminate(self) -> None:
+        if not self.isolate_process_tree:
+            try:
+                self.process.kill()
+            except (OSError, ProcessLookupError):
+                pass
+            return
         if self.windows_job is not None:
             self.windows_job.terminate()
             return
@@ -213,10 +229,18 @@ def run_bounded_process(
     cwd: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
     creationflags: int = 0,
+    isolate_process_tree: bool = True,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run a byte-capped child tree within one absolute wall-clock deadline."""
+    """Run a byte-capped child within one absolute wall-clock deadline.
+
+    The default creates and owns a process-tree boundary. Set
+    ``isolate_process_tree=False`` only for a controlled leaf process which
+    must remain inside an already-established outer boundary.
+    """
 
     _validate_arguments(command, timeout_seconds, max_output_bytes)
+    if type(isolate_process_tree) is not bool:
+        raise TypeError("isolate_process_tree must be Boolean")
     started = time.monotonic()
     deadline = started + float(timeout_seconds)
     cleanup_reserve = min(
@@ -226,7 +250,7 @@ def run_bounded_process(
     )
     execution_deadline = deadline - cleanup_reserve
     platform_flags = creationflags
-    if os.name == "nt":
+    if os.name == "nt" and isolate_process_tree:
         platform_flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         launch_command = [sys.executable, "-I", "-c", _WINDOWS_JOB_LAUNCHER]
         child_stdin = subprocess.PIPE
@@ -242,13 +266,16 @@ def run_bounded_process(
             cwd=Path(cwd) if cwd is not None else None,
             env=None if env is None else dict(env),
             creationflags=platform_flags,
-            start_new_session=os.name != "nt",
+            start_new_session=isolate_process_tree and os.name != "nt",
         )
     except (OSError, ValueError) as exc:
         raise BoundedProcessLaunchError(f"could not launch child process: {exc}") from exc
 
     try:
-        tree = _ProcessTree(process)
+        tree = _ProcessTree(
+            process,
+            isolate_process_tree=isolate_process_tree,
+        )
     except OSError as exc:
         process.kill()
         try:
@@ -259,7 +286,7 @@ def run_bounded_process(
             f"could not establish child process-tree containment: {exc}"
         ) from exc
 
-    if os.name == "nt":
+    if os.name == "nt" and isolate_process_tree:
         try:
             if process.stdin is None:
                 raise OSError("contained launcher stdin is unavailable")

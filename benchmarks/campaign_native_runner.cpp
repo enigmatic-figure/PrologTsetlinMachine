@@ -270,13 +270,10 @@ int main(int argc, char** argv) {
             std::chrono::steady_clock::now() - materialization_start).count();
 
         for (auto& score : scores) {
-            const auto warmup_start = std::chrono::steady_clock::now();
             for (std::uint64_t warmup = 0; warmup < warmups; ++warmup) {
                 static_cast<void>(
                     evaluate_packed(packed, score.dataset, score.pages));
             }
-            preprocessing_seconds += std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - warmup_start).count();
             for (std::size_t repeat = 0; repeat < repeats; ++repeat) {
                 const auto started = std::chrono::steady_clock::now();
                 auto current = evaluate_packed(packed, score.dataset, score.pages);

@@ -58,7 +58,9 @@ only. It is not a performance or accuracy result.
 by `colab_smoke.py`. On a CPU runtime the remote driver repeats the four-route
 smoke. When both a GPU and `nvcc` are present, it additionally builds PTM with
 CUDA and runs the existing packed-runtime correctness-gated GPU smoke. The
-dataset routes remain labeled with their actual CPU backends.
+dataset routes remain labeled with their actual CPU backends. Invoke the T4
+driver with `--require-gpu`; it then fails unless the requested CUDA backend
+produces correctness-gated measurements.
 
 Incumbent clause counts are per class. PTM's binary scalar clause pool instead
 alternates positive and negative polarity. Campaign configurations must record

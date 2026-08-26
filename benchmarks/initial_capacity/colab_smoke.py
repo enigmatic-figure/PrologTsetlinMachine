@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -99,10 +100,66 @@ def environment_receipt() -> dict[str, object]:
     }
 
 
-def main() -> int:
+def validate_gpu_smoke(path: Path, backend: str) -> dict[str, object]:
+    events: list[dict[str, object]] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"GPU smoke JSONL is malformed at line {line_number}") from error
+        if not isinstance(event, dict) or event.get("schema") != "ptm.runtime-benchmark.v1":
+            raise RuntimeError("GPU smoke event schema is invalid")
+        events.append(event)
+    capabilities = [event for event in events if event.get("event") == "capabilities"]
+    run_end = [event for event in events if event.get("event") == "run_end"]
+    measurements = [
+        event
+        for event in events
+        if event.get("event") == "measurement"
+        and event.get("backend_requested") == backend
+        and event.get("backend_selected") == backend
+    ]
+    if len(capabilities) != 1 or len(run_end) != 1 or not measurements:
+        raise RuntimeError("GPU smoke did not emit one complete measured run")
+    gpu = capabilities[0].get("gpu")
+    supported_backends = (
+        gpu.get("supported_backends") if isinstance(gpu, dict) else None
+    )
+    if (
+        not isinstance(gpu, dict)
+        or gpu.get("available") is not True
+        or gpu.get("status") != "ok"
+        or not isinstance(supported_backends, list)
+        or any(type(item) is not str for item in supported_backends)
+        or backend not in supported_backends
+    ):
+        raise RuntimeError("GPU smoke capabilities do not support the requested backend")
+    if any(
+        event.get("correctness_gate") != "pass"
+        or event.get("cuda_error_status") != "ok"
+        for event in measurements
+    ):
+        raise RuntimeError("GPU smoke measurement failed correctness or CUDA status")
+    terminal_count = run_end[0].get("measurements")
+    if type(terminal_count) is not int or terminal_count != len(measurements):
+        raise RuntimeError("GPU smoke terminal measurement count is inconsistent")
+    return {
+        "backend": backend,
+        "measurements": len(measurements),
+        "timing_scopes": sorted(
+            str(event.get("timing_scope")) for event in measurements
+        ),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--require-gpu", action="store_true")
+    arguments = parser.parse_args(argv)
     RESULTS.mkdir(parents=True, exist_ok=True)
     status = "failed"
     failure = None
+    gpu_smoke: dict[str, object] | str = "not-run"
     try:
         if not ARCHIVE.is_file():
             raise FileNotFoundError(ARCHIVE)
@@ -118,6 +175,8 @@ def main() -> int:
         )
         generator = "Ninja" if shutil.which("ninja") else "Unix Makefiles"
         cuda_enabled = bool(shutil.which("nvidia-smi") and shutil.which("nvcc"))
+        if arguments.require_gpu and not cuda_enabled:
+            raise RuntimeError("GPU smoke was required but CUDA tooling is unavailable")
         build = CONTENT / (
             f"ptm-native-{'cuda' if cuda_enabled else 'cpu'}-"
             + ("ninja" if generator == "Ninja" else "make")
@@ -150,6 +209,7 @@ def main() -> int:
             ]
         )
         if cuda_enabled:
+            requested_gpu_backend = "cuda_warp_tile_fused_vote"
             run(
                 [
                     "cmake",
@@ -172,7 +232,7 @@ def main() -> int:
                     "--resident-pages",
                     "16",
                     "--backend",
-                    "cuda_warp_tile_fused_vote",
+                    requested_gpu_backend,
                     "--repeats",
                     "5",
                     "--warmup",
@@ -184,6 +244,10 @@ def main() -> int:
                     "--jsonl",
                 ],
                 stdout_copy=RESULTS / "gpu-packed-smoke.jsonl",
+            )
+            gpu_smoke = validate_gpu_smoke(
+                RESULTS / "gpu-packed-smoke.jsonl",
+                requested_gpu_backend,
             )
         process_environment = dict(os.environ)
         process_environment["PYTHONPATH"] = str(PROJECT / "python")
@@ -220,6 +284,8 @@ def main() -> int:
             "schema": "ptm.colab-plumbing-smoke.v1",
             "status": status,
             "failure": failure,
+            "gpu_smoke": gpu_smoke,
+            "gpu_required": arguments.require_gpu,
         }
         (RESULTS / "environment.json").write_text(
             json.dumps(receipt, indent=2, sort_keys=True) + "\n",
