@@ -317,7 +317,7 @@ if(PTM_BUILD_TESTS OR PTM_BUILD_BENCHMARKS)
                 "${CMAKE_CURRENT_BINARY_DIR}/campaign_binary_predictions.txt")
         set_tests_properties(ptm_campaign_native_runner_smoke PROPERTIES
             PASS_REGULAR_EXPRESSION
-                "ptm.native-campaign-runner.v1.*runtime_conformance_mismatches.*0")
+                "ptm.native-campaign-runner.v2.*runtime_conformance_mismatches.*0")
     endif()
 endif()
 
