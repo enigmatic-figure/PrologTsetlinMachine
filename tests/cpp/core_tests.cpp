@@ -125,6 +125,30 @@ void test_scalar_tm() {
             "restored TM state did not replay identically");
     require(first.rng == replay.rng,
             "restored random stream did not replay identically");
+
+    const std::array<std::uint8_t, 1> present{1};
+    ptm::ScalarBinaryTM standard(1, 1, 128, 1.01, 100, 41);
+    ptm::ScalarBinaryTM boosted(1, 1, 128, 1.01, 100, 41);
+    for (std::size_t literal = 0; literal < 2; ++literal) {
+        standard.set_state(0, literal, 128);
+        boosted.set_state(0, literal, 128);
+    }
+    for (std::size_t iteration = 0; iteration < 200; ++iteration) {
+        standard.update(present, 1);
+        boosted.update(present, 1, true);
+    }
+    require(boosted.state(0, 0) > standard.state(0, 0),
+            "boosted true-positive feedback did not increase true literals");
+
+    const auto boost_before = boosted.snapshot();
+    boosted.update(present, 1, true);
+    const auto boost_first = boosted.snapshot();
+    boosted.restore(boost_before);
+    boosted.update(present, 1, true);
+    const auto boost_replay = boosted.snapshot();
+    require(boost_first.states == boost_replay.states &&
+                boost_first.rng == boost_replay.rng,
+            "boosted update did not replay identically after restore");
 }
 
 }  // namespace

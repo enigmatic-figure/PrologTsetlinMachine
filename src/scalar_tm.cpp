@@ -126,6 +126,12 @@ double ScalarBinaryTM::random_unit() {
 }
 
 void ScalarBinaryTM::update(std::span<const std::uint8_t> features, int target) {
+    update(features, target, false);
+}
+
+void ScalarBinaryTM::update(std::span<const std::uint8_t> features,
+                            int target,
+                            bool boost_true_positive_feedback) {
     if (features.size() != number_of_features_) {
         throw std::invalid_argument("feature vector has the wrong width");
     }
@@ -134,7 +140,9 @@ void ScalarBinaryTM::update(std::span<const std::uint8_t> features, int target) 
     }
 
     const int class_sum = score(features);
-    const double reward_probability = (specificity_ - 1.0) / specificity_;
+    const double reward_probability = boost_true_positive_feedback
+                                          ? 1.0
+                                          : (specificity_ - 1.0) / specificity_;
     const double penalty_probability = 1.0 / specificity_;
 
     for (std::size_t clause = 0; clause < number_of_clauses_; ++clause) {
@@ -201,4 +209,3 @@ void ScalarBinaryTM::restore(const ScalarTMSnapshot& source) {
 }
 
 }  // namespace ptm
-

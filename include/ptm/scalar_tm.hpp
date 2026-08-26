@@ -55,6 +55,9 @@ public:
     [[nodiscard]] int predict(std::span<const std::uint8_t> features) const;
 
     void update(std::span<const std::uint8_t> features, int target);
+    void update(std::span<const std::uint8_t> features,
+                int target,
+                bool boost_true_positive_feedback);
 
     [[nodiscard]] ScalarTMSnapshot snapshot() const;
     void restore(const ScalarTMSnapshot& snapshot);
@@ -78,4 +81,3 @@ private:
 };
 
 }  // namespace ptm
-
