@@ -9,7 +9,7 @@ controls below come from `prolog_tsetlin.help_topics`.
 
 Explore PTM through the keyboard-first Textual workbench.
 
-The canonical workbench keeps system state and research telemetry visible while task views cover deterministic XOR training, clauses, TA populations, literals, temporal samples, portable artifacts, and bounded symbolic search. The native runtime and GNU Prolog remain optional until a workflow needs them.
+The canonical workbench keeps system state and research telemetry visible while task views cover deterministic XOR training, sustained native MNIST multiclass training, clauses, TA populations, literals, temporal samples, portable artifacts, and bounded symbolic search. GNU Prolog remains optional until a workflow needs it.
 
 Use the footer for active shortcuts and open help for controls drawn from this shared registry. The former five-view interface remains available with `ptm tui --style classic`.
 
@@ -23,6 +23,12 @@ Launch the built-in XOR session.
 
 ```console
 ptm tui --demo xor
+```
+
+Launch the native ten-class MNIST workload.
+
+```console
+ptm tui --demo mnist
 ```
 
 Read the training topic in a terminal.
@@ -40,7 +46,7 @@ ptm help training
 
 | Key | Action |
 | --- | --- |
-| `t` | Start XOR training. |
+| `t` | Start the configured workload. |
 | `x` | Cancel active training or search. |
 | `e` | Export the completed training run. |
 | `l` | Load and verify the artifact path. |
@@ -72,9 +78,11 @@ Authored guides:
 
 ## Deterministic training and clauses
 
-Train the scalar XOR oracle and inspect its learned clause state.
+Train XOR or native MNIST and inspect supported result state.
 
 Training runs outside the Textual event loop and reports structured progress. Configuration changes mark completed results stale so they cannot be exported as though they represented the new settings.
+
+XOR exposes scalar snapshots, clause/TA diagnostics, temporal samples, and packed artifact export. MNIST reports epoch validation and an exact class confusion matrix; multiclass snapshots and portable artifacts remain unsupported and fail closed.
 
 Clauses are signed pattern voters. Specificity controls specialization, states per action controls automaton memory depth, and the threshold scales the vote.
 
@@ -90,7 +98,7 @@ ptm tui --demo xor
 
 | Key | Action |
 | --- | --- |
-| `t` | Start XOR training. |
+| `t` | Start the configured workload. |
 | `x` | Cancel active training or search. |
 | `e` | Export the completed training run. |
 | `?` | Open contextual help. |

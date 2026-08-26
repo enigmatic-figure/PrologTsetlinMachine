@@ -43,3 +43,9 @@ class LiteralViewPanel(Vertical):
                 f'{average:.1f}',
                 str(literal),
             )
+
+    def set_unavailable(self, reason: str) -> None:
+        self.query_one('#literal-table', DataTable).clear()
+        self.query_one('#literal-title', Static).update(
+            f'LITERAL SUMMARY  n/a — {reason}'
+        )

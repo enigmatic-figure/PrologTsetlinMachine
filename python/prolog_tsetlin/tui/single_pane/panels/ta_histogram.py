@@ -45,3 +45,8 @@ class TAHistogramPanel(Vertical):
             self.query_one('#ta-stats', Static).update(
                 'n/a — train a model to populate this histogram'
             )
+
+    def set_unavailable(self, reason: str) -> None:
+        self.query_one('#ta-hist', Sparkline).data = [0]
+        self.query_one('#ta-title', Static).update('[UNAVAILABLE] TA STATE HISTOGRAM')
+        self.query_one('#ta-stats', Static).update(f'n/a — {reason}')

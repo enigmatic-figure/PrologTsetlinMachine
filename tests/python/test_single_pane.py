@@ -938,7 +938,7 @@ async def test_single_pane_help_matches_shell_bindings(tmp_path: Path) -> None:
         assert "Open System." in copy
         assert "Open Dashboard." in copy
         assert "Open Literals." in copy
-        assert "Start XOR training." in copy
+        assert "Start the configured workload." in copy
         assert "1      Open Overview" not in copy
         assert "STUBS.md" not in copy
         assert "Dead clauses" not in copy

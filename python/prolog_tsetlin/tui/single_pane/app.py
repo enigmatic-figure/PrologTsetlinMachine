@@ -1,4 +1,5 @@
 from __future__ import annotations
+from functools import partial
 import json
 from pathlib import Path
 from time import monotonic
@@ -15,6 +16,7 @@ from textual.widgets import (
     Footer,
     Input,
     Label,
+    Select,
     Static,
     TextArea,
 )
@@ -48,10 +50,14 @@ from ...services.diagnostics import (
     analyze_training_run,
 )
 from ...services.training import (
+    MulticlassTrainingRun,
     TrainingCancelled,
     TrainingDiagnosticSample,
     TrainingDiagnosticSampling,
     TrainingRequest,
+    TrainingRun,
+    TrainingWorkload,
+    train_workload,
 )
 from ...services.search import SearchKind, demo_search_document
 from ...services.environment import inspect_environment
@@ -83,7 +89,10 @@ class PTMWorkbenchApp(App[None]):
         # One PTM session model, multiple presentation shells
         self.session = SessionState()
         self.telemetry = TelemetrySession()
-        self.training = TrainingSessionController(self.session)
+        self.training = TrainingSessionController(
+            self.session,
+            trainer=partial(train_workload, workspace=self.workspace),
+        )
         self.artifacts = ArtifactSessionController(self.session)
         self.search = SearchSessionController(self.session)
         self._cancel = Event()
@@ -151,9 +160,11 @@ class PTMWorkbenchApp(App[None]):
             'Prolog': capabilities['GNU Prolog'].status.lower(),
             'Device': 'cpu',
         })
-        self.session.configured_request = self.query_one(
-            '#config-panel', TrainingConfigPanel
-        ).get_request()
+        workload = TrainingWorkload(self.demo)
+        config_panel = self.query_one('#config-panel', TrainingConfigPanel)
+        self.session.configured_request = config_panel.apply_workload_defaults(
+            workload
+        )
         self._apply_breakpoint(self.size.width, self.size.height)
         self._emit('session', 'session', message='workbench ready; single PTM session model')
         self.set_interval(0.5, self._tick_uptime)
@@ -198,9 +209,13 @@ class PTMWorkbenchApp(App[None]):
             return
         try:
             request = self.query_one('#config-panel', TrainingConfigPanel).get_request()
-            sampling = TrainingDiagnosticSampling.bounded(
-                request.epochs,
-                maximum_samples=self.DIAGNOSTIC_SAMPLE_BUDGET,
+            sampling = (
+                TrainingDiagnosticSampling.bounded(
+                    request.epochs,
+                    maximum_samples=self.DIAGNOSTIC_SAMPLE_BUDGET,
+                )
+                if request.workload is TrainingWorkload.XOR
+                else None
             )
             self.training.begin(request, diagnostic_sampling=sampling)
         except ValueError as error:
@@ -232,10 +247,22 @@ class PTMWorkbenchApp(App[None]):
         self.query_one('#config-panel', TrainingConfigPanel).set_status(status)
         self._refresh_snapshot_provenance()
         self.query_one(DashboardPanel).update_header('training-config', {
-            'Clauses': f'{request.number_of_clauses} {request.number_of_clauses//2}/{request.number_of_clauses//2}',
+            'Clauses': (
+                f'{request.number_of_clauses}/class'
+                if request.workload is TrainingWorkload.MNIST
+                else (
+                    f'{request.number_of_clauses} '
+                    f'{request.number_of_clauses//2}/'
+                    f'{request.number_of_clauses//2}'
+                )
+            ),
             'T': f'{request.threshold} thr',
             's': f'{request.specificity} spec',
-            'Features': '4 lits',
+            'Features': (
+                '784 bits'
+                if request.workload is TrainingWorkload.MNIST
+                else '4 lits'
+            ),
         })
         # Telemetry + run_id generation
         run_id = self.telemetry.begin_run()
@@ -243,13 +270,18 @@ class PTMWorkbenchApp(App[None]):
         gen = self._run_generation
         self._current_run_id = run_id
         self._cancel = Event()
+        diagnostic_message = (
+            f'diagnostics every {sampling.every_epochs} epoch(s), '
+            f'{len(sampling.selected_epochs(request.epochs))} samples'
+            if sampling is not None
+            else 'multiclass validation each epoch; binary diagnostics unavailable'
+        )
         self._emit(
             'training',
             'job_state',
             message=(
                 f'training queued run_id={run_id} gen={gen}; '
-                f'diagnostics every {sampling.every_epochs} epoch(s), '
-                f'{len(sampling.selected_epochs(request.epochs))} samples'
+                f'workload={request.workload.value}; {diagnostic_message}'
             ),
         )
         self.query_one('#top-bar', Static).update(
@@ -429,11 +461,64 @@ class PTMWorkbenchApp(App[None]):
         self._refresh_timeline()
         self._refresh_snapshot_provenance()
 
+    def _project_multiclass_run(self, run: MulticlassTrainingRun) -> None:
+        """Project validated multiclass results without inventing snapshot data."""
+
+        run.validate()
+        provenance = 'MNIST MULTICLASS — PORTABLE SNAPSHOT UNAVAILABLE'
+        self._snapshot = None
+        self._diagnostics = None
+        for inspector_id in ('clause-inspector', 'clause-inspector-full'):
+            self.query_one(f'#{inspector_id}', ClauseInspectorPanel).set_rows(
+                [], provenance=provenance, immediate=True
+            )
+        unavailable = 'multiclass snapshot inspection is not implemented'
+        for histogram_id in ('ta-histogram', 'ta-histogram-full'):
+            self.query_one(
+                f'#{histogram_id}', TAHistogramPanel
+            ).set_unavailable(unavailable)
+        self.query_one('#literal-view', LiteralViewPanel).set_unavailable(
+            unavailable
+        )
+        self.query_one('#predictions-panel', PredictionsPanel).set_multiclass(run)
+        self.query_one('#clause-detail', ClauseDetailPanel).reset(
+            provenance=provenance
+        )
+        self.query_one(DashboardPanel).update_header(
+            'clause-health',
+            {'Avg TA': 'n/a', 'Empty': 'n/a', 'Nonempty': 'n/a', 'Unique': 'n/a'},
+        )
+        self.query_one(DashboardPanel).update_header(
+            'statistics',
+            {
+                'Acc': f'{run.accuracy * 100:.1f}%',
+                'Epoch': f'{run.request.epochs}/{run.request.epochs}',
+                'TA Incl': 'n/a',
+                'TA Near': 'n/a',
+            },
+        )
+        self.query_one(DashboardPanel).update_header(
+            'data-ingest',
+            {
+                'Throughput': 'n/a',
+                'Batches': f'{run.validation_rows} validation',
+                'Lag': f'{run.training_seconds:.1f}s train',
+                'Cache': 'binarized 0.3',
+            },
+        )
+        self._snapshot_footer_details = (
+            f'MNIST 10 CLASS  /  {run.validation_rows} VALIDATION ROWS  /  '
+            f'{run.request.number_of_clauses} CLAUSES/CLASS  /  '
+            'SNAPSHOT INSPECTION N/A  /  ARTIFACT EXPORT BLOCKED'
+        )
+        self._refresh_timeline()
+        self._refresh_snapshot_provenance()
+
     def _refresh_timeline(self) -> None:
         panel = self.query_one('#temporal-panel', TemporalInspectorPanel)
         run = self.session.last_completed_run
         history = self.session.last_completed_diagnostics
-        if run is None or not history:
+        if not isinstance(run, TrainingRun) or not history:
             panel.clear_history()
             return
         panel.set_history(
@@ -542,8 +627,11 @@ class PTMWorkbenchApp(App[None]):
         self._sync_training_export_control()
 
     def _active_snapshot_tag(self) -> str:
-        if self.session.last_completed_run is None:
+        run = self.session.last_completed_run
+        if run is None:
             return 'MODEL PANELS EMPTY'
+        if isinstance(run, MulticlassTrainingRun):
+            return 'RESULT PANELS LAST COMPLETED / SNAPSHOT N/A'
         return 'MODEL PANELS LAST COMPLETED'
 
     def _refresh_snapshot_provenance(self) -> None:
@@ -558,6 +646,23 @@ class PTMWorkbenchApp(App[None]):
                 footer.update(
                     'MODEL PANELS EMPTY  /  ACTIVE TRAINING HAS NO COMPLETED SNAPSHOT'
                 )
+            return
+
+        if isinstance(run, MulticlassTrainingRun):
+            active = (
+                '  /  ACTIVE TRAINING IS SEPARATE'
+                if active_request is not None
+                else ''
+            )
+            dirty = (
+                '  /  STALE FOR VISIBLE CONFIGURATION'
+                if self.session.configuration_dirty
+                else ''
+            )
+            details = self._snapshot_footer_details or 'MNIST MULTICLASS'
+            footer.update(
+                f'COMPLETED MULTICLASS RESULT{dirty}{active}  /  {details}'
+            )
             return
 
         details = self._snapshot_footer_details or (
@@ -618,7 +723,7 @@ class PTMWorkbenchApp(App[None]):
 
     def _sync_training_export_control(self) -> None:
         self.query_one('#artifact-export', Button).disabled = (
-            self.session.last_completed_run is None
+            not isinstance(self.session.last_completed_run, TrainingRun)
             or self.training.active
             or self.session.configuration_dirty
         )
@@ -1043,6 +1148,15 @@ class PTMWorkbenchApp(App[None]):
         self._emit('search', 'artifact', message=f"exported {report['output']}")
 
     def on_select_changed(self, event) -> None:
+        if event.select.id == 'cfg-workload':
+            if event.value != event.select.value:
+                # Ignore a queued initial-value event superseded during mount.
+                return
+            workload = TrainingWorkload(str(event.value))
+            panel = self.query_one('#config-panel', TrainingConfigPanel)
+            panel.apply_workload_defaults(workload)
+            self._refresh_configuration_state()
+            return
         # Update demo JSON when search kind changes
         if event.select.id != 'search-kind':
             return
@@ -1082,6 +1196,15 @@ class PTMWorkbenchApp(App[None]):
         )
         self._update_training_graphs()
         self.query_one(DashboardPanel).update_header('statistics', {'Acc': f'{p.accuracy*100:.1f}%', 'Epoch': f'{p.epoch}/{p.epochs}'})
+        if p.training_seconds is not None:
+            self.query_one(DashboardPanel).update_header(
+                'data-ingest',
+                {
+                    'Batches': f'epoch {p.epoch}/{p.epochs}',
+                    'Lag': f'{p.training_seconds:.1f}s epoch',
+                    'Cache': 'binarized 0.3',
+                },
+            )
         self._refresh_snapshot_provenance()
 
     def on_training_diagnostic(
@@ -1173,23 +1296,40 @@ class PTMWorkbenchApp(App[None]):
             return
         if run_id is not None and run_id != self._current_run_id:
             return
-        try:
-            analyze_training_run(result)
-        except ValueError as error:
-            self.on_training_failed(
-                f'diagnostic validation failed: {error}', run_id, gen
-            )
-            return
+        if isinstance(result, MulticlassTrainingRun):
+            try:
+                result.validate()
+            except ValueError as error:
+                self.on_training_failed(
+                    f'multiclass validation failed: {error}', run_id, gen
+                )
+                return
+        else:
+            try:
+                analyze_training_run(result)
+            except ValueError as error:
+                self.on_training_failed(
+                    f'diagnostic validation failed: {error}', run_id, gen
+                )
+                return
         self.training.complete(
             result, current_request=self._current_training_request()
         )
         self._inspection_generation += 1
-        inspection = self.training.inspect_completed_epoch()
-        self._project_training_inspection(inspection)
-        self.query_one('#top-bar', Static).update(
-            f'PTM  WORKBENCH  TRAINED  FINAL SNAPSHOT '
-            f'epoch {inspection.epoch}/{result.request.epochs}'
-        )
+        if isinstance(result, MulticlassTrainingRun):
+            self._project_multiclass_run(result)
+            self.query_one('#top-bar', Static).update(
+                f'PTM  WORKBENCH  TRAINED  MNIST MULTICLASS  '
+                f'epoch {result.request.epochs}/{result.request.epochs}  '
+                f'acc {result.accuracy * 100:.1f}%'
+            )
+        else:
+            inspection = self.training.inspect_completed_epoch()
+            self._project_training_inspection(inspection)
+            self.query_one('#top-bar', Static).update(
+                f'PTM  WORKBENCH  TRAINED  FINAL SNAPSHOT '
+                f'epoch {inspection.epoch}/{result.request.epochs}'
+            )
         self._emit('training', 'job_state', message=f'training succeeded run_id={run_id} acc={result.accuracy:.0%}')
         self._update_training_graphs()
         self._refresh_configuration_state()
@@ -1267,12 +1407,10 @@ class PTMWorkbenchApp(App[None]):
             )
 
         try:
-            result = self.training.run(
-                request,
-                progress=report,
-                diagnostic=report_diagnostic,
-                cancel=cancel,
-            )
+            options = {'progress': report, 'cancel': cancel}
+            if self.session.active_diagnostic_sampling is not None:
+                options['diagnostic'] = report_diagnostic
+            result = self.training.run(request, **options)
             self.call_from_thread(self.on_training_complete, result, run_id, gen)
         except TrainingCancelled as e:
             self.call_from_thread(self.on_training_cancelled, str(e), run_id, gen)

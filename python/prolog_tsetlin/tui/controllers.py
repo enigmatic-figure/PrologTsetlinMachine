@@ -42,6 +42,7 @@ from ..services.search import (
 )
 from ..services.training import (
     DiagnosticCallback,
+    MulticlassTrainingRun,
     ProgressCallback,
     TrainingDiagnosticSample,
     TrainingDiagnosticSampling,
@@ -137,7 +138,7 @@ class TrainingSessionController:
         self,
         session: SessionState,
         *,
-        trainer: Callable[..., TrainingRun] = train_xor,
+        trainer: Callable[..., TrainingRun | MulticlassTrainingRun] = train_xor,
         exporter: Callable[
             [TrainingRun, ArtifactExportRequest], ArtifactSummary
         ] = export_training_run,
@@ -257,7 +258,7 @@ class TrainingSessionController:
 
     def complete(
         self,
-        run: TrainingRun,
+        run: TrainingRun | MulticlassTrainingRun,
         *,
         current_request: TrainingRequest | None | _CurrentRequestUnset = (
             _CURRENT_REQUEST_UNSET
@@ -271,6 +272,12 @@ class TrainingSessionController:
                 "completed run does not belong to the active training request"
             )
         sampling = self.session.active_diagnostic_sampling
+        if isinstance(run, MulticlassTrainingRun):
+            run.validate()
+            if sampling is not None or self.session.active_diagnostics:
+                raise SessionContractError(
+                    "multiclass run cannot claim binary snapshot diagnostics"
+                )
         if sampling is not None:
             expected_epochs = sampling.selected_epochs(active_request.epochs)
             actual_epochs = tuple(
@@ -377,7 +384,7 @@ class TrainingSessionController:
         return inspection
 
     def current_inspection(self) -> TrainingInspection | None:
-        if self.session.last_completed_run is None:
+        if not isinstance(self.session.last_completed_run, TrainingRun):
             return None
         return self._completed_inspection(self.session.inspected_sample_epoch)
 
@@ -385,8 +392,10 @@ class TrainingSessionController:
         self, epoch: int | None
     ) -> TrainingInspection:
         run = self.session.last_completed_run
-        if run is None:
-            raise SessionContractError("no completed training run is available")
+        if not isinstance(run, TrainingRun):
+            raise SessionContractError(
+                "completed workload has no binary snapshot inspection contract"
+            )
         requested_epoch = run.request.epochs if epoch is None else epoch
         sampled = next(
             (
@@ -412,7 +421,7 @@ class TrainingSessionController:
         progress: ProgressCallback | None = None,
         diagnostic: DiagnosticCallback | None = None,
         cancel: Event | None = None,
-    ) -> TrainingRun:
+    ) -> TrainingRun | MulticlassTrainingRun:
         active_request = self.session.active_request
         if active_request is None:
             raise SessionContractError("no active training request is available")
@@ -445,6 +454,10 @@ class TrainingSessionController:
         run = self.session.last_completed_run
         if run is None:
             raise SessionContractError("no completed training run is available")
+        if not isinstance(run, TrainingRun):
+            raise SessionContractError(
+                "multiclass artifact export is not implemented; no artifact was written"
+            )
         self.synchronize_configuration(current_request)
         if run.request != current_request:
             raise SessionContractError(

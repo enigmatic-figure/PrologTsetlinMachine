@@ -382,7 +382,10 @@ def _parser() -> argparse.ArgumentParser:
         help="directory used for artifacts and workbench state",
     )
     tui.add_argument(
-        "--demo", choices=("xor",), default="xor", help="initial demonstration dataset"
+        "--demo",
+        choices=("xor", "mnist"),
+        default="xor",
+        help="initial workbench workload",
     )
     tui.add_argument(
         "--style",

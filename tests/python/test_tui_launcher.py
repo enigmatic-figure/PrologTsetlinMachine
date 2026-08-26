@@ -36,13 +36,17 @@ def test_tui_launcher_selects_each_shell(monkeypatch, tmp_path: Path) -> None:
     tui.run(workspace=tmp_path, demo="xor", style="workbench")
     tui.run(workspace=tmp_path, demo="xor", style="classic")
     tui.run(workspace=tmp_path, demo="xor", style="single_pane")
+    tui.run(workspace=tmp_path, demo="mnist", style="workbench")
 
     assert launched == [
         ("workbench", tmp_path, "xor"),
         ("workbench", tmp_path, "xor"),
         ("classic", tmp_path, "xor"),
         ("workbench", tmp_path, "xor"),
+        ("workbench", tmp_path, "mnist"),
     ]
+    with pytest.raises(ValueError, match="canonical workbench"):
+        tui.run(workspace=tmp_path, demo="mnist", style="classic")
     with pytest.raises(ValueError, match="unsupported TUI style"):
         tui.run(workspace=tmp_path, demo="xor", style="unknown")
 
