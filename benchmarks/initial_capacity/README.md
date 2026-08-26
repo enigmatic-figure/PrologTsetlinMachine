@@ -77,6 +77,17 @@ For ladders whose smallest polarity has fewer clauses than the requested vote
 threshold, `--threshold-policy clamp-to-polarity` records and applies the
 deterministic rule `min(requested threshold, total clauses / 2)`.
 
+After a completed native XOR ladder, `summarize_capacity_surface.py` verifies
+the retained plan and vote-score digests, reconstructs clean XOR labels,
+separates fit to flipped and unflipped training rows, and aggregates the clause
+telemetry and per-state signed margins. It writes JSON and CSV beside the raw
+campaign. Its one-standard-error clause selection is an exploratory,
+deterministic reference rather than a deployed capacity governor:
+
+```text
+PYTHONPATH=python python benchmarks/initial_capacity/summarize_capacity_surface.py out/benchmark-campaign/xor-capacity-surface-v1 out/benchmark-campaign/materials
+```
+
 `package_colab.py` creates the deterministic allowlisted input archive consumed
 by `colab_smoke.py`. On a CPU runtime the remote driver repeats the four-route
 smoke. When both a GPU and `nvcc` are present, it additionally builds PTM with
