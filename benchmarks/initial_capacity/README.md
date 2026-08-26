@@ -54,6 +54,17 @@ cmake --build out/benchmark-campaign/ptm-native --target ptm_campaign_native_run
 reference, the PTM C++ route, pyTsetlinMachine, and TMU. This proves plumbing
 only. It is not a performance or accuracy result.
 
+`run_local_matrix.py` executes a predeclared, resumable local campaign. Its
+default matrix covers generated XOR20 noise, the parity ladder, and all four
+Logic encodings through PTM native, pyTsetlinMachine, and TMU. It scores only
+validation where one exists and retains the exact plan and host/thread
+environment before the first run. Resume refuses a changed plan, a changed
+host environment, duplicate run IDs, or records outside the declared matrix:
+
+```text
+PYTHONPATH=python python3 benchmarks/initial_capacity/run_local_matrix.py --project-root . --material-root out/benchmark-campaign/materials --incumbent-root out/benchmark-campaign/incumbents-linux --ptm-native-executable out/benchmark-campaign/ptm-native/ptm_campaign_native_runner --ptm-commit <commit> --output out/benchmark-campaign/local-scout
+```
+
 `package_colab.py` creates the deterministic allowlisted input archive consumed
 by `colab_smoke.py`. On a CPU runtime the remote driver repeats the four-route
 smoke. When both a GPU and `nvcc` are present, it additionally builds PTM with
