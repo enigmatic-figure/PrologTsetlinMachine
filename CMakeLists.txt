@@ -336,6 +336,10 @@ if(PTM_BUILD_BENCHMARKS)
         target_link_libraries(ptm_packed_tm_benchmark PRIVATE PTM::cuda)
     endif()
     target_compile_features(ptm_packed_tm_benchmark PRIVATE cxx_std_20)
+
+    add_executable(ptm_mnist_ovr_benchmark benchmarks/mnist_ovr_benchmark.cpp)
+    target_link_libraries(ptm_mnist_ovr_benchmark PRIVATE PTM::core)
+    target_compile_features(ptm_mnist_ovr_benchmark PRIVATE cxx_std_20)
 endif()
 
 set(PTM_INSTALL_TARGETS ptm_core ptm_runtime ptm_c_api)
