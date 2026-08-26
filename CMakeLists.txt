@@ -303,6 +303,24 @@ if(PTM_BUILD_EXAMPLES)
     target_compile_features(ptm_class_ii_persistence_example PRIVATE cxx_std_20)
 endif()
 
+if(PTM_BUILD_TESTS OR PTM_BUILD_BENCHMARKS)
+    add_executable(ptm_campaign_native_runner
+        benchmarks/campaign_native_runner.cpp)
+    target_link_libraries(ptm_campaign_native_runner PRIVATE PTM::core)
+    target_compile_features(ptm_campaign_native_runner PRIVATE cxx_std_20)
+    if(PTM_BUILD_TESTS)
+        add_test(NAME ptm_campaign_native_runner_smoke
+            COMMAND ptm_campaign_native_runner
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/campaign_binary_xor.txt"
+                4 10 3.0 5 1 7 2 1 1
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/campaign_binary_xor.txt"
+                "${CMAKE_CURRENT_BINARY_DIR}/campaign_binary_predictions.txt")
+        set_tests_properties(ptm_campaign_native_runner_smoke PROPERTIES
+            PASS_REGULAR_EXPRESSION
+                "ptm.native-campaign-runner.v2.*runtime_conformance_mismatches.*0")
+    endif()
+endif()
+
 if(PTM_BUILD_BENCHMARKS)
     add_executable(ptm_mapping_benchmark benchmarks/mapping_benchmark.cpp)
     target_link_libraries(ptm_mapping_benchmark PRIVATE PTM::core)

@@ -1,0 +1,17 @@
+{
+  "schema": "ptm.benchmark-incumbents.v1",
+  "python": "3.12",
+  "models": {
+    "pytsetlinmachine.multiclass": {
+      "repository": "https://github.com/cair/pyTsetlinMachine.git",
+      "commit": "d6c1cf0e4aaa4a8ae2f2818ba27878fb89d31dc5",
+      "version_at_commit": "0.6.6",
+      "wrapper_backend": "pytsetlinmachine"
+    },
+    "tmu.vanilla-classifier": {
+      "repository": "https://github.com/cair/tmu.git",
+      "commit": "5605ff070a18549328028c907a9acf68e063346e",
+      "wrapper_backend": "tmu"
+    }
+  }
+}

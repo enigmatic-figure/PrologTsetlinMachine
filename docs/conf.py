@@ -33,6 +33,7 @@ exclude_patterns = [
     ".pytest_cache/**",
     ".venv/**",
     "build/**",
+    "benchmarks/initial_capacity/README.md",
     "dist/**",
     "out/**",
     "AGENTS.md",

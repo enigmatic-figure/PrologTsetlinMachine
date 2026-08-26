@@ -5,6 +5,7 @@ CONTRIBUTING.md,developer,landing,current,derived,yes,docs/developer/contributin
 INSTALL.md,manual,landing,current,derived,yes,docs/manual/how-to/install.md,retain
 README.md,manual,landing,current,authoritative,yes,README.md,retain
 UPGRADING.md,releases,landing,current,derived,yes,docs/releases/upgrading.md,retain
+benchmarks/initial_capacity/README.md,benchmarks,operations,internal,record,no,benchmarks/initial_capacity/README.md,exclude
 docs/README.md,manual,landing,current,derived,yes,docs/README.md,retain
 docs/_meta/constitution.md,meta,policy,current,authoritative,yes,docs/_meta/constitution.md,retain
 docs/_meta/inventory.md,meta,inventory,current,derived,yes,docs/_meta/inventory.md,retain

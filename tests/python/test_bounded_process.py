@@ -85,6 +85,35 @@ def test_timeout_terminates_the_contained_process_tree() -> None:
     assert time.monotonic() - started < 1.0
 
 
+def test_nonisolated_leaf_remains_inside_outer_process_tree(tmp_path: Path) -> None:
+    started_marker = tmp_path / "started-leaf.txt"
+    marker = tmp_path / "escaped-leaf.txt"
+    leaf = (
+        "import time; from pathlib import Path; "
+        f"Path({str(started_marker)!r}).write_text('started', encoding='utf-8'); "
+        "time.sleep(2); "
+        f"Path({str(marker)!r}).write_text('escaped', encoding='utf-8')"
+    )
+    parent = (
+        "import sys; "
+        "from prolog_tsetlin._bounded_process import run_bounded_process; "
+        "run_bounded_process([sys.executable, '-c', "
+        f"{leaf!r}], timeout_seconds=2, max_output_bytes=1024, "
+        "isolate_process_tree=False)"
+    )
+
+    with pytest.raises(BoundedProcessTimeout):
+        run_bounded_process(
+            [sys.executable, "-c", parent],
+            timeout_seconds=1.0,
+            max_output_bytes=1_024,
+        )
+
+    assert started_marker.is_file()
+    time.sleep(1.2)
+    assert not marker.exists()
+
+
 def test_output_flood_is_capped_before_the_child_can_exhaust_memory() -> None:
     with pytest.raises(BoundedProcessOutputLimit) as captured:
         run_bounded_process(
