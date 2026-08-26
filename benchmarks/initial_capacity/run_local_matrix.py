@@ -38,7 +38,9 @@ THREAD_ENVIRONMENT = (
 
 
 def _require_existing_file(path: Path, label: str) -> Path:
-    result = path.resolve()
+    # Executable paths may be virtual-environment symlinks. Resolving such a
+    # path selects the base interpreter and silently discards the environment.
+    result = Path(os.path.abspath(path))
     if not result.is_file():
         raise FileNotFoundError(f"{label} is absent: {result}")
     return result

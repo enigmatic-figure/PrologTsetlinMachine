@@ -1,11 +1,36 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 
+import pytest
+
 from prolog_tsetlin.benchmark_campaign import prepare_parity_ladder
+
+
+def test_campaign_file_validation_preserves_venv_executable_symlink(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "base-python"
+    target.write_bytes(b"executable")
+    link = tmp_path / "venv-python"
+    try:
+        link.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"test host cannot create a file symlink: {error}")
+    project = Path(__file__).resolve().parents[2]
+    namespace = runpy.run_path(
+        str(project / "benchmarks" / "initial_capacity" / "run_local_matrix.py")
+    )
+
+    validated = namespace["_require_existing_file"](link, "test executable")
+
+    assert validated == Path(os.path.abspath(link))
+    assert validated != target.resolve()
 
 
 def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
