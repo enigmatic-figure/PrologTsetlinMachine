@@ -25,10 +25,13 @@ from .inference import (
 )
 from .telemetry import TelemetryEvent, TelemetrySession
 from .training import (
+    MulticlassTrainingRun,
     TrainingDiagnosticSample,
     TrainingDiagnosticSampling,
     TrainingRequest,
     TrainingRun,
+    TrainingWorkload,
+    train_workload,
     train_xor,
 )
 from .model_generation import (
@@ -74,10 +77,12 @@ __all__ = [
     "SearchKind",
     "RunDiagnostics",
     "SampledTrainingDiagnostics",
+    "MulticlassTrainingRun",
     "TrainingDiagnosticSample",
     "TrainingDiagnosticSampling",
     "TrainingRequest",
     "TrainingRun",
+    "TrainingWorkload",
     "TrainingSampleDelta",
     "analyze_training_run",
     "analyze_training_sample",
@@ -94,6 +99,7 @@ __all__ = [
     "search_request_budget",
     "compare_training_samples",
     "train_xor",
+    "train_workload",
     "verify_artifact",
     "GenerationLifecycleEvent",
     "DeescalationLifecycleResult",

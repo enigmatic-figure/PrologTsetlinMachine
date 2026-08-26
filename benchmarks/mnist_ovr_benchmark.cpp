@@ -76,8 +76,18 @@ double finite_double(std::string_view text, std::string_view label) {
     return value;
 }
 
-double accuracy(const std::array<ptm::ScalarBinaryTM, 10>& models, const Dataset& data) {
-    std::array<std::size_t, 10> correct{};
+struct Evaluation {
+    std::size_t correct{};
+    std::array<std::array<std::size_t, 10>, 10> confusion{};
+
+    [[nodiscard]] double accuracy(std::size_t rows) const {
+        return static_cast<double>(correct) / rows;
+    }
+};
+
+Evaluation evaluate(const std::array<ptm::ScalarBinaryTM, 10>& models,
+                    const Dataset& data) {
+    std::array<Evaluation, 10> partial{};
     std::array<std::thread, 10> workers;
     for (std::size_t worker = 0; worker < workers.size(); ++worker) {
         workers[worker] = std::thread([&, worker] {
@@ -95,14 +105,24 @@ double accuracy(const std::array<ptm::ScalarBinaryTM, 10>& models, const Dataset
                         best_class = cls;
                     }
                 }
-                correct[worker] += best_class == data.labels[row];
+                const auto target = data.labels[row];
+                partial[worker].correct += best_class == target;
+                ++partial[worker].confusion[target][best_class];
             }
         });
     }
     for (auto& worker : workers) worker.join();
-    return static_cast<double>(
-               std::accumulate(correct.begin(), correct.end(), std::size_t{0})) /
-           data.rows;
+    Evaluation result;
+    for (const auto& source : partial) {
+        result.correct += source.correct;
+        for (std::size_t target = 0; target < 10; ++target) {
+            for (std::size_t prediction = 0; prediction < 10; ++prediction) {
+                result.confusion[target][prediction] +=
+                    source.confusion[target][prediction];
+            }
+        }
+    }
+    return result;
 }
 
 }  // namespace
@@ -192,6 +212,7 @@ int main(int argc, char** argv) {
             }
             const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
             cumulative += elapsed;
+            const auto evaluation = evaluate(models, validation);
             std::cout << std::setprecision(17)
                       << "{\"schema\":\"ptm.mnist-ovr-epoch.v1\",\"epoch\":" << epoch
                       << ",\"clauses_per_class\":" << clauses
@@ -205,7 +226,20 @@ int main(int argc, char** argv) {
                       << (boost_true_positive_feedback ? "true" : "false")
                       << ",\"training_seconds\":" << elapsed
                       << ",\"cumulative_training_seconds\":" << cumulative
-                      << ",\"validation_accuracy\":" << accuracy(models, validation) << "}\n"
+                      << ",\"validation_accuracy\":"
+                      << evaluation.accuracy(validation.rows)
+                      << ",\"confusion_matrix\":[";
+            for (std::size_t target = 0; target < 10; ++target) {
+                if (target != 0) std::cout << ',';
+                std::cout << '[';
+                for (std::size_t prediction = 0; prediction < 10;
+                     ++prediction) {
+                    if (prediction != 0) std::cout << ',';
+                    std::cout << evaluation.confusion[target][prediction];
+                }
+                std::cout << ']';
+            }
+            std::cout << "]}\n"
                       << std::flush;
         }
         return 0;
