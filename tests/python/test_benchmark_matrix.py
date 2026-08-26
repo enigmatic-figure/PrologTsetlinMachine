@@ -66,6 +66,8 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
         "4",
         "--total-clauses",
         "8",
+        "--threshold-policy",
+        "clamp-to-polarity",
         "--epochs",
         "1",
         "--inference-repeats",
@@ -87,8 +89,14 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
     assert plan["schema"] == "ptm.local-campaign-plan.v2"
     assert plan["attempts"][0]["score_splits"] == ["validation"]
     assert plan["attempts"][0]["model"]["config"]["clauses"] == 4
+    assert plan["attempts"][0]["model"]["config"]["threshold"] == 2
     assert plan["attempts"][1]["model"]["config"]["clauses"] == 8
+    assert plan["attempts"][1]["model"]["config"]["threshold"] == 4
     assert plan["total_clause_counts"] == [4, 8]
+    assert plan["threshold_policy"] == {
+        "name": "clamp-to-polarity",
+        "requested_threshold": 15,
+    }
     environment = json.loads(
         (output / "environment.json").read_text(encoding="utf-8")
     )

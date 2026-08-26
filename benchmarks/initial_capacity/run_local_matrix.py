@@ -296,6 +296,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--total-clauses", type=int, action="append")
     parser.add_argument("--state-bits", type=int, default=8)
     parser.add_argument("--threshold", type=int, default=15)
+    parser.add_argument(
+        "--threshold-policy",
+        choices=("fixed", "clamp-to-polarity"),
+        default="fixed",
+    )
     parser.add_argument("--specificity", type=float, default=3.9)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--inference-repeats", type=int, default=5)
@@ -349,6 +354,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     attempts = []
     for manifest_path, manifest, score_splits in manifests:
         for total_clauses in clause_counts:
+            effective_threshold = (
+                min(arguments.threshold, total_clauses // 2)
+                if arguments.threshold_policy == "clamp-to-polarity"
+                else arguments.threshold
+            )
             for seed in seeds:
                 for route in routes:
                     model = _model(
@@ -356,7 +366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ptm_commit=arguments.ptm_commit,
                         total_clauses=total_clauses,
                         state_bits=arguments.state_bits,
-                        threshold=arguments.threshold,
+                        threshold=effective_threshold,
                         specificity=arguments.specificity,
                         epochs=arguments.epochs,
                         seed=seed,
@@ -394,6 +404,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "routes": list(routes),
         "seeds": list(seeds),
         "total_clause_counts": list(clause_counts),
+        "threshold_policy": {
+            "name": arguments.threshold_policy,
+            "requested_threshold": arguments.threshold,
+        },
         "attempts": attempts,
     }
     run_ids = {str(attempt["run_id"]) for attempt in attempts}

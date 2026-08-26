@@ -73,6 +73,9 @@ available. An explicit `evaluation` split is intended for a configuration
 frozen after validation. PTM's native runner also retains independently checked
 signed vote scores and separately timed clause-population diagnostics so that
 measurement does not contaminate adaptive-training or resident-inference time.
+For ladders whose smallest polarity has fewer clauses than the requested vote
+threshold, `--threshold-policy clamp-to-polarity` records and applies the
+deterministic rule `min(requested threshold, total clauses / 2)`.
 
 `package_colab.py` creates the deterministic allowlisted input archive consumed
 by `colab_smoke.py`. On a CPU runtime the remote driver repeats the four-route
