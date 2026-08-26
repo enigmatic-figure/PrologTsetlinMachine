@@ -149,6 +149,16 @@ def _run(backend: str, request_path: Path) -> dict[str, object]:
     config = model.get("config")
     if not isinstance(config, Mapping):
         raise WrapperError("campaign model config is malformed")
+    if backend == "pytsetlinmachine":
+        if requested_backend != "cpu":
+            raise WrapperError("pyTsetlinMachine wrapper supports only the CPU backend")
+        platform_name = None
+    else:
+        platform_name = config.get("platform", "CPU")
+        if platform_name not in ("CPU", "CUDA"):
+            return _unsupported(run_id, "TMU platform must be CPU or CUDA")
+        if requested_backend != platform_name.lower():
+            raise WrapperError("requested TMU backend disagrees with model platform")
 
     manifest_path = Path(str(request.get("dataset_manifest"))).resolve()
     manifest = _load_object(manifest_path)
@@ -192,8 +202,6 @@ def _run(backend: str, request_path: Path) -> dict[str, object]:
         raise WrapperError("model max_included_literals must be null or positive")
 
     if backend == "pytsetlinmachine":
-        if requested_backend != "cpu":
-            raise WrapperError("pyTsetlinMachine wrapper supports only the CPU backend")
         from pyTsetlinMachine.tm import MultiClassTsetlinMachine
 
         indexed = _boolean(config, "indexed", True)
@@ -213,13 +221,9 @@ def _run(backend: str, request_path: Path) -> dict[str, object]:
         backend_actual = "pytsetlinmachine-cpu"
         seed_control = "fixed-library-stream-no-public-seed"
     else:
-        platform_name = config.get("platform", "CPU")
-        if platform_name not in ("CPU", "CUDA"):
-            return _unsupported(run_id, "TMU platform must be CPU or CUDA")
-        if requested_backend != platform_name.lower():
-            raise WrapperError("requested TMU backend disagrees with model platform")
         from tmu.models.classification.vanilla_classifier import TMClassifier
 
+        assert platform_name is not None
         shuffle = _boolean(config, "shuffle", True)
         machine = TMClassifier(
             number_of_clauses=clauses,
