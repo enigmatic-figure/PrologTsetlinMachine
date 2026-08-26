@@ -277,9 +277,12 @@ int main(int argc, char** argv) {
         }
         ptm::ScalarBinaryTM machine(
             clauses, train.features, states, specificity, threshold, seed);
-        const auto initial_snapshot = machine.snapshot();
         auto preprocessing_seconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - preprocessing_start).count();
+        const auto diagnostic_setup_start = std::chrono::steady_clock::now();
+        const auto initial_snapshot = machine.snapshot();
+        auto diagnostic_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - diagnostic_setup_start).count();
 
         const auto training_start = std::chrono::steady_clock::now();
         for (std::size_t epoch = 0; epoch < epochs; ++epoch) {
@@ -416,7 +419,7 @@ int main(int argc, char** argv) {
             score_path += ".scores";
             write_scores(score_path, score.vote_scores);
         }
-        const auto diagnostic_seconds = std::chrono::duration<double>(
+        diagnostic_seconds += std::chrono::duration<double>(
             std::chrono::steady_clock::now() - diagnostic_start).count();
 
         std::cout << std::setprecision(17)

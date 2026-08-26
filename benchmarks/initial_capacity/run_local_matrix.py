@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -44,6 +45,10 @@ def _require_existing_file(path: Path, label: str) -> Path:
     if not result.is_file():
         raise FileNotFoundError(f"{label} is absent: {result}")
     return result
+
+
+def _file_digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _selected_manifests(
@@ -105,6 +110,7 @@ def _model(
     seed: int,
     inference_repeats: int,
     inference_warmup_repeats: int,
+    native_executable_digest: str | None = None,
 ) -> dict[str, object]:
     common = {
         "threshold": threshold,
@@ -115,7 +121,7 @@ def _model(
         "inference_warmup_repeats": inference_warmup_repeats,
     }
     if route in ("ptm-scalar", "ptm-native"):
-        return {
+        model = {
             "implementation": (
                 "ptm.scalar-reference" if route == "ptm-scalar" else "ptm.native-binary"
             ),
@@ -131,6 +137,11 @@ def _model(
                 "states_per_action": 1 << (state_bits - 1),
             },
         }
+        if route == "ptm-native":
+            if native_executable_digest is None:
+                raise ValueError("the PTM native model requires an executable digest")
+            model["executable_digest"] = native_executable_digest
+        return model
     incumbent_clauses = total_clauses // 2
     incumbent = common | {
         "clauses": incumbent_clauses,
@@ -350,6 +361,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         variants,
         score_splits,
     )
+    native_executable = None
+    native_executable_digest = None
+    if "ptm-native" in routes:
+        if arguments.ptm_native_executable is None:
+            parser.error("the PTM native route requires --ptm-native-executable")
+        native_executable = _require_existing_file(
+            arguments.ptm_native_executable, "PTM native executable"
+        )
+        native_executable_digest = _file_digest(native_executable)
 
     attempts = []
     for manifest_path, manifest, score_splits in manifests:
@@ -372,6 +392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         seed=seed,
                         inference_repeats=arguments.inference_repeats,
                         inference_warmup_repeats=arguments.inference_warmup_repeats,
+                        native_executable_digest=native_executable_digest,
                     )
                     run_id = (
                         f"{arguments.pass_name}-{manifest.variant_id}-"
@@ -395,7 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         }
                     )
     plan = {
-        "schema": "ptm.local-campaign-plan.v2",
+        "schema": "ptm.local-campaign-plan.v3",
         "campaign_id": "initial-capacity-local-v1",
         "pass": arguments.pass_name,
         "families": list(families),
@@ -408,6 +429,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "name": arguments.threshold_policy,
             "requested_threshold": arguments.threshold,
         },
+        "route_provenance": (
+            {
+                "ptm-native": {
+                    "native_executable_digest": native_executable_digest,
+                }
+            }
+            if native_executable_digest is not None
+            else {}
+        ),
         "attempts": attempts,
     }
     run_ids = {str(attempt["run_id"]) for attempt in attempts}
@@ -477,6 +507,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             raw_jsonl=raw_jsonl,
             timeout_seconds=arguments.timeout,
         )
+        if route == "ptm-native" and record["status"] == "ok":
+            recorded_digest = record["artifacts"]["wrapper"][  # type: ignore[index]
+                "native_executable_digest"
+            ]
+            if recorded_digest != native_executable_digest:
+                raise ValueError(
+                    "native executable changed during the campaign attempt"
+                )
         completed.add(run_id)
         print(
             json.dumps(

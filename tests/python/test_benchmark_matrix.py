@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import runpy
@@ -86,7 +87,7 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
     assert "[1/2] skip recorded test-scout-n-03-c0004-ptm-scalar-s47" in second.stdout
     assert "[2/2] skip recorded test-scout-n-03-c0008-ptm-scalar-s47" in second.stdout
     plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
-    assert plan["schema"] == "ptm.local-campaign-plan.v2"
+    assert plan["schema"] == "ptm.local-campaign-plan.v3"
     assert plan["attempts"][0]["score_splits"] == ["validation"]
     assert plan["attempts"][0]["model"]["config"]["clauses"] == 4
     assert plan["attempts"][0]["model"]["config"]["threshold"] == 2
@@ -97,6 +98,7 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
         "name": "clamp-to-polarity",
         "requested_threshold": 15,
     }
+    assert plan["route_provenance"] == {}
     environment = json.loads(
         (output / "environment.json").read_text(encoding="utf-8")
     )
@@ -137,3 +139,57 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
     assert evaluation_plan["variants"] == ["n-03"]
     assert evaluation_plan["requested_score_splits"] == ["evaluation"]
     assert evaluation_plan["attempts"][0]["score_splits"] == ["evaluation"]
+
+
+def test_native_executable_digest_is_part_of_the_immutable_plan(
+    tmp_path: Path,
+) -> None:
+    project = Path(__file__).resolve().parents[2]
+    materials = tmp_path / "materials" / "parity-ladder"
+    prepare_parity_ladder(materials, seed=47, widths=(3,))
+    executable = tmp_path / "native-runner"
+    executable.write_bytes(b"native-runner-a")
+    output = tmp_path / "campaign"
+    command = [
+        sys.executable,
+        str(
+            project
+            / "benchmarks"
+            / "initial_capacity"
+            / "run_local_matrix.py"
+        ),
+        "--project-root",
+        str(project),
+        "--material-root",
+        str(tmp_path / "materials"),
+        "--ptm-native-executable",
+        str(executable),
+        "--ptm-commit",
+        "test-commit",
+        "--output",
+        str(output),
+        "--family",
+        "parity",
+        "--route",
+        "ptm-native",
+        "--seed",
+        "47",
+        "--total-clauses",
+        "4",
+        "--plan-only",
+    ]
+
+    subprocess.run(command, check=True, capture_output=True, text=True)
+
+    expected_digest = "sha256:" + hashlib.sha256(b"native-runner-a").hexdigest()
+    plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+    assert plan["route_provenance"] == {
+        "ptm-native": {"native_executable_digest": expected_digest}
+    }
+    assert plan["attempts"][0]["model"]["executable_digest"] == expected_digest
+
+    executable.write_bytes(b"native-runner-b")
+    changed = subprocess.run(command, capture_output=True, text=True)
+
+    assert changed.returncode != 0
+    assert "existing campaign plan disagrees" in changed.stderr

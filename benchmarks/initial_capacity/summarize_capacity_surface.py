@@ -96,10 +96,12 @@ def _state_margin_metrics(
     rows: Sequence[Sequence[int]], scores: Sequence[int]
 ) -> dict[str, float]:
     grouped: dict[str, list[int]] = defaultdict(list)
+    errors: dict[str, list[bool]] = defaultdict(list)
     for row, score in zip(rows, scores):
         state = f"{row[0]}{row[1]}"
         clean_label = row[0] ^ row[1]
         grouped[state].append(score if clean_label else -score)
+        errors[state].append(int(score > 0) != clean_label)
     if set(grouped) != {"00", "01", "10", "11"}:
         raise ValueError("XOR material does not cover all four semantic states")
     result: dict[str, float] = {}
@@ -109,9 +111,7 @@ def _state_margin_metrics(
         result[f"state_{state}_median_correct_margin"] = float(
             statistics.median(margins)
         )
-        result[f"state_{state}_error_fraction"] = sum(
-            margin < 0 for margin in margins
-        ) / len(margins)
+        result[f"state_{state}_error_fraction"] = sum(errors[state]) / len(margins)
         result[f"state_{state}_tie_fraction"] = sum(
             margin == 0 for margin in margins
         ) / len(margins)
@@ -135,6 +135,23 @@ def _one_standard_error_selection(
 ) -> dict[str, object]:
     if not cells:
         raise ValueError("cannot select from no capacity cells")
+    observations_by_cell = [
+        _integer(
+            _mapping(
+                _mapping(cell["metrics"], "cell metrics")[metric],
+                f"{metric} distribution",
+            )["observations"],
+            "observations",
+        )
+        for cell in cells
+    ]
+    if min(observations_by_cell) < 2:
+        return {
+            "metric": metric,
+            "status": "insufficient_replicates",
+            "minimum_required_per_cell": 2,
+            "minimum_observed_per_cell": min(observations_by_cell),
+        }
     best = max(cells, key=lambda cell: _number(
         _mapping(cell["metrics"], "cell metrics")[metric]["mean"],
         f"{metric} mean",
@@ -164,6 +181,7 @@ def _one_standard_error_selection(
     selected = min(eligible, key=lambda cell: _integer(cell["clauses"], "clauses"))
     return {
         "metric": metric,
+        "status": "selected",
         "best_mean_clauses": best["clauses"],
         "best_mean": best_mean,
         "best_mean_standard_error": standard_error,
@@ -203,6 +221,15 @@ def summarize(campaign_root: Path, material_root: Path) -> dict[str, object]:
     records = _read_jsonl(campaign_root / "raw.jsonl")
     if len(records) != len(attempts):
         raise ValueError("campaign is incomplete")
+    provenance = _mapping(plan.get("route_provenance"), "route provenance")
+    native_provenance = _mapping(
+        provenance.get("ptm-native"), "PTM native route provenance"
+    )
+    planned_executable_digest = str(
+        native_provenance.get("native_executable_digest")
+    )
+    if not planned_executable_digest.startswith("sha256:"):
+        raise ValueError("campaign plan lacks a native executable digest")
 
     per_run = []
     for record in records:
@@ -210,6 +237,13 @@ def summarize(campaign_root: Path, material_root: Path) -> dict[str, object]:
         if run_id not in attempts or record.get("status") != "ok":
             raise ValueError(f"campaign record is unplanned or unsuccessful: {run_id}")
         attempt = attempts[run_id]
+        if record.get("model") != attempt.get("model"):
+            raise ValueError(f"campaign record model disagrees with plan: {run_id}")
+        record_dataset = _mapping(record["dataset"], "record dataset")
+        if record_dataset.get("manifest_digest") != attempt.get("manifest_digest"):
+            raise ValueError(
+                f"campaign record manifest disagrees with plan: {run_id}"
+            )
         manifest_path = material_root / str(attempt["manifest"])
         manifest = CampaignDatasetManifest.load(manifest_path)
         if manifest.dataset_id != "synthetic.xor20-noise.v1":
@@ -224,6 +258,10 @@ def summarize(campaign_root: Path, material_root: Path) -> dict[str, object]:
         diagnostics = _mapping(record["diagnostics"], "diagnostics")
         artifacts = _mapping(record["artifacts"], "artifacts")
         wrapper = _mapping(artifacts["wrapper"], "wrapper artifacts")
+        if wrapper.get("native_executable_digest") != planned_executable_digest:
+            raise ValueError(
+                f"campaign record executable disagrees with plan: {run_id}"
+            )
         vote_files = _mapping(wrapper["vote_score_files"], "vote-score artifacts")
         metrics = _mapping(record["metrics"], "record metrics")
         timing = _mapping(record["timing"], "record timing")

@@ -1410,6 +1410,14 @@ def _ptm_native_wrapper(
     executable = executable_path.resolve()
     if not executable.is_file():
         raise BenchmarkCampaignError("PTM native campaign executable is absent")
+    expected_executable_digest = _require_digest(
+        model.get("executable_digest"), "PTM native executable digest"
+    )
+    executable_digest = _bytes_digest(executable.read_bytes())
+    if executable_digest != expected_executable_digest:
+        raise BenchmarkCampaignError(
+            "PTM native campaign executable disagrees with the request"
+        )
     output_root = Path(request.output_directory).resolve()
     split_map = manifest.split_map
     train_receipt = split_map[request.train_split]
@@ -1463,6 +1471,10 @@ def _ptm_native_wrapper(
         raise BenchmarkCampaignError(
             "native campaign process exited unsuccessfully"
             + (f": {detail}" if detail else "")
+        )
+    if _bytes_digest(executable.read_bytes()) != expected_executable_digest:
+        raise BenchmarkCampaignError(
+            "PTM native campaign executable changed during execution"
         )
     try:
         native = json.loads(completed.stdout.decode("utf-8"))
@@ -1566,7 +1578,7 @@ def _ptm_native_wrapper(
         },
         "artifacts": {
             "native_executable": executable.name,
-            "native_executable_digest": _bytes_digest(executable.read_bytes()),
+            "native_executable_digest": executable_digest,
             "vote_score_files": vote_score_artifacts,
         },
         "failure": None,
