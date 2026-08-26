@@ -56,18 +56,23 @@ only. It is not a performance or accuracy result.
 
 `run_local_matrix.py` executes a predeclared, resumable local campaign. Its
 default matrix covers generated XOR20 noise, the parity ladder, and all four
-Logic encodings through PTM native, pyTsetlinMachine, and TMU. It scores only
-validation where one exists and retains the exact plan and host/thread
-environment before the first run. Resume refuses a changed plan, a changed
-host environment, duplicate run IDs, or records outside the declared matrix:
+Logic encodings through PTM native, pyTsetlinMachine, and TMU. It retains the
+exact plan and host/thread environment before the first run. Resume refuses a
+changed plan, a changed host environment, duplicate run IDs, or records outside
+the declared matrix:
 
 ```text
 PYTHONPATH=python python3 benchmarks/initial_capacity/run_local_matrix.py --project-root . --material-root out/benchmark-campaign/materials --incumbent-root out/benchmark-campaign/incumbents-linux --ptm-native-executable out/benchmark-campaign/ptm-native/ptm_campaign_native_runner --ptm-commit <commit> --output out/benchmark-campaign/local-scout
 ```
 
-Repeat `--variant` to restrict the material variants in a plan. By default the
-driver scores validation when available; an explicit `--score-split
-evaluation` is intended for a configuration frozen after validation.
+Repeat `--variant` to restrict the material variants and `--total-clauses` to
+declare a clause ladder. Repeat `--score-split` to retain several views of the
+same fitted model; for example, `train` plus `validation` supports capacity and
+generalization-gap analysis. By default the driver scores validation when
+available. An explicit `evaluation` split is intended for a configuration
+frozen after validation. PTM's native runner also retains independently checked
+signed vote scores and separately timed clause-population diagnostics so that
+measurement does not contaminate adaptive-training or resident-inference time.
 
 `package_colab.py` creates the deterministic allowlisted input archive consumed
 by `colab_smoke.py`. On a CPU runtime the remote driver repeats the four-route

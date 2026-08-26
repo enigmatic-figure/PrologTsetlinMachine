@@ -64,6 +64,8 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
         "47",
         "--total-clauses",
         "4",
+        "--total-clauses",
+        "8",
         "--epochs",
         "1",
         "--inference-repeats",
@@ -77,12 +79,16 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
     first = subprocess.run(command, check=True, capture_output=True, text=True)
     second = subprocess.run(command, check=True, capture_output=True, text=True)
 
-    assert "[1/1] run test-scout-n-03-ptm-scalar-s47" in first.stdout
-    assert "[1/1] skip recorded test-scout-n-03-ptm-scalar-s47" in second.stdout
+    assert "[1/2] run test-scout-n-03-c0004-ptm-scalar-s47" in first.stdout
+    assert "[2/2] run test-scout-n-03-c0008-ptm-scalar-s47" in first.stdout
+    assert "[1/2] skip recorded test-scout-n-03-c0004-ptm-scalar-s47" in second.stdout
+    assert "[2/2] skip recorded test-scout-n-03-c0008-ptm-scalar-s47" in second.stdout
     plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
-    assert plan["schema"] == "ptm.local-campaign-plan.v1"
+    assert plan["schema"] == "ptm.local-campaign-plan.v2"
     assert plan["attempts"][0]["score_splits"] == ["validation"]
     assert plan["attempts"][0]["model"]["config"]["clauses"] == 4
+    assert plan["attempts"][1]["model"]["config"]["clauses"] == 8
+    assert plan["total_clause_counts"] == [4, 8]
     environment = json.loads(
         (output / "environment.json").read_text(encoding="utf-8")
     )
@@ -93,13 +99,13 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
         json.loads(line)
         for line in (output / "raw.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert len(records) == 1
-    assert records[0]["status"] == "ok"
-    assert set(records[0]["metrics"]) == {"validation"}
+    assert len(records) == 2
+    assert all(record["status"] == "ok" for record in records)
+    assert all(set(record["metrics"]) == {"validation"} for record in records)
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
-    assert summary["attempts_planned"] == 1
-    assert summary["attempts_recorded"] == 1
-    assert summary["statuses"] == {"ok": 1}
+    assert summary["attempts_planned"] == 2
+    assert summary["attempts_recorded"] == 2
+    assert summary["statuses"] == {"ok": 2}
     assert summary["environment_digest"] == environment["environment_digest"]
 
     evaluation_output = tmp_path / "evaluation-plan"
@@ -119,7 +125,7 @@ def test_local_matrix_is_predeclared_and_resumable(tmp_path: Path) -> None:
     evaluation_plan = json.loads(
         (evaluation_output / "plan.json").read_text(encoding="utf-8")
     )
-    assert len(evaluation_plan["attempts"]) == 1
+    assert len(evaluation_plan["attempts"]) == 2
     assert evaluation_plan["variants"] == ["n-03"]
     assert evaluation_plan["requested_score_splits"] == ["evaluation"]
     assert evaluation_plan["attempts"][0]["score_splits"] == ["evaluation"]

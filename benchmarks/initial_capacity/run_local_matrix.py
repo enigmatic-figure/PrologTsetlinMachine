@@ -285,7 +285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--score-split",
         action="append",
-        choices=("validation", "evaluation"),
+        choices=("train", "validation", "evaluation"),
     )
     parser.add_argument(
         "--route",
@@ -293,7 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=("ptm-scalar", *DEFAULT_ROUTES),
     )
     parser.add_argument("--seed", type=int, action="append")
-    parser.add_argument("--total-clauses", type=int, default=200)
+    parser.add_argument("--total-clauses", type=int, action="append")
     parser.add_argument("--state-bits", type=int, default=8)
     parser.add_argument("--threshold", type=int, default=15)
     parser.add_argument("--specificity", type=float, default=3.9)
@@ -304,8 +304,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--plan-only", action="store_true")
     arguments = parser.parse_args(argv)
 
-    if arguments.total_clauses < 4 or arguments.total_clauses % 4:
-        parser.error("--total-clauses must be a positive multiple of four")
     if not 2 <= arguments.state_bits <= 16:
         parser.error("--state-bits must be between 2 and 16")
     if arguments.threshold < 1 or arguments.epochs < 1:
@@ -320,15 +318,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     output.mkdir(parents=True, exist_ok=True)
     families = tuple(arguments.family or sorted(FAMILY_DATASETS))
     routes = tuple(arguments.route or DEFAULT_ROUTES)
-    seeds = tuple(arguments.seed or (20260826,))
+    seeds = tuple(sorted(arguments.seed or (20260826,)))
+    clause_counts = tuple(sorted(arguments.total_clauses or (200,)))
     variants = tuple(arguments.variant or ())
-    score_splits = tuple(arguments.score_split or ())
+    score_splits = tuple(sorted(arguments.score_split or ()))
     if any(seed < 0 for seed in seeds) or len(seeds) != len(set(seeds)):
         parser.error("--seed values must be unique nonnegative integers")
     if len(variants) != len(set(variants)):
         parser.error("--variant values must be unique")
     if len(score_splits) != len(set(score_splits)):
         parser.error("--score-split values must be unique")
+    if (
+        any(value < 2 or value % 2 for value in clause_counts)
+        or len(clause_counts) != len(set(clause_counts))
+    ):
+        parser.error("--total-clauses values must be unique positive even integers")
+    if any(route in ("pytsetlinmachine", "tmu") for route in routes) and any(
+        value % 4 for value in clause_counts
+    ):
+        parser.error(
+            "incumbent routes require --total-clauses values divisible by four"
+        )
     manifests = _selected_manifests(
         arguments.material_root,
         families,
@@ -338,42 +348,44 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     attempts = []
     for manifest_path, manifest, score_splits in manifests:
-        for seed in seeds:
-            for route in routes:
-                model = _model(
-                    route,
-                    ptm_commit=arguments.ptm_commit,
-                    total_clauses=arguments.total_clauses,
-                    state_bits=arguments.state_bits,
-                    threshold=arguments.threshold,
-                    specificity=arguments.specificity,
-                    epochs=arguments.epochs,
-                    seed=seed,
-                    inference_repeats=arguments.inference_repeats,
-                    inference_warmup_repeats=arguments.inference_warmup_repeats,
-                )
-                run_id = (
-                    f"{arguments.pass_name}-{manifest.variant_id}-{route}-s{seed}"
-                )
-                attempts.append(
-                    {
-                        "run_id": run_id,
-                        "route": route,
-                        "seed": seed,
-                        "manifest": str(
-                            manifest_path.resolve().relative_to(
-                                arguments.material_root.resolve()
-                            )
-                        ).replace("\\", "/"),
-                        "manifest_digest": manifest.manifest_digest,
-                        "dataset_id": manifest.dataset_id,
-                        "variant_id": manifest.variant_id,
-                        "score_splits": list(score_splits),
-                        "model": model,
-                    }
-                )
+        for total_clauses in clause_counts:
+            for seed in seeds:
+                for route in routes:
+                    model = _model(
+                        route,
+                        ptm_commit=arguments.ptm_commit,
+                        total_clauses=total_clauses,
+                        state_bits=arguments.state_bits,
+                        threshold=arguments.threshold,
+                        specificity=arguments.specificity,
+                        epochs=arguments.epochs,
+                        seed=seed,
+                        inference_repeats=arguments.inference_repeats,
+                        inference_warmup_repeats=arguments.inference_warmup_repeats,
+                    )
+                    run_id = (
+                        f"{arguments.pass_name}-{manifest.variant_id}-"
+                        f"c{total_clauses:04d}-{route}-s{seed}"
+                    )
+                    attempts.append(
+                        {
+                            "run_id": run_id,
+                            "route": route,
+                            "seed": seed,
+                            "manifest": str(
+                                manifest_path.resolve().relative_to(
+                                    arguments.material_root.resolve()
+                                )
+                            ).replace("\\", "/"),
+                            "manifest_digest": manifest.manifest_digest,
+                            "dataset_id": manifest.dataset_id,
+                            "variant_id": manifest.variant_id,
+                            "score_splits": list(score_splits),
+                            "model": model,
+                        }
+                    )
     plan = {
-        "schema": "ptm.local-campaign-plan.v1",
+        "schema": "ptm.local-campaign-plan.v2",
         "campaign_id": "initial-capacity-local-v1",
         "pass": arguments.pass_name,
         "families": list(families),
@@ -381,6 +393,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "requested_score_splits": list(score_splits),
         "routes": list(routes),
         "seeds": list(seeds),
+        "total_clause_counts": list(clause_counts),
         "attempts": attempts,
     }
     run_ids = {str(attempt["run_id"]) for attempt in attempts}

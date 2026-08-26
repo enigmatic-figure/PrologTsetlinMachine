@@ -44,6 +44,7 @@ _MAX_RESULT_BYTES = 4 << 20
 _TIMING_BOUNDARIES = (
     "preprocessing_materialization_s",
     "adaptive_training_s",
+    "diagnostic_collection_s",
     "resident_inference_samples_s",
     "pta_lifecycle_episode_s",
 )
@@ -691,7 +692,7 @@ def prepare_xor_noise(
     train_rows: int = 5_000,
     validation_rows: int = 5_000,
     evaluation_rows: int = 10_000,
-    noise_basis_points: Sequence[int] = (0, 1_000, 2_000, 4_000),
+    noise_basis_points: Sequence[int] = (0, 1_000, 2_000, 3_000, 4_000),
 ) -> tuple[Path, ...]:
     """Prepare deterministic XOR rows with exact-count training-label noise."""
 
@@ -994,6 +995,18 @@ def _read_predictions(path: Path) -> tuple[int, ...]:
         raise BenchmarkCampaignError("prediction file is malformed") from error
     if any(value not in (0, 1) for value in values):
         raise BenchmarkCampaignError("prediction file contains non-binary values")
+    return values
+
+
+def _read_vote_scores(path: Path) -> tuple[int, ...]:
+    try:
+        values = tuple(
+            int(line) for line in path.read_text(encoding="ascii").splitlines()
+        )
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise BenchmarkCampaignError("vote-score file is malformed") from error
+    if not values:
+        raise BenchmarkCampaignError("vote-score file is empty")
     return values
 
 
@@ -1407,6 +1420,7 @@ def _ptm_native_wrapper(
     )
     score_arguments: list[str] = []
     predictions: dict[str, str] = {}
+    vote_score_paths: dict[str, Path] = {}
     for split_name in request.score_splits:
         receipt = split_map[split_name]
         input_path = _resolve_contained(
@@ -1416,7 +1430,9 @@ def _ptm_native_wrapper(
         )
         filename = f"predictions-{split_name}.txt"
         predictions[split_name] = filename
-        score_arguments.extend((str(input_path), str(output_root / filename)))
+        prediction_path = output_root / filename
+        vote_score_paths[split_name] = Path(str(prediction_path) + ".scores")
+        score_arguments.extend((str(input_path), str(prediction_path)))
     command = [
         str(executable),
         str(train_path),
@@ -1456,14 +1472,19 @@ def _ptm_native_wrapper(
         "schema",
         "preprocessing_materialization_s",
         "adaptive_training_s",
+        "diagnostic_collection_s",
         "resident_inference_samples_s",
         "backend",
         "diagnostics",
     }:
         raise BenchmarkCampaignError("native campaign result fields are not canonical")
-    if native["schema"] != "ptm.native-campaign-runner.v1":
+    if native["schema"] != "ptm.native-campaign-runner.v2":
         raise BenchmarkCampaignError("native campaign result schema is unsupported")
-    for name in ("preprocessing_materialization_s", "adaptive_training_s"):
+    for name in (
+        "preprocessing_materialization_s",
+        "adaptive_training_s",
+        "diagnostic_collection_s",
+    ):
         value = native[name]
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
             raise BenchmarkCampaignError(f"native campaign {name} is invalid")
@@ -1490,6 +1511,39 @@ def _ptm_native_wrapper(
     diagnostics = _canonical_mapping(
         native["diagnostics"], "native campaign diagnostics"
     )
+    vote_score_artifacts: dict[str, object] = {}
+    vote_score_summaries: dict[str, object] = {}
+    for split_name in request.score_splits:
+        prediction_path = output_root / predictions[split_name]
+        vote_score_path = vote_score_paths[split_name]
+        if not vote_score_path.is_file():
+            raise BenchmarkCampaignError("native vote-score file is absent")
+        retained_predictions = _read_predictions(prediction_path)
+        vote_scores = _read_vote_scores(vote_score_path)
+        expected_rows = split_map[split_name].row_count
+        if len(vote_scores) != expected_rows or len(retained_predictions) != expected_rows:
+            raise BenchmarkCampaignError("native vote-score row count is inconsistent")
+        if any(value < -threshold or value > threshold for value in vote_scores):
+            raise BenchmarkCampaignError("native vote score exceeds the clipped range")
+        if any(
+            prediction != int(score > 0)
+            for prediction, score in zip(retained_predictions, vote_scores)
+        ):
+            raise BenchmarkCampaignError("native vote score contradicts its prediction")
+        vote_bytes = vote_score_path.read_bytes()
+        vote_score_artifacts[split_name] = {
+            "path": vote_score_path.name,
+            "digest": _bytes_digest(vote_bytes),
+        }
+        vote_score_summaries[split_name] = {
+            "minimum": min(vote_scores),
+            "maximum": max(vote_scores),
+            "mean": sum(vote_scores) / len(vote_scores),
+            "mean_absolute": sum(abs(value) for value in vote_scores)
+            / len(vote_scores),
+            "ties": sum(value == 0 for value in vote_scores),
+        }
+    diagnostics = diagnostics | {"vote_score_summaries": vote_score_summaries}
     return {
         "schema": CAMPAIGN_WRAPPER_RESULT_SCHEMA,
         "run_id": request.run_id,
@@ -1500,6 +1554,7 @@ def _ptm_native_wrapper(
                 native["preprocessing_materialization_s"]
             ),
             "adaptive_training_s": float(native["adaptive_training_s"]),
+            "diagnostic_collection_s": float(native["diagnostic_collection_s"]),
             "resident_inference_samples_s": inference_samples,
         },
         "diagnostics": diagnostics,
@@ -1512,6 +1567,7 @@ def _ptm_native_wrapper(
         "artifacts": {
             "native_executable": executable.name,
             "native_executable_digest": _bytes_digest(executable.read_bytes()),
+            "vote_score_files": vote_score_artifacts,
         },
         "failure": None,
     }
