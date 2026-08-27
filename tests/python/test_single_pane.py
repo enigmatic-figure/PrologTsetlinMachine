@@ -817,6 +817,26 @@ async def test_single_pane_configuration_controls_fit_the_visible_grid() -> None
             assert visible.contains_region(region)
 
 
+async def test_single_pane_requests_click_only_terminal_mouse_tracking() -> None:
+    writes: list[str] = []
+
+    class DriverStub:
+        is_headless = False
+
+        def write(self, value: str) -> None:
+            writes.append(value)
+
+        def flush(self) -> None:
+            writes.append("flush")
+
+    app = SinglePaneApp()
+    app._driver = DriverStub()
+
+    app._use_click_only_mouse_tracking()
+
+    assert writes == ["\x1b[?1003l\x1b[?1000h", "flush"]
+
+
 async def test_single_pane_labels_retained_snapshot_during_retraining(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

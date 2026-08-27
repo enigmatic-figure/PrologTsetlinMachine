@@ -73,6 +73,9 @@ from ...services.telemetry import TelemetrySession
 from ...help_topics import CANONICAL_TUI_BINDINGS
 
 
+_CLICK_ONLY_MOUSE_TRACKING = "\x1b[?1003l\x1b[?1000h"
+
+
 class PTMWorkbenchApp(App[None]):
     TITLE = 'PTM Workbench'
     CSS_PATH = 'ptm.tcss'
@@ -147,6 +150,7 @@ class PTMWorkbenchApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._use_click_only_mouse_tracking()
         self.query_one('#filter-input', Input).can_focus = False
         self.set_focus(None)
         capabilities = {
@@ -168,6 +172,27 @@ class PTMWorkbenchApp(App[None]):
         self._apply_breakpoint(self.size.width, self.size.height)
         self._emit('session', 'session', message='workbench ready; single PTM session model')
         self.set_interval(0.5, self._tick_uptime)
+
+    def _use_click_only_mouse_tracking(self) -> None:
+        """Avoid passive-motion escape traffic while retaining mouse clicks.
+
+        Textual enables DEC 1003 all-motion tracking. Malformed mouse reports
+        may be reissued as ordinary keys by Textual 8.2, which is particularly
+        hazardous for this workbench's global single-key navigation bindings.
+        DEC 1000 still reports button presses and releases without reporting
+        every unpressed pointer movement.
+        """
+
+        driver = getattr(self, "_driver", None)
+        if driver is None or driver.is_headless:
+            return
+        try:
+            driver.write(_CLICK_ONLY_MOUSE_TRACKING)
+            driver.flush()
+        except Exception as error:  # pragma: no cover - terminal-specific
+            self.log.warning(
+                f"unable to select click-only mouse tracking: {error}"
+            )
 
     def on_resize(self, event: Resize) -> None:
         self._apply_breakpoint(event.size.width, event.size.height)
