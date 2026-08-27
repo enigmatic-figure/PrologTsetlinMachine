@@ -34,7 +34,7 @@ test = [
     "hypothesis>=6.100,<7",
 ]
 tui-test = ["pytest-textual-snapshot>=1.1,<2"]
-data = ["pyarrow>=18,<26", "Pillow>=12,<13"]
+data = ["numpy>=1.26,<3", "pyarrow>=18,<26", "Pillow>=12,<13"]
 graph = []
 docs = [
     "sphinx>=7,<8.2; python_version < '3.11'",
