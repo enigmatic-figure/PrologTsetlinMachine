@@ -37,7 +37,6 @@ from prolog_tsetlin.services.telemetry import TelemetryEvent, TelemetrySession
 
 
 SCHEMA = "ptm.mnist-pta-scout.v1"
-TARGET_DIGIT = 8
 PIXEL_THRESHOLD = 0.3
 
 
@@ -62,6 +61,7 @@ def _records(
     indices: np.ndarray,
     pixels: Sequence[int],
     *,
+    target: int,
     role: CorpusRole,
     dataset_id: str,
     first_id: int,
@@ -74,7 +74,7 @@ def _records(
                 field: float(values[int(index), pixel])
                 for field, pixel in zip(fields, pixels)
             },
-            int(labels[int(index)] == TARGET_DIGIT),
+            int(labels[int(index)] == target),
         )
         for position, index in enumerate(indices)
     )
@@ -127,6 +127,7 @@ def _metrics(
     machine.restore(snapshot)
     rows = tuple(batch.row_values(index) for index in range(batch.row_count))
     predictions = tuple(machine.predict(rows))
+    scores = tuple(machine.score(row) for row in rows)
     truth = corpus.labels
     true_positive = sum(a == 1 and b == 1 for a, b in zip(truth, predictions))
     true_negative = sum(a == 0 and b == 0 for a, b in zip(truth, predictions))
@@ -141,6 +142,7 @@ def _metrics(
         "false_positive": false_positive,
         "false_negative": false_negative,
         "predictions": list(predictions),
+        "scores": list(scores),
     }
 
 
@@ -156,6 +158,14 @@ def _paired(
         "improvements": improvements,
         "regressions": regressions,
         "prediction_disagreements": disagreements,
+    }
+
+
+def _public_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in metrics.items()
+        if key not in {"predictions", "scores"}
     }
 
 
@@ -199,15 +209,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--ptmrt", type=Path, default=Path("out/build/Release/ptmrt.exe")
     )
     parser.add_argument("--seed", type=int, default=20260831)
+    parser.add_argument("--target-digit", type=int, default=8)
     parser.add_argument("--features", type=int, default=12)
     parser.add_argument("--clauses", type=int, default=40)
     parser.add_argument("--parent-epochs", type=int, default=10)
     parser.add_argument("--adaptation-epochs", type=int, default=5)
+    parser.add_argument("--shared-audit-rows", type=int, default=0)
+    parser.add_argument("--emit-score-vectors", action="store_true")
     args = parser.parse_args(argv)
     if not 4 <= args.features <= 12:
         parser.error(
             "--features must lie in 4..12 for the bounded PTA session"
         )
+    if not 0 <= args.target_digit <= 9:
+        parser.error("--target-digit must lie in 0..9")
+    if args.shared_audit_rows < 0:
+        parser.error("--shared-audit-rows must be nonnegative")
     output = args.output.expanduser().resolve()
     if output.exists():
         parser.error(f"output already exists: {output}")
@@ -223,25 +240,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     validation_x, validation_y = np.asarray(validation[0]), np.asarray(validation[1])
     test_x, test_y = np.asarray(test[0]), np.asarray(test[1])
     rng = np.random.default_rng(args.seed)
-    train_pos = rng.permutation(np.flatnonzero(train_y == TARGET_DIGIT))
-    train_neg = rng.permutation(np.flatnonzero(train_y != TARGET_DIGIT))
-    validation_pos = rng.permutation(np.flatnonzero(validation_y == TARGET_DIGIT))
-    validation_neg = rng.permutation(np.flatnonzero(validation_y != TARGET_DIGIT))
-    test_pos = rng.permutation(np.flatnonzero(test_y == TARGET_DIGIT))
-    test_neg = rng.permutation(np.flatnonzero(test_y != TARGET_DIGIT))
+    target_digit = args.target_digit
+    train_pos = rng.permutation(np.flatnonzero(train_y == target_digit))
+    train_neg = rng.permutation(np.flatnonzero(train_y != target_digit))
+    validation_pos = rng.permutation(np.flatnonzero(validation_y == target_digit))
+    validation_neg = rng.permutation(np.flatnonzero(validation_y != target_digit))
+    test_pos = rng.permutation(np.flatnonzero(test_y == target_digit))
+    test_neg = rng.permutation(np.flatnonzero(test_y != target_digit))
 
     feature_selection_indices = _balanced(
         train_y,
-        target=TARGET_DIGIT,
+        target=target_digit,
         positive=train_pos[:200],
         negative=train_neg[:200],
     )
     difference = np.abs(
         train_x[feature_selection_indices][
-            train_y[feature_selection_indices] == TARGET_DIGIT
+            train_y[feature_selection_indices] == target_digit
         ].mean(axis=0)
         - train_x[feature_selection_indices][
-            train_y[feature_selection_indices] != TARGET_DIGIT
+            train_y[feature_selection_indices] != target_digit
         ].mean(axis=0)
     )
     informative = [
@@ -251,79 +269,80 @@ def main(argv: Sequence[str] | None = None) -> int:
     ][: args.features - 2]
     pixels = (0, 1, *informative)
     fields = tuple(f"p{pixel:03d}" for pixel in pixels)
-    dataset_id = f"mnist-digit-8-pta-scout-seed-{args.seed}"
+    dataset_id = f"mnist-digit-{target_digit}-pta-scout-seed-{args.seed}"
     parent_fingerprints: set[tuple[int, tuple[float, ...]]] = set()
     parent_pos, parent_pos_cursor = _take_unique(
         train_pos, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=200, used=parent_fingerprints, start=0,
+        target=target_digit, count=200, used=parent_fingerprints, start=0,
     )
     parent_neg, parent_neg_cursor = _take_unique(
         train_neg, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=200, used=parent_fingerprints, start=0,
+        target=target_digit, count=200, used=parent_fingerprints, start=0,
     )
     parent_indices = _balanced(
         train_y,
-        target=TARGET_DIGIT,
+        target=target_digit,
         positive=parent_pos,
         negative=parent_neg,
     )
     input_used = set(parent_fingerprints)
     invention_pos, train_pos_cursor = _take_unique(
         train_pos, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=40, used=input_used, start=parent_pos_cursor,
+        target=target_digit, count=40, used=input_used, start=parent_pos_cursor,
     )
     invention_neg, train_neg_cursor = _take_unique(
         train_neg, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=40, used=input_used, start=parent_neg_cursor,
+        target=target_digit, count=40, used=input_used, start=parent_neg_cursor,
     )
     adaptation_pos, train_pos_cursor = _take_unique(
         train_pos, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=80, used=input_used, start=train_pos_cursor,
+        target=target_digit, count=80, used=input_used, start=train_pos_cursor,
     )
     adaptation_neg, train_neg_cursor = _take_unique(
         train_neg, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=80, used=input_used, start=train_neg_cursor,
+        target=target_digit, count=80, used=input_used, start=train_neg_cursor,
     )
     promotion_pos, _ = _take_unique(
         validation_pos, validation_x, validation_y, pixels,
-        target=TARGET_DIGIT, count=100, used=input_used, start=0,
+        target=target_digit, count=100, used=input_used, start=0,
     )
     promotion_neg, _ = _take_unique(
         validation_neg, validation_x, validation_y, pixels,
-        target=TARGET_DIGIT, count=100, used=input_used, start=0,
+        target=target_digit, count=100, used=input_used, start=0,
     )
     deescalation_used = set(parent_fingerprints)
     proof_pos, deescalation_pos_cursor = _take_unique(
         train_pos, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=40, used=deescalation_used, start=1_000,
+        target=target_digit, count=40, used=deescalation_used, start=1_000,
     )
     proof_neg, deescalation_neg_cursor = _take_unique(
         train_neg, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=40, used=deescalation_used, start=1_000,
+        target=target_digit, count=40, used=deescalation_used, start=1_000,
     )
     confirmation_pos, _ = _take_unique(
         train_pos, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=40, used=deescalation_used,
+        target=target_digit, count=40, used=deescalation_used,
         start=deescalation_pos_cursor,
     )
     confirmation_neg, _ = _take_unique(
         train_neg, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=40, used=deescalation_used,
+        target=target_digit, count=40, used=deescalation_used,
         start=deescalation_neg_cursor,
     )
     deescalation_promotion_pos, _ = _take_unique(
         validation_pos, validation_x, validation_y, pixels,
-        target=TARGET_DIGIT, count=100, used=deescalation_used, start=300,
+        target=target_digit, count=100, used=deescalation_used, start=300,
     )
     deescalation_promotion_neg, _ = _take_unique(
         validation_neg, validation_x, validation_y, pixels,
-        target=TARGET_DIGIT, count=100, used=deescalation_used, start=300,
+        target=target_digit, count=100, used=deescalation_used, start=300,
     )
     parent_corpus = _records(
         train_x,
         train_y,
         parent_indices,
         pixels,
+        target=target_digit,
         role=CorpusRole.PARENT_TRAINING,
         dataset_id=dataset_id,
         first_id=0,
@@ -333,11 +352,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         train_y,
         _balanced(
             train_y,
-            target=TARGET_DIGIT,
+            target=target_digit,
             positive=invention_pos,
             negative=invention_neg,
         ),
         pixels,
+        target=target_digit,
         role=CorpusRole.INVENTION,
         dataset_id=dataset_id,
         first_id=10_000,
@@ -347,11 +367,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         train_y,
         _balanced(
             train_y,
-            target=TARGET_DIGIT,
+            target=target_digit,
             positive=adaptation_pos,
             negative=adaptation_neg,
         ),
         pixels,
+        target=target_digit,
         role=CorpusRole.ADAPTATION,
         dataset_id=dataset_id,
         first_id=20_000,
@@ -361,11 +382,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         validation_y,
         _balanced(
             validation_y,
-            target=TARGET_DIGIT,
+            target=target_digit,
             positive=promotion_pos,
             negative=promotion_neg,
         ),
         pixels,
+        target=target_digit,
         role=CorpusRole.PROMOTION,
         dataset_id=dataset_id,
         first_id=30_000,
@@ -375,11 +397,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         train_y,
         _balanced(
             train_y,
-            target=TARGET_DIGIT,
+            target=target_digit,
             positive=proof_pos,
             negative=proof_neg,
         ),
         pixels,
+        target=target_digit,
         role=CorpusRole.DEESCALATION_PROOF,
         dataset_id=dataset_id,
         first_id=40_000,
@@ -389,11 +412,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         train_y,
         _balanced(
             train_y,
-            target=TARGET_DIGIT,
+            target=target_digit,
             positive=confirmation_pos,
             negative=confirmation_neg,
         ),
         pixels,
+        target=target_digit,
         role=CorpusRole.DEESCALATION_CONFIRMATION,
         dataset_id=dataset_id,
         first_id=50_000,
@@ -403,25 +427,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         validation_y,
         _balanced(
             validation_y,
-            target=TARGET_DIGIT,
+            target=target_digit,
             positive=deescalation_promotion_pos,
             negative=deescalation_promotion_neg,
         ),
         pixels,
+        target=target_digit,
         role=CorpusRole.PROMOTION,
         dataset_id=dataset_id,
         first_id=60_000,
     )
+    evaluation_indices = (
+        np.arange(min(args.shared_audit_rows, len(test_y)), dtype=np.int64)
+        if args.shared_audit_rows
+        else _balanced(
+            test_y,
+            target=target_digit,
+            positive=test_pos[:500],
+            negative=test_neg[:500],
+        )
+    )
     evaluation = _records(
         test_x,
         test_y,
-        _balanced(
-            test_y,
-            target=TARGET_DIGIT,
-            positive=test_pos[:500],
-            negative=test_neg[:500],
-        ),
+        evaluation_indices,
         pixels,
+        target=target_digit,
         role=CorpusRole.LIVE,
         dataset_id=dataset_id,
         first_id=70_000,
@@ -535,7 +566,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         "config": {
             "seed": args.seed,
-            "target_digit": TARGET_DIGIT,
+            "target_digit": target_digit,
             "features": args.features,
             "selected_pixels": list(pixels),
             "feature_selection_source_rows": len(feature_selection_indices),
@@ -556,7 +587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "deescalation_lifecycle": deescalation_seconds,
         },
         "baseline_test": {
-            key: value for key, value in baseline_test.items() if key != "predictions"
+            **_public_metrics(baseline_test)
         },
         "pta_usage": {
             "input": {
@@ -574,7 +605,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "candidate_evaluations": (
                     len(candidate_selection.get("outcomes", []))
                     if candidate_selection is not None
-                    else 0
+                    else (
+                        int(candidate_set.get("available_candidates", 0))
+                        if candidate_set is not None
+                        and input_error
+                        == "no threshold candidate satisfies selection policy"
+                        else 0
+                    )
                 ),
                 "selection": candidate_selection,
                 "promotion_audit": input_audit,
@@ -597,14 +634,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         },
     }
+    selected_input_test: Mapping[str, object] | None = None
+    deescalation_child_test: Mapping[str, object] | None = None
     if input_result is not None:
         child_test = _metrics(
             input_result.child.snapshot.snapshot,
             input_result.child.manifest,
             evaluation,
         )
+        selected_input_test = child_test
         result["input_escalation_test"] = {
-            key: value for key, value in child_test.items() if key != "predictions"
+            **_public_metrics(child_test)
         }
         result["input_escalation_test_paired"] = _paired(
             evaluation.labels,
@@ -624,8 +664,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             rejected_manifest,
             evaluation,
         )
+        selected_input_test = child_test
         result["input_escalation_rejected_child_test"] = {
-            key: value for key, value in child_test.items() if key != "predictions"
+            **_public_metrics(child_test)
         }
         result["input_escalation_rejected_child_test_paired"] = _paired(
             evaluation.labels,
@@ -641,8 +682,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             deescalation_result.contracted_parent.manifest,
             evaluation,
         )
+        deescalation_child_test = child_test
         result["deescalation_test"] = {
-            key: value for key, value in child_test.items() if key != "predictions"
+            **_public_metrics(child_test)
         }
         result["deescalation_test_paired"] = _paired(
             evaluation.labels,
@@ -653,6 +695,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             deescalation_result.contracted_parent.snapshot.snapshot.number_of_features
             - parent_snapshot.number_of_features
         )
+    if args.emit_score_vectors:
+        counterfactual = selected_input_test or baseline_test
+        governed = counterfactual if input_result is not None else baseline_test
+        deescalated = deescalation_child_test or baseline_test
+        result["score_vectors"] = {
+            "example_ids": [item.example_id for item in evaluation.examples],
+            "multiclass_truth": [
+                int(test_y[int(index)]) for index in evaluation_indices
+            ],
+            "binary_truth": list(evaluation.labels),
+            "baseline": baseline_test["scores"],
+            "policy_governed": governed["scores"],
+            "selected_child_counterfactual": counterfactual["scores"],
+            "deescalated": deescalated["scores"],
+        }
     result_path = output / "result.json"
     result_path.write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
