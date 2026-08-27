@@ -33,6 +33,22 @@ Screen { background: $ptm-bg; color: $ptm-text; }
 #view-literals { height: 1fr; }
 #view-system { height: 1fr; background: $ptm-panel-alt; padding: 1 2; }
 #view-artifacts { height: 1fr; background: $ptm-panel-alt; padding: 1 2; }
+#view-config { height: 1fr; background: $ptm-panel-alt; padding: 0 1; }
+#config-panel { width: 1fr; height: 1fr; }
+#config-grid {
+    layout: grid;
+    grid-size: 4 2;
+    grid-columns: 1fr;
+    grid-rows: 4;
+    grid-gutter: 0 1;
+    height: 8;
+}
+.config-field { width: 1fr; height: 4; }
+.config-label { height: 1; color: $ptm-muted2; text-style: bold; }
+.config-field Input, .config-field Select { width: 1fr; height: 3; }
+#config-buttons { width: 1fr; height: 3; }
+#config-buttons Button { width: 1fr; min-width: 0; }
+#cfg-status { min-height: 1; }
 #artifact-controls, #search-controls, #search-export-controls { height: 3; }
 #artifact-path, #search-export-path { width: 1fr; }
 #artifact-export, #artifact-verify, #search-run, #search-cancel, #search-export { width: auto; }
@@ -74,3 +90,8 @@ Screen.compact #clause-inspector { width: 100%; height: 1fr; border-right: none;
 Screen.compact #ta-histogram { width: 100%; height: 1fr; }
 Screen.compact #view-timeline { padding: 0; }
 Screen.compact #temporal-status { height: 3; }
+Screen.compact #config-grid {
+    grid-size: 2 4;
+    grid-rows: 4;
+    height: 16;
+}

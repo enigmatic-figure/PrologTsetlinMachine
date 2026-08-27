@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, Select, Static
 
 from ....services.training import TrainingRequest, TrainingWorkload
@@ -25,30 +25,46 @@ WORKLOAD_DEFAULTS = {
 }
 
 
-class TrainingConfigPanel(Vertical):
-    """Dense workbench config with inline validation and stale-state detection."""
+class TrainingConfigPanel(VerticalScroll):
+    """Labeled workload configuration with validation and stale-state detection."""
 
     def compose(self) -> ComposeResult:
         yield Static(
-            "TRAINING CONFIG  workload/clauses/states/spec/T/epochs/seed  "
-            "Enter to apply, t to train",
+            "TRAINING CONFIG  edit values, then press t or choose Train",
             classes="card_title",
         )
-        with Horizontal(id="config-row"):
-            yield Select(
-                [("XOR smoke", "xor"), ("MNIST bits", "mnist")],
-                value="xor",
-                id="cfg-workload",
-                allow_blank=False,
-            )
-            yield Input(placeholder="Clauses", id="cfg-clauses", value="20", type="integer")
-            yield Input(placeholder="States", id="cfg-states", value="50", type="integer")
-            yield Input(placeholder="s", id="cfg-spec", value="3.0", type="number")
-            yield Input(placeholder="T", id="cfg-thr", value="10", type="integer")
-            yield Input(placeholder="Epochs", id="cfg-epochs", value="80", type="integer")
-            yield Input(placeholder="Seed", id="cfg-seed", value="7", type="integer")
-            yield Button("Train [t]", id="cfg-train", variant="success")
-            yield Button("Cancel [x]", id="cfg-cancel", variant="error")
+        with Grid(id="config-grid"):
+            with Vertical(classes="config-field"):
+                yield Static("WORKLOAD", classes="config-label")
+                yield Select(
+                    [("XOR smoke", "xor"), ("MNIST bits", "mnist")],
+                    value="xor",
+                    id="cfg-workload",
+                    allow_blank=False,
+                )
+            with Vertical(classes="config-field"):
+                yield Static("CLAUSES / CLASS", classes="config-label")
+                yield Input(id="cfg-clauses", value="20", type="integer")
+            with Vertical(classes="config-field"):
+                yield Static("STATES / ACTION", classes="config-label")
+                yield Input(id="cfg-states", value="50", type="integer")
+            with Vertical(classes="config-field"):
+                yield Static("SPECIFICITY (s)", classes="config-label")
+                yield Input(id="cfg-spec", value="3.0", type="number")
+            with Vertical(classes="config-field"):
+                yield Static("VOTE THRESHOLD (T)", classes="config-label")
+                yield Input(id="cfg-thr", value="10", type="integer")
+            with Vertical(classes="config-field"):
+                yield Static("EPOCHS", classes="config-label")
+                yield Input(id="cfg-epochs", value="80", type="integer")
+            with Vertical(classes="config-field"):
+                yield Static("RANDOM SEED", classes="config-label")
+                yield Input(id="cfg-seed", value="7", type="integer")
+            with Vertical(classes="config-field"):
+                yield Static("ACTIONS", classes="config-label")
+                with Horizontal(id="config-buttons"):
+                    yield Button("Train [t]", id="cfg-train", variant="success")
+                    yield Button("Cancel [x]", id="cfg-cancel", variant="error")
         yield Static("", id="cfg-status", classes="card_label")
 
     def get_request(self) -> TrainingRequest:
