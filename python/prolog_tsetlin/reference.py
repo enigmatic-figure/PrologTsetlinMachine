@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from math import isfinite
+from math import exp, isfinite
 import random
 from dataclasses import dataclass
 from typing import Iterable, Sequence
@@ -24,6 +24,17 @@ class TMSnapshot:
     threshold: int
     states: tuple[tuple[int, ...], ...]
     rng_state: object
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualUpdateResult:
+    """Observable result of one experimental residual-guided TM update."""
+
+    raw_score: int
+    student_probability: float
+    target_probability: float
+    residual: float
+    feedback_probability: float
 
 
 def extend_snapshot_features(
@@ -277,6 +288,77 @@ class ScalarBinaryTsetlinMachine:
                 self._type_i_feedback(clause, literals, output)
             else:
                 self._type_ii_feedback(clause, literals, output)
+
+    def update_residual(
+        self,
+        features: Sequence[bool | int],
+        target_probability: float,
+        *,
+        temperature: float,
+        learning_rate: float,
+    ) -> ResidualUpdateResult:
+        """Update from a probability residual instead of the standard margin gate.
+
+        This experimental controller retains the existing literal-level Type I
+        and Type II rules. It replaces only the outer feedback gate and routes
+        feedback by clause polarity so positive residuals raise the signed vote
+        while negative residuals lower it.
+        """
+
+        if isinstance(target_probability, bool) or not isinstance(
+            target_probability, (int, float)
+        ):
+            raise TypeError("target_probability must be a real number")
+        target_value = float(target_probability)
+        if not isfinite(target_value) or not 0.0 <= target_value <= 1.0:
+            raise ValueError("target_probability must be finite and in [0, 1]")
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+            raise TypeError("temperature must be a real number")
+        temperature_value = float(temperature)
+        if not isfinite(temperature_value) or temperature_value <= 0.0:
+            raise ValueError("temperature must be finite and positive")
+        if isinstance(learning_rate, bool) or not isinstance(
+            learning_rate, (int, float)
+        ):
+            raise TypeError("learning_rate must be a real number")
+        learning_rate_value = float(learning_rate)
+        if not isfinite(learning_rate_value) or learning_rate_value <= 0.0:
+            raise ValueError("learning_rate must be finite and positive")
+
+        literals = self._literals(features)
+        raw_score = self.score(features)
+        scaled_score = raw_score / temperature_value
+        if scaled_score >= 0.0:
+            student_probability = 1.0 / (1.0 + exp(-scaled_score))
+        else:
+            scaled_exp = exp(scaled_score)
+            student_probability = scaled_exp / (1.0 + scaled_exp)
+        residual = target_value - student_probability
+        feedback_probability = min(1.0, learning_rate_value * abs(residual))
+
+        result = ResidualUpdateResult(
+            raw_score=raw_score,
+            student_probability=student_probability,
+            target_probability=target_value,
+            residual=residual,
+            feedback_probability=feedback_probability,
+        )
+        if residual == 0.0:
+            return result
+
+        for clause in range(self.number_of_clauses):
+            if self._rng.random() > feedback_probability:
+                continue
+            positive_clause = clause % 2 == 0
+            output = self.clause_output(clause, features, prediction=False)
+            use_type_i = (residual > 0.0 and positive_clause) or (
+                residual < 0.0 and not positive_clause
+            )
+            if use_type_i:
+                self._type_i_feedback(clause, literals, output)
+            else:
+                self._type_ii_feedback(clause, literals, output)
+        return result
 
     def fit(
         self,

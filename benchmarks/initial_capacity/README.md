@@ -101,3 +101,22 @@ alternates positive and negative polarity. Campaign configurations must record
 that distinction rather than comparing the raw clause-count fields as if they
 were identical. The pinned pyTsetlinMachine code also has a fixed internal C
 random stream but no public seed control; its records say so explicitly.
+
+## MNIST JIT distillation scout
+
+`run_mnist_jit_distillation.py` runs the bounded three-arm experiment used to
+separate a residual feedback controller from temporary neural-teacher
+guidance. A common one-epoch scalar PTM checkpoint is restored bit-exactly into
+ordinary hard-margin, hard-target residual, and teacher-target residual arms.
+The compact CPU ConvNet sees all 784 grayscale pixels; each exact PTM bank keeps
+the existing 12-literal, thresholded representation. The mismatch is recorded
+as part of the experiment rather than treated as a matched representation.
+
+Unless `--skip-pta` is passed for plumbing tests, each validation-selected arm
+checkpoint is sent through all ten executable Input/Escalation and
+De-escalation PTA cells. Bulk checkpoints, logits, vectors, stores, and results
+remain under ignored `out/` storage:
+
+```text
+PYTHONPATH=python python benchmarks/initial_capacity/run_mnist_jit_distillation.py --output out/benchmark-campaign/mnist-jit-distillation-v1 --epochs 10 --teacher-epochs 3 --validation-rows 2000 --pta-audit-rows 2000
+```

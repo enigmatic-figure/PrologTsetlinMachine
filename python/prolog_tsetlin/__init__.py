@@ -146,6 +146,7 @@ from .prolog_bridge import (
     ThresholdSearchResult,
 )
 from .reference import (
+    ResidualUpdateResult,
     ScalarBinaryTsetlinMachine,
     TMSnapshot,
     contract_snapshot_equivalent_feature,

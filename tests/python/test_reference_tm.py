@@ -11,6 +11,32 @@ from prolog_tsetlin import (
 from prolog_tsetlin.reference import contract_snapshot_equivalent_feature
 
 
+class FeedbackRecordingMachine(ScalarBinaryTsetlinMachine):
+    def __init__(self) -> None:
+        super().__init__(
+            4,
+            2,
+            states_per_action=4,
+            specificity=3.0,
+            threshold=5,
+            seed=9,
+        )
+        for clause in range(4):
+            for literal in range(4):
+                self.set_state(clause, literal, 4)
+        self.feedback: list[tuple[str, int]] = []
+
+    def _type_i_feedback(
+        self, clause: int, literals: tuple[bool, ...], output: bool
+    ) -> None:
+        self.feedback.append(("I", clause))
+
+    def _type_ii_feedback(
+        self, clause: int, literals: tuple[bool, ...], output: bool
+    ) -> None:
+        self.feedback.append(("II", clause))
+
+
 def configured_xor_machine() -> ScalarBinaryTsetlinMachine:
     machine = ScalarBinaryTsetlinMachine(
         4,
@@ -77,6 +103,63 @@ class ScalarTMTests(unittest.TestCase):
         after_replayed_update = machine.snapshot()
         self.assertEqual(after_first_update.states, after_replayed_update.states)
         self.assertEqual(after_first_update.rng_state, after_replayed_update.rng_state)
+
+    def test_residual_feedback_routes_by_residual_and_clause_polarity(self) -> None:
+        positive = FeedbackRecordingMachine()
+        positive_result = positive.update_residual(
+            (False, False),
+            1.0,
+            temperature=1.0,
+            learning_rate=2.0,
+        )
+        self.assertEqual(
+            positive.feedback,
+            [("I", 0), ("II", 1), ("I", 2), ("II", 3)],
+        )
+        self.assertEqual(positive_result.raw_score, 0)
+        self.assertEqual(positive_result.student_probability, 0.5)
+        self.assertEqual(positive_result.feedback_probability, 1.0)
+
+        negative = FeedbackRecordingMachine()
+        negative_result = negative.update_residual(
+            (False, False),
+            0.0,
+            temperature=1.0,
+            learning_rate=2.0,
+        )
+        self.assertEqual(
+            negative.feedback,
+            [("II", 0), ("I", 1), ("II", 2), ("I", 3)],
+        )
+        self.assertEqual(negative_result.residual, -0.5)
+
+    def test_zero_residual_does_not_advance_state_or_rng(self) -> None:
+        machine = FeedbackRecordingMachine()
+        before = machine.snapshot()
+        result = machine.update_residual(
+            (False, False),
+            0.5,
+            temperature=3.0,
+            learning_rate=2.0,
+        )
+        self.assertEqual(result.residual, 0.0)
+        self.assertEqual(result.feedback_probability, 0.0)
+        self.assertEqual(machine.snapshot(), before)
+
+    def test_residual_feedback_validates_controller_parameters(self) -> None:
+        machine = FeedbackRecordingMachine()
+        invalid_cases = (
+            ({"target_probability": -0.1, "temperature": 1.0, "learning_rate": 1.0}, ValueError),
+            ({"target_probability": 1.1, "temperature": 1.0, "learning_rate": 1.0}, ValueError),
+            ({"target_probability": float("nan"), "temperature": 1.0, "learning_rate": 1.0}, ValueError),
+            ({"target_probability": 0.5, "temperature": 0.0, "learning_rate": 1.0}, ValueError),
+            ({"target_probability": 0.5, "temperature": 1.0, "learning_rate": 0.0}, ValueError),
+            ({"target_probability": True, "temperature": 1.0, "learning_rate": 1.0}, TypeError),
+        )
+        for arguments, error in invalid_cases:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(error):
+                    machine.update_residual((False, False), **arguments)
 
     def test_empty_clause_is_false_during_prediction(self) -> None:
         machine = ScalarBinaryTsetlinMachine(2, 2, states_per_action=4)

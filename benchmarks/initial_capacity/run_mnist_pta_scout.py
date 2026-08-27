@@ -214,6 +214,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--clauses", type=int, default=40)
     parser.add_argument("--parent-epochs", type=int, default=10)
     parser.add_argument("--adaptation-epochs", type=int, default=5)
+    parser.add_argument(
+        "--parent-snapshot",
+        type=Path,
+        help="trusted local TMSnapshot checkpoint to audit instead of retraining",
+    )
+    parser.add_argument("--selected-pixels", nargs="+", type=int)
     parser.add_argument("--shared-audit-rows", type=int, default=0)
     parser.add_argument("--emit-score-vectors", action="store_true")
     args = parser.parse_args(argv)
@@ -225,6 +231,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--target-digit must lie in 0..9")
     if args.shared_audit_rows < 0:
         parser.error("--shared-audit-rows must be nonnegative")
+    if args.selected_pixels is not None and len(args.selected_pixels) != args.features:
+        parser.error("--selected-pixels must contain exactly --features positions")
     output = args.output.expanduser().resolve()
     if output.exists():
         parser.error(f"output already exists: {output}")
@@ -262,12 +270,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             train_y[feature_selection_indices] != target_digit
         ].mean(axis=0)
     )
-    informative = [
-        int(pixel)
-        for pixel in np.argsort(difference)[::-1]
-        if int(pixel) not in (0, 1)
-    ][: args.features - 2]
-    pixels = (0, 1, *informative)
+    if args.selected_pixels is None:
+        informative = [
+            int(pixel)
+            for pixel in np.argsort(difference)[::-1]
+            if int(pixel) not in (0, 1)
+        ][: args.features - 2]
+        pixels = (0, 1, *informative)
+    else:
+        pixels = tuple(args.selected_pixels)
+        informative = list(pixels[2:])
+    if len(set(pixels)) != len(pixels) or any(not 0 <= pixel < 784 for pixel in pixels):
+        parser.error("--selected-pixels must be unique positions in 0..783")
     fields = tuple(f"p{pixel:03d}" for pixel in pixels)
     dataset_id = f"mnist-digit-{target_digit}-pta-scout-seed-{args.seed}"
     parent_fingerprints: set[tuple[int, tuple[float, ...]]] = set()
@@ -475,11 +489,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=args.seed,
     )
     training_started = perf_counter()
-    parent.fit_literal_batch(
-        catalog.encode(parent_corpus.records).ta,
-        parent_corpus.labels,
-        epochs=args.parent_epochs,
-    )
+    if args.parent_snapshot is None:
+        parent.fit_literal_batch(
+            catalog.encode(parent_corpus.records).ta,
+            parent_corpus.labels,
+            epochs=args.parent_epochs,
+        )
+    else:
+        checkpoint = args.parent_snapshot.expanduser().resolve()
+        if not checkpoint.is_file():
+            parser.error(f"parent snapshot does not exist: {checkpoint}")
+        loaded_snapshot = pickle.loads(checkpoint.read_bytes())
+        if not isinstance(loaded_snapshot, TMSnapshot):
+            parser.error("--parent-snapshot must contain a TMSnapshot")
+        parent.restore(loaded_snapshot)
     parent_training_seconds = perf_counter() - training_started
     parent_snapshot = parent.snapshot()
     baseline_test = _metrics(parent_snapshot, manifest, evaluation)
@@ -572,6 +595,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "feature_selection_source_rows": len(feature_selection_indices),
             "clauses": args.clauses,
             "parent_epochs": args.parent_epochs,
+            "parent_snapshot": (
+                str(args.parent_snapshot.expanduser().resolve())
+                if args.parent_snapshot is not None
+                else None
+            ),
             "adaptation_epochs": args.adaptation_epochs,
             "pixel_threshold": PIXEL_THRESHOLD,
             "parent_rows": len(parent_corpus.examples),
