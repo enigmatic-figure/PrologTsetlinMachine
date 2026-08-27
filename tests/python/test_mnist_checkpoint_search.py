@@ -74,6 +74,8 @@ def test_search_selects_classifier_specific_checkpoint(tmp_path: Path) -> None:
     assert result["best"]["correct"] == 10
     assert result["best"]["schedule"] == [10] + [30] * 9
     assert result["classifier_epoch_savings"] == 20
+    assert result["best_vs_baseline"]["improvements"] == 1
+    assert result["best_vs_baseline"]["regressions"] == 0
 
 
 def test_analysis_selects_on_validation_then_opens_audit(tmp_path: Path) -> None:
@@ -130,6 +132,9 @@ def test_analysis_selects_on_validation_then_opens_audit(tmp_path: Path) -> None
     assert result["audit"]["uniform_final"]["correct"] == 10
     assert result["audit"]["selected"]["correct"] == 9
     assert result["audit"]["correct_gain"] == -1
+    assert result["audit"]["paired_against_uniform_final"]["improvements"] == 0
+    assert result["audit"]["paired_against_uniform_final"]["regressions"] == 1
+    assert len(result["audit"]["validation_selected_tracks"]) == 3
 
 
 def test_analysis_rejects_cached_scores_that_disagree_with_direct_eval(

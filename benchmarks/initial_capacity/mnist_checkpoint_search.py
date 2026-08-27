@@ -107,6 +107,16 @@ def _metrics(labels: np.ndarray, predictions: np.ndarray) -> dict[str, object]:
 def evaluate_schedule(
     checkpoints: dict[int, ScoreCheckpoint], schedule: Sequence[int]
 ) -> dict[str, object]:
+    labels, predictions = _schedule_predictions(checkpoints, schedule)
+    result = _metrics(labels, predictions)
+    result["schedule"] = list(schedule)
+    result["classifier_epoch_sum"] = sum(schedule)
+    return result
+
+
+def _schedule_predictions(
+    checkpoints: dict[int, ScoreCheckpoint], schedule: Sequence[int]
+) -> tuple[np.ndarray, np.ndarray]:
     if len(schedule) != CLASS_COUNT:
         raise ValueError(f"schedule must contain {CLASS_COUNT} checkpoint epochs")
     labels = next(iter(checkpoints.values())).labels
@@ -120,10 +130,35 @@ def evaluate_schedule(
             raise ValueError("checkpoint label vectors differ")
         selected[:, classifier] = checkpoint.scores[:, classifier]
     predictions = np.argmax(selected, axis=1).astype(np.uint8)
-    result = _metrics(labels, predictions)
-    result["schedule"] = list(schedule)
-    result["classifier_epoch_sum"] = sum(schedule)
-    return result
+    return labels, predictions
+
+
+def _paired_comparison(
+    labels: np.ndarray,
+    baseline_predictions: np.ndarray,
+    candidate_predictions: np.ndarray,
+) -> dict[str, object]:
+    baseline_correct = baseline_predictions == labels
+    candidate_correct = candidate_predictions == labels
+    improvements = np.logical_and(~baseline_correct, candidate_correct)
+    regressions = np.logical_and(baseline_correct, ~candidate_correct)
+    return {
+        "both_correct": int(np.count_nonzero(baseline_correct & candidate_correct)),
+        "both_wrong": int(np.count_nonzero(~baseline_correct & ~candidate_correct)),
+        "improvements": int(np.count_nonzero(improvements)),
+        "regressions": int(np.count_nonzero(regressions)),
+        "prediction_disagreements": int(
+            np.count_nonzero(baseline_predictions != candidate_predictions)
+        ),
+        "improvements_by_true_class": [
+            int(np.count_nonzero(improvements & (labels == label)))
+            for label in range(CLASS_COUNT)
+        ],
+        "regressions_by_true_class": [
+            int(np.count_nonzero(regressions & (labels == label)))
+            for label in range(CLASS_COUNT)
+        ],
+    }
 
 
 def search_schedules(
@@ -195,11 +230,18 @@ def search_schedules(
                 best_epoch_sum = candidate_sum
     assert best_schedule is not None
     best = evaluate_schedule(checkpoints, best_schedule)
+    labels, baseline_predictions = _schedule_predictions(
+        checkpoints, baseline_schedule
+    )
+    _, best_predictions = _schedule_predictions(checkpoints, best_schedule)
     return {
         "allowed_epochs": list(epochs),
         "configuration_count": configuration_count,
         "baseline": baseline,
         "best": best,
+        "best_vs_baseline": _paired_comparison(
+            labels, baseline_predictions, best_predictions
+        ),
         "validation_correct_gain": int(best["correct"]) - baseline_correct,
         "classifier_epoch_savings": sum(baseline_schedule) - best_epoch_sum,
         "configurations_improving_baseline": improving,
@@ -310,6 +352,27 @@ def analyze_capture(
     audit = _load_family(directory, "audit", epochs)
     audit_baseline = evaluate_schedule(audit, (final_epoch,) * CLASS_COUNT)
     audit_selected = evaluate_schedule(audit, selected_schedule)
+    audit_labels, audit_baseline_predictions = _schedule_predictions(
+        audit, (final_epoch,) * CLASS_COUNT
+    )
+    _, audit_selected_predictions = _schedule_predictions(audit, selected_schedule)
+    audit_tracks = []
+    for track in tracks:
+        schedule = tuple(track["best"]["schedule"])
+        evaluated = evaluate_schedule(audit, schedule)
+        _, predictions = _schedule_predictions(audit, schedule)
+        audit_tracks.append(
+            {
+                "allowed_epochs": track["allowed_epochs"],
+                "validation_selected_schedule": list(schedule),
+                "evaluation": evaluated,
+                "correct_gain": int(evaluated["correct"])
+                - int(audit_baseline["correct"]),
+                "paired_against_uniform_final": _paired_comparison(
+                    audit_labels, audit_baseline_predictions, predictions
+                ),
+            }
+        )
     return {
         "schema": RESULT_SCHEMA,
         "checkpoint_epochs": list(epochs),
@@ -352,6 +415,12 @@ def analyze_capture(
             - int(audit_baseline["correct"]),
             "classifier_epoch_savings": CLASS_COUNT * final_epoch
             - sum(selected_schedule),
+            "paired_against_uniform_final": _paired_comparison(
+                audit_labels,
+                audit_baseline_predictions,
+                audit_selected_predictions,
+            ),
+            "validation_selected_tracks": audit_tracks,
         },
         "claim_boundary": (
             "Checkpoint selection measures classifier-specific adaptation maturity; "
