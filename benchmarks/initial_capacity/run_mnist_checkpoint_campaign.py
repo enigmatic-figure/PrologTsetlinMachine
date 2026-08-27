@@ -45,13 +45,30 @@ def _git_commit(project: Path) -> str:
     ).stdout.strip()
 
 
+def _clause_counts(value: str) -> tuple[int, ...]:
+    fields = value.split(",")
+    if len(fields) == 1:
+        fields *= 10
+    if len(fields) != 10:
+        raise argparse.ArgumentTypeError(
+            "clauses must be one positive integer or 10 comma-separated integers"
+        )
+    try:
+        counts = tuple(int(field) for field in fields)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("clauses must be integers") from error
+    if any(count <= 0 for count in counts):
+        raise argparse.ArgumentTypeError("clauses must be positive")
+    return counts
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument("--runner", type=Path, required=True)
     parser.add_argument("--material-directory", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--clauses", type=int, default=100)
+    parser.add_argument("--clauses", type=_clause_counts, default=(100,) * 10)
     parser.add_argument("--states", type=int, default=128)
     parser.add_argument("--specificity", type=float, default=8.0)
     parser.add_argument("--threshold", type=int, default=10)
@@ -92,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         *prefix,
         convert(train),
         convert(validation),
-        str(args.clauses),
+        ",".join(str(count) for count in args.clauses),
         str(args.states),
         str(args.specificity),
         str(args.threshold),
@@ -112,7 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "material_manifest": str(manifest_path),
         "material_manifest_digest": _digest(manifest_path),
         "config": {
-            "clauses_per_class": args.clauses,
+            "clauses_per_class": list(args.clauses),
             "states_per_action": args.states,
             "specificity": args.specificity,
             "threshold": args.threshold,

@@ -161,3 +161,35 @@ def test_analysis_rejects_cached_scores_that_disagree_with_direct_eval(
 
     with pytest.raises(ValueError, match="cached scores disagree"):
         analyze(scores, log, (10, 30))
+
+
+def test_analysis_accepts_one_fixed_final_checkpoint(tmp_path: Path) -> None:
+    namespace = _namespace()
+    analyze = namespace["analyze_capture"]
+    labels = np.arange(10, dtype=np.uint8)
+    values = _base_scores(labels)
+    scores = tmp_path / "scores"
+    scores.mkdir()
+    for prefix in ("validation", "audit"):
+        _write_scores(scores / f"{prefix}-epoch-30.ptms", 30, labels, values)
+    log = tmp_path / "training.jsonl"
+    log.write_text(
+        json.dumps(
+            {
+                "epoch": 30,
+                "confusion_matrix": _confusion(labels, _predict(values)),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = analyze(scores, log, (30,))
+
+    assert result["selection"] == {
+        "basis": "fixed final checkpoint",
+        "schedule": [30] * 10,
+        "classifier_epoch_sum": 300,
+    }
+    assert result["validation_searches"] == []
+    assert result["audit"]["correct_gain"] == 0

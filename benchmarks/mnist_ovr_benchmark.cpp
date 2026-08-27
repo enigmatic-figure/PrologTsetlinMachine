@@ -79,6 +79,37 @@ double finite_double(std::string_view text, std::string_view label) {
     return value;
 }
 
+std::array<std::size_t, 10> parse_clause_counts(std::string_view text) {
+    std::array<std::size_t, 10> result{};
+    if (text.find(',') == std::string_view::npos) {
+        result.fill(positive(text, "clauses"));
+        return result;
+    }
+    std::size_t begin = 0;
+    for (std::size_t classifier = 0; classifier < result.size(); ++classifier) {
+        if (begin >= text.size()) {
+            throw std::invalid_argument(
+                "per-class clauses must contain exactly 10 values");
+        }
+        const auto end = text.find(',', begin);
+        const auto token = text.substr(
+            begin, end == std::string_view::npos ? text.size() - begin
+                                                  : end - begin);
+        result[classifier] = positive(token, "per-class clauses");
+        if (classifier + 1U == result.size()) {
+            if (end != std::string_view::npos) {
+                throw std::invalid_argument(
+                    "per-class clauses must contain exactly 10 values");
+            }
+        } else if (end == std::string_view::npos) {
+            throw std::invalid_argument(
+                "per-class clauses must contain exactly 10 values");
+        }
+        begin = end + 1U;
+    }
+    return result;
+}
+
 struct Evaluation {
     std::size_t correct{};
     std::array<std::array<std::size_t, 10>, 10> confusion{};
@@ -207,7 +238,7 @@ int main(int argc, char** argv) {
         const auto train = load(argv[1]);
         const auto validation = load(argv[2]);
         if (train.features != validation.features) throw std::runtime_error("MNIST split widths differ");
-        const auto clauses = positive(argv[3], "clauses");
+        const auto clause_counts = parse_clause_counts(argv[3]);
         const auto states_raw = positive(argv[4], "states");
         const auto specificity = finite_double(argv[5], "specificity");
         const auto threshold_raw = positive(argv[6], "threshold");
@@ -243,16 +274,16 @@ int main(int argc, char** argv) {
         if (states_raw > std::numeric_limits<std::uint16_t>::max() / 2U || threshold_raw > std::numeric_limits<int>::max())
             throw std::invalid_argument("native configuration exceeds its range");
         std::array<ptm::ScalarBinaryTM, 10> models = {
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 0U),
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 1U),
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 2U),
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 3U),
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 4U),
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 5U),
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 6U),
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 7U),
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 8U),
-            ptm::ScalarBinaryTM(clauses, train.features, states_raw, specificity, threshold_raw, seed + 9U)};
+            ptm::ScalarBinaryTM(clause_counts[0], train.features, states_raw, specificity, threshold_raw, seed + 0U),
+            ptm::ScalarBinaryTM(clause_counts[1], train.features, states_raw, specificity, threshold_raw, seed + 1U),
+            ptm::ScalarBinaryTM(clause_counts[2], train.features, states_raw, specificity, threshold_raw, seed + 2U),
+            ptm::ScalarBinaryTM(clause_counts[3], train.features, states_raw, specificity, threshold_raw, seed + 3U),
+            ptm::ScalarBinaryTM(clause_counts[4], train.features, states_raw, specificity, threshold_raw, seed + 4U),
+            ptm::ScalarBinaryTM(clause_counts[5], train.features, states_raw, specificity, threshold_raw, seed + 5U),
+            ptm::ScalarBinaryTM(clause_counts[6], train.features, states_raw, specificity, threshold_raw, seed + 6U),
+            ptm::ScalarBinaryTM(clause_counts[7], train.features, states_raw, specificity, threshold_raw, seed + 7U),
+            ptm::ScalarBinaryTM(clause_counts[8], train.features, states_raw, specificity, threshold_raw, seed + 8U),
+            ptm::ScalarBinaryTM(clause_counts[9], train.features, states_raw, specificity, threshold_raw, seed + 9U)};
         double cumulative = 0.0;
         std::mt19937_64 competition_rng(seed ^ 0x6a09e667f3bcc909ULL);
         std::mt19937_64 shuffle_rng(seed ^ 0xbb67ae8584caa73bULL);
@@ -328,8 +359,22 @@ int main(int argc, char** argv) {
             }
             std::cout << std::setprecision(17)
                       << "{\"schema\":\"ptm.mnist-ovr-epoch.v1\",\"epoch\":" << epoch
-                      << ",\"clauses_per_class\":" << clauses
-                      << ",\"threshold\":" << threshold_raw
+                      << ",\"clauses_per_class\":";
+            const bool uniform_clause_count = std::all_of(
+                clause_counts.begin(), clause_counts.end(),
+                [&](const auto count) { return count == clause_counts[0]; });
+            if (uniform_clause_count) {
+                std::cout << clause_counts[0];
+            } else {
+                std::cout << '[';
+                for (std::size_t classifier = 0;
+                     classifier < clause_counts.size(); ++classifier) {
+                    if (classifier != 0U) std::cout << ',';
+                    std::cout << clause_counts[classifier];
+                }
+                std::cout << ']';
+            }
+            std::cout << ",\"threshold\":" << threshold_raw
                       << ",\"specificity\":" << specificity
                       << ",\"training_policy\":\"" << policy << "\""
                       << ",\"epoch_shuffle\":true"

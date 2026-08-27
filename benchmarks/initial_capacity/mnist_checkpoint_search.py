@@ -297,8 +297,8 @@ def analyze_capture(
     directory = Path(capture_directory).expanduser().resolve()
     log_path = Path(training_log).expanduser().resolve()
     epochs = tuple(sorted(set(checkpoints)))
-    if len(epochs) < 2:
-        raise ValueError("at least two checkpoint epochs are required")
+    if not epochs:
+        raise ValueError("at least one checkpoint epoch is required")
     validation = _load_family(directory, "validation", epochs)
     records = _training_records(log_path)
     conformance = []
@@ -339,14 +339,17 @@ def analyze_capture(
                     - int(final_baseline["correct"]),
                 }
             )
-    tracks = [
-        search_schedules(validation, (epochs[0], final_epoch)),
-    ]
+    tracks = []
+    if len(epochs) >= 2:
+        tracks.append(search_schedules(validation, (epochs[0], final_epoch)))
     if len(epochs) > 2:
         tracks.append(search_schedules(validation, (epochs[-2], final_epoch)))
         tracks.append(search_schedules(validation, epochs))
-    selected_track = tracks[-1]
-    selected_schedule = tuple(selected_track["best"]["schedule"])
+    selected_schedule = (
+        tuple(tracks[-1]["best"]["schedule"])
+        if tracks
+        else (final_epoch,) * CLASS_COUNT
+    )
 
     # Audit tensors are not loaded until validation has fixed the schedule.
     audit = _load_family(directory, "audit", epochs)
@@ -403,7 +406,9 @@ def analyze_capture(
         "single_classifier_substitutions": single_substitutions,
         "validation_searches": tracks,
         "selection": {
-            "basis": "validation only",
+            "basis": (
+                "validation only" if tracks else "fixed final checkpoint"
+            ),
             "schedule": list(selected_schedule),
             "classifier_epoch_sum": sum(selected_schedule),
         },
