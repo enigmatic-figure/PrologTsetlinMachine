@@ -253,11 +253,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     fields = tuple(f"p{pixel:03d}" for pixel in pixels)
     dataset_id = f"mnist-digit-8-pta-scout-seed-{args.seed}"
     parent_fingerprints: set[tuple[int, tuple[float, ...]]] = set()
-    parent_pos, _ = _take_unique(
+    parent_pos, parent_pos_cursor = _take_unique(
         train_pos, train_x, train_y, pixels,
         target=TARGET_DIGIT, count=200, used=parent_fingerprints, start=0,
     )
-    parent_neg, _ = _take_unique(
+    parent_neg, parent_neg_cursor = _take_unique(
         train_neg, train_x, train_y, pixels,
         target=TARGET_DIGIT, count=200, used=parent_fingerprints, start=0,
     )
@@ -270,11 +270,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     input_used = set(parent_fingerprints)
     invention_pos, train_pos_cursor = _take_unique(
         train_pos, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=40, used=input_used, start=200,
+        target=TARGET_DIGIT, count=40, used=input_used, start=parent_pos_cursor,
     )
     invention_neg, train_neg_cursor = _take_unique(
         train_neg, train_x, train_y, pixels,
-        target=TARGET_DIGIT, count=40, used=input_used, start=200,
+        target=TARGET_DIGIT, count=40, used=input_used, start=parent_neg_cursor,
     )
     adaptation_pos, train_pos_cursor = _take_unique(
         train_pos, train_x, train_y, pixels,
