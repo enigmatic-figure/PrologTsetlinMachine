@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+from hashlib import sha256
 import json
+from math import isfinite
 import os
 from pathlib import Path
 import pickle
@@ -17,12 +19,127 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from prolog_tsetlin.model_generation import AdaptiveSnapshotEnvelope
 from prolog_tsetlin.reference import ScalarBinaryTsetlinMachine, TMSnapshot
+from prolog_tsetlin.services._atomic import publish_bytes
 
 
 SCHEMA = "ptm.mnist-jit-distillation.v1"
+PLAN_SCHEMA = "ptm.mnist-jit-distillation-plan.v1"
 CLASS_COUNT = 10
 PIXEL_THRESHOLD = 0.3
+
+
+def _file_digest(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _canonical_json(value: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _build_plan(
+    args: argparse.Namespace,
+    *,
+    source: Path,
+    ptmrt: Path,
+    torch_version: str,
+) -> dict[str, object]:
+    project = Path(__file__).resolve().parents[2]
+    return {
+        "schema": PLAN_SCHEMA,
+        "configuration": {
+            "seed": args.seed,
+            "features": args.features,
+            "clauses": args.clauses,
+            "epochs": args.epochs,
+            "teacher_epochs": args.teacher_epochs,
+            "teacher_temperature": args.teacher_temperature,
+            "student_temperature": args.student_temperature,
+            "residual_learning_rate": args.residual_learning_rate,
+            "validation_rows": args.validation_rows,
+            "pta_audit_rows": args.pta_audit_rows,
+            "skip_pta": args.skip_pta,
+            "pixel_threshold": PIXEL_THRESHOLD,
+        },
+        "inputs": {
+            "source": str(source),
+            "source_digest": _file_digest(source),
+            "ptmrt": None if args.skip_pta else str(ptmrt),
+            "ptmrt_digest": None if args.skip_pta else _file_digest(ptmrt),
+        },
+        "runtime": {
+            "python": sys.version,
+            "numpy": np.__version__,
+            "torch": torch_version,
+        },
+        "code": {
+            "runner_digest": _file_digest(Path(__file__).resolve()),
+            "scout_digest": _file_digest(
+                Path(__file__).with_name("run_mnist_pta_scout.py")
+            ),
+            "reference_digest": _file_digest(
+                project / "python" / "prolog_tsetlin" / "reference.py"
+            ),
+        },
+    }
+
+
+def _initialize_or_validate_plan(
+    output: Path,
+    plan: Mapping[str, object],
+    *,
+    resume: bool,
+) -> None:
+    plan_path = output / "plan.json"
+    if output.exists():
+        if not resume:
+            raise ValueError(f"output already exists: {output}; pass --resume to continue")
+        if not plan_path.is_file():
+            raise ValueError("resume output has no immutable plan.json")
+        existing = json.loads(plan_path.read_text(encoding="utf-8"))
+        if existing != plan:
+            raise ValueError("resume configuration or input identity does not match plan.json")
+        return
+    if resume:
+        raise ValueError("--resume requires an existing output directory")
+    output.mkdir(parents=True)
+    publish_bytes(plan_path, _canonical_json(plan), overwrite=False)
+
+
+def _validate_cli_parameters(args: argparse.Namespace) -> None:
+    if args.epochs < 2:
+        raise ValueError("--epochs must be at least 2")
+    if args.teacher_epochs < 1:
+        raise ValueError("--teacher-epochs must be positive")
+    if not 4 <= args.features <= 12:
+        raise ValueError("--features must lie in 4..12")
+    if args.clauses <= 0:
+        raise ValueError("--clauses must be positive")
+    if args.validation_rows <= 0:
+        raise ValueError("--validation-rows must be positive")
+    if args.pta_audit_rows <= 0:
+        raise ValueError("--pta-audit-rows must be positive")
+    for option, value in (
+        ("--teacher-temperature", args.teacher_temperature),
+        ("--student-temperature", args.student_temperature),
+        ("--residual-learning-rate", args.residual_learning_rate),
+    ):
+        if not isfinite(value) or value <= 0.0:
+            raise ValueError(f"{option} must be finite and positive")
 
 
 def _load_torch():
@@ -211,12 +328,19 @@ def _prepare_bank(
     encoded = np.asarray(train_x[indices][:, pixels] >= PIXEL_THRESHOLD, dtype=np.uint8)
     rows = tuple(tuple(int(value) for value in row) for row in encoded)
     targets = tuple(int(value) for value in (train_y[indices] == digit))
+    positive_binary_rows = len(set(rows[: len(positive_rows)]))
+    negative_binary_rows = len(set(rows[len(positive_rows) :]))
     return {
         "digit": digit,
         "pixels": pixels,
         "indices": indices,
         "rows": rows,
         "targets": targets,
+        "unique_binary_rows": {
+            "positive": positive_binary_rows,
+            "negative": negative_binary_rows,
+            "total": len(set(zip(targets, rows))),
+        },
     }
 
 
@@ -298,7 +422,75 @@ def _sigmoid_scores(scores: np.ndarray, temperature: float) -> np.ndarray:
 
 
 def _write_json(path: Path, value: Mapping[str, object]) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    publish_bytes(
+        path,
+        (json.dumps(value, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8"
+        ),
+        overwrite=True,
+    )
+
+
+def _checkpoint_snapshot_id(snapshot: TMSnapshot) -> str:
+    return AdaptiveSnapshotEnvelope(snapshot).snapshot_id
+
+
+def _publish_or_validate_checkpoint(path: Path, snapshot: TMSnapshot) -> None:
+    expected_id = _checkpoint_snapshot_id(snapshot)
+    if path.is_file():
+        existing = pickle.loads(path.read_bytes())
+        if not isinstance(existing, TMSnapshot):
+            raise RuntimeError(f"cached checkpoint is not a TMSnapshot: {path}")
+        if _checkpoint_snapshot_id(existing) != expected_id:
+            raise RuntimeError(f"cached checkpoint identity mismatch: {path}")
+        return
+    publish_bytes(path, pickle.dumps(snapshot, protocol=5), overwrite=False)
+
+
+def _validate_cached_cell(
+    value: object,
+    *,
+    digit: int,
+    seed: int,
+    features: int,
+    clauses: int,
+    selected_epoch: int,
+    pixels: Sequence[int],
+    audit_rows: int,
+    snapshot: TMSnapshot,
+) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or value.get("schema") != "ptm.mnist-pta-scout.v1":
+        raise RuntimeError("cached PTA cell has an unsupported schema")
+    config = value.get("config")
+    vectors = value.get("score_vectors")
+    if not isinstance(config, Mapping) or not isinstance(vectors, Mapping):
+        raise RuntimeError("cached PTA cell is missing configuration or score vectors")
+    expected_snapshot_id = _checkpoint_snapshot_id(snapshot)
+    recorded_snapshot_id = config.get("parent_snapshot_id")
+    if recorded_snapshot_id is None:
+        usage = value.get("pta_usage")
+        if isinstance(usage, Mapping):
+            deescalation = usage.get("deescalation")
+            if isinstance(deescalation, Mapping):
+                evidence = deescalation.get("evidence")
+                if isinstance(evidence, Mapping):
+                    recorded_snapshot_id = evidence.get("parent_snapshot_id")
+    expected_config = {
+        "target_digit": digit,
+        "seed": seed,
+        "features": features,
+        "clauses": clauses,
+        "parent_epochs": selected_epoch,
+        "selected_pixels": list(pixels),
+        "test_rows": audit_rows,
+    }
+    if any(config.get(key) != expected for key, expected in expected_config.items()):
+        raise RuntimeError("cached PTA cell does not match its campaign slot")
+    if recorded_snapshot_id != expected_snapshot_id:
+        raise RuntimeError("cached PTA cell parent snapshot identity mismatch")
+    if len(vectors.get("multiclass_truth", [])) != audit_rows:
+        raise RuntimeError("cached PTA cell audit corpus width is incorrect")
+    return value
 
 
 def _run_pta_cells(
@@ -334,7 +526,7 @@ def _run_pta_cells(
             cell.parent.mkdir(parents=True, exist_ok=True)
             snapshot_path = output / "checkpoints" / arm / f"digit-{digit}.pkl"
             snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            snapshot_path.write_bytes(pickle.dumps(snapshot, protocol=5))
+            _publish_or_validate_checkpoint(snapshot_path, snapshot)
             result_path = cell / "result.json"
             if not result_path.is_file():
                 command = [
@@ -377,7 +569,19 @@ def _run_pta_cells(
                     )
                 if completed.returncode != 0:
                     raise RuntimeError(f"PTA cell failed; see {log_path}")
-            cells.append(json.loads(result_path.read_text(encoding="utf-8")))
+            cells.append(
+                _validate_cached_cell(
+                    json.loads(result_path.read_text(encoding="utf-8")),
+                    digit=digit,
+                    seed=seed,
+                    features=features,
+                    clauses=clauses,
+                    selected_epoch=selected_epochs[arm],
+                    pixels=bank["pixels"],
+                    audit_rows=audit_rows,
+                    snapshot=snapshot,
+                )
+            )
             print(f"pta arm={arm} digit={digit} complete", flush=True)
         summaries[arm] = _aggregate(selected_epochs[arm], cells)
     return summaries
@@ -401,22 +605,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--skip-pta", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
-    if args.epochs < 2 or not 4 <= args.features <= 12:
-        parser.error("epochs must be >=2 and features must lie in 4..12")
+    try:
+        _validate_cli_parameters(args)
+    except ValueError as error:
+        parser.error(str(error))
     output = args.output.expanduser().resolve()
-    if output.exists() and not args.resume:
-        parser.error(f"output already exists: {output}; pass --resume to continue")
     source = args.source.expanduser().resolve()
     ptmrt = args.ptmrt.expanduser().resolve()
     if not source.is_file() or (not args.skip_pta and not ptmrt.is_file()):
         parser.error("MNIST source and (unless skipped) ptmrt must exist")
-    output.mkdir(parents=True, exist_ok=args.resume)
     campaign_started = perf_counter()
     train, validation, test = pickle.loads(source.read_bytes(), encoding="latin1")
     train_x, train_y = np.asarray(train[0]), np.asarray(train[1], dtype=np.int64)
     validation_x = np.asarray(validation[0])
     validation_y = np.asarray(validation[1], dtype=np.int64)
     test_x, test_y = np.asarray(test[0]), np.asarray(test[1], dtype=np.int64)
+    if args.validation_rows > len(validation_y):
+        parser.error("--validation-rows exceeds the validation split")
+    if args.pta_audit_rows > len(test_y):
+        parser.error("--pta-audit-rows exceeds the test split")
+    torch, _, _, _ = _load_torch()
+    plan = _build_plan(
+        args,
+        source=source,
+        ptmrt=ptmrt,
+        torch_version=torch.__version__,
+    )
+    try:
+        _initialize_or_validate_plan(output, plan, resume=args.resume)
+    except (ValueError, OSError, json.JSONDecodeError) as error:
+        parser.error(str(error))
 
     teacher, teacher_report = _train_teacher(
         train_x,
@@ -427,7 +645,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         epochs=args.teacher_epochs,
         batch_size=256,
     )
-    torch, _, _, _ = _load_torch()
     annotation_started = perf_counter()
     train_logits = _teacher_logits(teacher, train_x, batch_size=512, torch=torch)
     validation_logits = _teacher_logits(
@@ -656,7 +873,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             "pixel_threshold": PIXEL_THRESHOLD,
             "teacher_input": "784 grayscale pixels",
-            "student_input": "12 bank-specific pixels binarized at 0.3",
+            "student_input": (
+                f"{args.features} bank-specific pixels binarized at 0.3"
+            ),
             "teacher_temperature": args.teacher_temperature,
             "student_sigmoid_temperature": args.student_temperature,
             "residual_learning_rate": args.residual_learning_rate,
@@ -672,6 +891,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "bit_exact_fork": fork_is_bit_exact,
             "selected_pixels_by_digit": {
                 str(digit): list(bank["pixels"]) for digit, bank in enumerate(banks)
+            },
+            "unique_binary_training_rows_by_digit": {
+                str(digit): bank["unique_binary_rows"]
+                for digit, bank in enumerate(banks)
             },
         },
         "history": histories,

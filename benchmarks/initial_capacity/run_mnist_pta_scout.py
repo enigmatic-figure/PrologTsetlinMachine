@@ -13,6 +13,7 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from prolog_tsetlin.model_generation import (
+    AdaptiveSnapshotEnvelope,
     CorpusExample,
     CorpusRole,
     DeescalationCorpora,
@@ -582,7 +583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     result: dict[str, object] = {
         "schema": SCHEMA,
-        "scope": "bounded digit-8 one-vs-rest PTA integration scout",
+        "scope": f"bounded digit-{target_digit} one-vs-rest PTA integration scout",
         "claim_boundary": (
             "This exercises executable PTA lifecycles on MNIST but is not a "
             "ten-bank or full-dataset accuracy benchmark."
@@ -600,6 +601,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.parent_snapshot is not None
                 else None
             ),
+            "parent_snapshot_id": AdaptiveSnapshotEnvelope(
+                parent_snapshot
+            ).snapshot_id,
             "adaptation_epochs": args.adaptation_epochs,
             "pixel_threshold": PIXEL_THRESHOLD,
             "parent_rows": len(parent_corpus.examples),

@@ -118,5 +118,14 @@ De-escalation PTA cells. Bulk checkpoints, logits, vectors, stores, and results
 remain under ignored `out/` storage:
 
 ```text
+python -m pip install -e ".[data,test]"
+python -m pip install torch
 PYTHONPATH=python python benchmarks/initial_capacity/run_mnist_jit_distillation.py --output out/benchmark-campaign/mnist-jit-distillation-v1 --epochs 10 --teacher-epochs 3 --validation-rows 2000 --pta-audit-rows 2000
 ```
+
+The runner treats `mnist.pkl` and optional parent-checkpoint pickle files as
+trusted local benchmark inputs; Python pickle is not an untrusted interchange
+format. A new run publishes an immutable `plan.json` before training. Resume
+requires the same configuration, source/runtime identities, and code digests,
+then independently binds every reusable PTA cell to its parent snapshot's
+content identity.

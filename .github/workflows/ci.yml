@@ -117,6 +117,7 @@ jobs:
           python -m pytest
           tests/python/test_data_connectors.py
           tests/python/test_record_transforms.py
+          tests/python/test_mnist_jit_distillation.py
 
   documentation:
     name: Documentation / Python ${{ matrix.python }}
