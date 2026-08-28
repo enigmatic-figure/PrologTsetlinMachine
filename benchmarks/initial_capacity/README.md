@@ -111,6 +111,12 @@ ordinary hard-margin, hard-target residual, and teacher-target residual arms.
 The compact CPU ConvNet sees all 784 grayscale pixels; each exact PTM bank keeps
 the existing 12-literal, thresholded representation. The mismatch is recorded
 as part of the experiment rather than treated as a matched representation.
+Multiclass selection and residual probabilities use unclipped signed clause
+votes. The existing margin-clipped `score()` remains the binary inference and
+training-gate contract, and the result records both forms for comparison. The
+bounded bank schedule deliberately reuses a fixed 200-positive then
+200-negative row order each epoch; results must be interpreted within that
+training regime.
 
 Unless `--skip-pta` is passed for plumbing tests, each validation-selected arm
 checkpoint is sent through all ten executable Input/Escalation and
@@ -129,3 +135,8 @@ format. A new run publishes an immutable `plan.json` before training. Resume
 requires the same configuration, source/runtime identities, and code digests,
 then independently binds every reusable PTA cell to its parent snapshot's
 content identity.
+
+`analyze_mnist_checkpoint_scores.py` compares raw-vote and clipped-vote
+multiclass decisions from an existing run without retraining. It reconstructs
+the deterministic bank projections and requires the clipped path to reproduce
+the retained run's reported test accuracy before publishing its analysis.

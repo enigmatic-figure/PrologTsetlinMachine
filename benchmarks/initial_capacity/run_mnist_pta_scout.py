@@ -129,6 +129,7 @@ def _metrics(
     rows = tuple(batch.row_values(index) for index in range(batch.row_count))
     predictions = tuple(machine.predict(rows))
     scores = tuple(machine.score(row) for row in rows)
+    raw_votes = tuple(machine.raw_vote(row) for row in rows)
     truth = corpus.labels
     true_positive = sum(a == 1 and b == 1 for a, b in zip(truth, predictions))
     true_negative = sum(a == 0 and b == 0 for a, b in zip(truth, predictions))
@@ -144,6 +145,7 @@ def _metrics(
         "false_negative": false_negative,
         "predictions": list(predictions),
         "scores": list(scores),
+        "raw_votes": list(raw_votes),
     }
 
 
@@ -166,7 +168,7 @@ def _public_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
     return {
         key: value
         for key, value in metrics.items()
-        if key not in {"predictions", "scores"}
+        if key not in {"predictions", "scores", "raw_votes"}
     }
 
 
@@ -732,11 +734,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         governed = counterfactual if input_result is not None else baseline_test
         deescalated = deescalation_child_test or baseline_test
         result["score_vectors"] = {
+            "semantics": "unclipped signed clause votes",
             "example_ids": [item.example_id for item in evaluation.examples],
             "multiclass_truth": [
                 int(test_y[int(index)]) for index in evaluation_indices
             ],
             "binary_truth": list(evaluation.labels),
+            "baseline": baseline_test["raw_votes"],
+            "policy_governed": governed["raw_votes"],
+            "selected_child_counterfactual": counterfactual["raw_votes"],
+            "deescalated": deescalated["raw_votes"],
+        }
+        result["binary_score_vectors"] = {
+            "semantics": "margin-clipped signed clause votes",
             "baseline": baseline_test["scores"],
             "policy_governed": governed["scores"],
             "selected_child_counterfactual": counterfactual["scores"],

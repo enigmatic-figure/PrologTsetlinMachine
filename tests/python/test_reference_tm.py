@@ -63,6 +63,23 @@ def configured_xor_machine() -> ScalarBinaryTsetlinMachine:
     return machine
 
 
+def configured_saturated_vote_machine() -> ScalarBinaryTsetlinMachine:
+    machine = ScalarBinaryTsetlinMachine(
+        40,
+        1,
+        states_per_action=4,
+        specificity=3.0,
+        threshold=10,
+        seed=9,
+    )
+    for clause in range(40):
+        for literal in range(2):
+            machine.set_state(clause, literal, 4)
+        # On input 1, every positive clause fires and every negative clause fails.
+        machine.set_state(clause, 0 if clause % 2 == 0 else 1, 5)
+    return machine
+
+
 class ScalarTMTests(unittest.TestCase):
     def test_constructor_rejects_non_finite_specificity(self) -> None:
         for specificity in (float("nan"), float("inf"), float("-inf")):
@@ -103,6 +120,45 @@ class ScalarTMTests(unittest.TestCase):
         after_replayed_update = machine.snapshot()
         self.assertEqual(after_first_update.states, after_replayed_update.states)
         self.assertEqual(after_first_update.rng_state, after_replayed_update.rng_state)
+
+    def test_raw_vote_is_distinct_from_margin_clipped_score(self) -> None:
+        machine = configured_saturated_vote_machine()
+        self.assertEqual(machine.raw_vote((True,)), 20)
+        self.assertEqual(machine.score((True,)), 10)
+        self.assertEqual(machine.predict_one((True,)), 1)
+
+    def test_standard_feedback_gate_is_shared_across_clause_polarities(self) -> None:
+        machine = ScalarBinaryTsetlinMachine(
+            12,
+            1,
+            states_per_action=4,
+            specificity=3.0,
+            threshold=10,
+            seed=9,
+        )
+        for clause in range(12):
+            for literal in range(2):
+                machine.set_state(clause, literal, 4)
+            machine.set_state(clause, 0 if clause % 2 == 0 else 1, 5)
+        self.assertEqual(machine.raw_vote((True,)), 6)
+        self.assertAlmostEqual(
+            machine.standard_feedback_probability((True,), 1), 0.2
+        )
+        self.assertAlmostEqual(
+            machine.standard_feedback_probability((True,), 0), 0.8
+        )
+
+    def test_residual_probability_uses_unclipped_vote_direction(self) -> None:
+        machine = configured_saturated_vote_machine()
+        result = machine.update_residual(
+            (True,),
+            0.98,
+            temperature=3.0,
+            learning_rate=1.0,
+        )
+        self.assertEqual(result.raw_score, 20)
+        self.assertGreater(result.student_probability, 0.998)
+        self.assertLess(result.residual, 0.0)
 
     def test_residual_feedback_routes_by_residual_and_clause_polarity(self) -> None:
         positive = FeedbackRecordingMachine()

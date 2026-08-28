@@ -5,6 +5,7 @@
 #include "ptm/scalar_tm.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -114,6 +115,33 @@ void test_scalar_tm() {
     require(machine.predict(x01) == 1, "XOR 01 prediction failed");
     require(machine.predict(x10) == 1, "XOR 10 prediction failed");
     require(machine.predict(x11) == 0, "XOR 11 prediction failed");
+
+    ptm::ScalarBinaryTM saturated(40, 1, 4, 3.0, 10, 9);
+    for (std::size_t clause = 0; clause < 40; ++clause) {
+        saturated.set_state(clause, 0, 4);
+        saturated.set_state(clause, 1, 4);
+        saturated.set_state(clause, clause % 2 == 0 ? 0 : 1, 5);
+    }
+    const std::array<std::uint8_t, 1> one{1};
+    require(saturated.raw_vote(one) == 20,
+            "raw vote must preserve values beyond the training margin");
+    require(saturated.score(one) == 10,
+            "score must retain its clipped-margin contract");
+
+    ptm::ScalarBinaryTM gated(12, 1, 4, 3.0, 10, 9);
+    for (std::size_t clause = 0; clause < 12; ++clause) {
+        gated.set_state(clause, 0, 4);
+        gated.set_state(clause, 1, 4);
+        gated.set_state(clause, clause % 2 == 0 ? 0 : 1, 5);
+    }
+    require(gated.raw_vote(one) == 6,
+            "feedback fixture must produce the intended class sum");
+    require(std::abs(gated.standard_feedback_probability(one, 1) - 0.2) <
+                1e-12,
+            "positive-target feedback gate must follow Algorithm 1");
+    require(std::abs(gated.standard_feedback_probability(one, 0) - 0.8) <
+                1e-12,
+            "negative-target feedback gate must follow Algorithm 1");
 
     const auto before = machine.snapshot();
     machine.update(x10, 1);

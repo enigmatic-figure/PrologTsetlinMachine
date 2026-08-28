@@ -24,8 +24,8 @@ from prolog_tsetlin.reference import ScalarBinaryTsetlinMachine, TMSnapshot
 from prolog_tsetlin.services._atomic import publish_bytes
 
 
-SCHEMA = "ptm.mnist-jit-distillation.v1"
-PLAN_SCHEMA = "ptm.mnist-jit-distillation-plan.v1"
+SCHEMA = "ptm.mnist-jit-distillation.v2"
+PLAN_SCHEMA = "ptm.mnist-jit-distillation-plan.v2"
 CLASS_COUNT = 10
 PIXEL_THRESHOLD = 0.3
 
@@ -370,12 +370,28 @@ def _score_collective(
         rows = np.asarray(values[:, pixels] >= PIXEL_THRESHOLD, dtype=np.uint8)
         columns.append(
             np.fromiter(
-                (machine.score(row.tolist()) for row in rows),
+                (machine.raw_vote(row.tolist()) for row in rows),
                 dtype=np.int16,
                 count=len(rows),
             )
         )
     return np.column_stack(columns), perf_counter() - started
+
+
+def _clip_collective_scores(
+    raw_scores: np.ndarray,
+    machines: Sequence[ScalarBinaryTsetlinMachine],
+) -> np.ndarray:
+    """Apply each bank's training margin without re-evaluating its clauses."""
+
+    if raw_scores.ndim != 2 or raw_scores.shape[1] != len(machines):
+        raise ValueError("raw score matrix does not match the collective")
+    clipped = raw_scores.copy()
+    for digit, machine in enumerate(machines):
+        clipped[:, digit] = np.clip(
+            clipped[:, digit], -machine.threshold, machine.threshold
+        )
+    return clipped
 
 
 def _classification(truth: np.ndarray, scores: np.ndarray) -> dict[str, object]:
@@ -465,6 +481,8 @@ def _validate_cached_cell(
     vectors = value.get("score_vectors")
     if not isinstance(config, Mapping) or not isinstance(vectors, Mapping):
         raise RuntimeError("cached PTA cell is missing configuration or score vectors")
+    if vectors.get("semantics") != "unclipped signed clause votes":
+        raise RuntimeError("cached PTA cell has incompatible score semantics")
     expected_snapshot_id = _checkpoint_snapshot_id(snapshot)
     recorded_snapshot_id = config.get("parent_snapshot_id")
     if recorded_snapshot_id is None:
@@ -782,9 +800,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         machines = [_machine_from_snapshot(snapshot) for snapshot in snapshots]
         scores, inference_seconds = _score_collective(machines, banks, test_x)
+        clipped_scores = _clip_collective_scores(scores, machines)
         metrics = _classification(test_y, scores)
         predictions = metrics.pop("predictions")
+        clipped_metrics = _classification(test_y, clipped_scores)
+        clipped_predictions = clipped_metrics.pop("predictions")
         student_probabilities = _sigmoid_scores(scores, args.student_temperature)
+        clipped_probabilities = _sigmoid_scores(
+            clipped_scores, args.student_temperature
+        )
         arm_metrics[name] = {
             **metrics,
             "selected_epoch": choice["epoch"],
@@ -804,6 +828,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             "teacher_probability_mae": float(
                 np.mean(np.abs(student_probabilities - teacher_test_probabilities))
             ),
+            "clipped_vote_comparison": {
+                **clipped_metrics,
+                "paired_against_raw": _paired(
+                    test_y, predictions, clipped_predictions
+                ),
+                "prediction_disagreements": int(
+                    np.count_nonzero(predictions != clipped_predictions)
+                ),
+                "teacher_top_one_agreement": float(
+                    np.mean(clipped_predictions == teacher_test_predictions)
+                ),
+                "teacher_probability_mae": float(
+                    np.mean(
+                        np.abs(
+                            clipped_probabilities - teacher_test_probabilities
+                        )
+                    )
+                ),
+            },
             "student_snapshot_pickle_bytes": sum(
                 len(pickle.dumps(snapshot, protocol=5)) for snapshot in snapshots
             ),
@@ -812,8 +855,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for snapshot in snapshots
             ),
         }
-        vector_payload[f"{name}_scores"] = scores
+        vector_payload[f"{name}_raw_votes"] = scores
+        vector_payload[f"{name}_clipped_scores"] = clipped_scores
         vector_payload[f"{name}_predictions"] = predictions
+        vector_payload[f"{name}_clipped_predictions"] = clipped_predictions
     baseline_predictions = vector_payload["A_hard_margin_predictions"]
     for name in ("B_hard_residual", "C_teacher_residual"):
         arm_metrics[name]["paired_against_A"] = _paired(
@@ -856,7 +901,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "schema": SCHEMA,
         "claim_boundary": (
             "Internal bounded discovery run. Student validation uses the leading "
-            "validation subset; final pre-lifecycle test metrics use all test rows."
+            "validation subset; arm metrics are pre-lifecycle and use raw-vote "
+            "multiclass ranking over all test rows. PTA outcomes are reported "
+            "separately under pta."
         ),
         "config": {
             "seed": args.seed,
@@ -880,6 +927,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "student_sigmoid_temperature": args.student_temperature,
             "residual_learning_rate": args.residual_learning_rate,
             "teacher_target_mix": "0.5 one_hot + 0.5 teacher_softmax",
+            "multiclass_score_semantics": "unclipped signed clause votes",
+            "binary_score_semantics": "margin-clipped signed clause votes",
             "validation_rows": args.validation_rows,
             "test_rows": len(test_y),
             "pta_audit_rows": args.pta_audit_rows,
@@ -898,6 +947,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         },
         "history": histories,
+        "arm_metric_phase": "pre_lifecycle",
         "arms": arm_metrics,
         "pta": pta_summary,
         "timing": {

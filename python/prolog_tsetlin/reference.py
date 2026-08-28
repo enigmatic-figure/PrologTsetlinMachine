@@ -229,18 +229,38 @@ class ScalarBinaryTsetlinMachine:
                     return False
         return included if prediction else True
 
-    def score(self, features: Sequence[bool | int]) -> int:
+    def raw_vote(self, features: Sequence[bool | int]) -> int:
+        """Return the unclipped signed sum of positive and negative clauses."""
+
         total = 0
         for clause in range(self.number_of_clauses):
             if self.clause_output(clause, features):
                 total += 1 if clause % 2 == 0 else -1
-        return max(-self.threshold, min(self.threshold, total))
+        return total
+
+    def score(self, features: Sequence[bool | int]) -> int:
+        """Return the signed clause vote clipped to the training margin."""
+
+        return max(-self.threshold, min(self.threshold, self.raw_vote(features)))
 
     def predict_one(self, features: Sequence[bool | int]) -> int:
         return int(self.score(features) > 0)
 
     def predict(self, rows: Iterable[Sequence[bool | int]]) -> list[int]:
         return [self.predict_one(row) for row in rows]
+
+    def standard_feedback_probability(
+        self,
+        features: Sequence[bool | int],
+        target: int | bool,
+    ) -> float:
+        """Return the canonical shared outer feedback gate for one example."""
+
+        target_value = int(self._require_binary(target))
+        class_sum = self.score(features)
+        return (
+            self.threshold + (1 - 2 * target_value) * class_sum
+        ) / (2 * self.threshold)
 
     def _increment(self, clause: int, literal: int) -> None:
         current = self._states[clause][literal]
@@ -270,13 +290,9 @@ class ScalarBinaryTsetlinMachine:
     def update(self, features: Sequence[bool | int], target: int | bool) -> None:
         target_value = int(self._require_binary(target))
         literals = self._literals(features)
-        class_sum = self.score(features)
+        probability = self.standard_feedback_probability(features, target_value)
         for clause in range(self.number_of_clauses):
             polarity = 1 if clause % 2 == 0 else -1
-            probability = (
-                self.threshold
-                + (1 - 2 * target_value) * polarity * class_sum
-            ) / (2 * self.threshold)
             if self._rng.random() > probability:
                 continue
             output = self.clause_output(clause, features, prediction=False)
@@ -326,7 +342,7 @@ class ScalarBinaryTsetlinMachine:
             raise ValueError("learning_rate must be finite and positive")
 
         literals = self._literals(features)
-        raw_score = self.score(features)
+        raw_score = self.raw_vote(features)
         scaled_score = raw_score / temperature_value
         if scaled_score >= 0.0:
             student_probability = 1.0 / (1.0 + exp(-scaled_score))

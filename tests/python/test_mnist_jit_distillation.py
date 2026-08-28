@@ -60,6 +60,22 @@ def test_classification_uses_collective_argmax() -> None:
     assert result["predictions"].tolist() == [0, 1, 4]
 
 
+def test_collective_clipping_is_explicit_and_bank_specific() -> None:
+    namespace = _namespace()
+    clip = namespace["_clip_collective_scores"]
+    machine_class = namespace["ScalarBinaryTsetlinMachine"]
+    machines = [
+        machine_class(2, 1, threshold=3),
+        machine_class(2, 1, threshold=5),
+    ]
+    raw = np.asarray([[8, 8], [-8, -8], [2, 4]], dtype=np.int16)
+
+    clipped = clip(raw, machines)
+
+    assert clipped.tolist() == [[3, 5], [-3, -5], [2, 4]]
+    assert raw.tolist() == [[8, 8], [-8, -8], [2, 4]]
+
+
 def test_resume_plan_fails_closed_on_configuration_change(tmp_path: Path) -> None:
     initialize = _namespace()["_initialize_or_validate_plan"]
     first = {"schema": "test", "configuration": {"seed": 1}}
@@ -90,7 +106,10 @@ def test_cached_pta_cell_is_bound_to_parent_snapshot() -> None:
             "test_rows": 2,
             "parent_snapshot_id": envelope_class(snapshot).snapshot_id,
         },
-        "score_vectors": {"multiclass_truth": [3, 8]},
+        "score_vectors": {
+            "semantics": "unclipped signed clause votes",
+            "multiclass_truth": [3, 8],
+        },
     }
     arguments = {
         "digit": 3,

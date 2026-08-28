@@ -51,8 +51,12 @@ public:
     [[nodiscard]] bool clause_output(std::size_t clause,
                                      std::span<const std::uint8_t> features,
                                      bool prediction = true) const;
+    [[nodiscard]] int raw_vote(std::span<const std::uint8_t> features) const;
     [[nodiscard]] int score(std::span<const std::uint8_t> features) const;
     [[nodiscard]] int predict(std::span<const std::uint8_t> features) const;
+    [[nodiscard]] double standard_feedback_probability(
+        std::span<const std::uint8_t> features,
+        int target) const;
 
     void update(std::span<const std::uint8_t> features, int target);
     void update(std::span<const std::uint8_t> features,

@@ -261,7 +261,7 @@ if(PTM_BUILD_TESTS)
         set_tests_properties(ptmrt_trained_parent_verify PROPERTIES
             FIXTURES_REQUIRED ptmrt_trained_parent_artifact
             PASS_REGULAR_EXPRESSION
-                "verified sha256:5752df035d3d92cf7f1679bbf96df44f3517cde8df9db9ec62b13e0beb663145")
+                "verified sha256:4330436bdabed010bfd84b581fc4b0d447a6db749d1114d5094eb2ade662e3ae")
         add_test(NAME ptmrt_trained_parent_below
             COMMAND ptmrt run-record "${PTM_TRAINED_PARENT_FIXTURE}"
                 "temperature:int=74"
@@ -269,7 +269,7 @@ if(PTM_BUILD_TESTS)
                 "previous_state:bool=false")
         set_tests_properties(ptmrt_trained_parent_below PROPERTIES
             FIXTURES_REQUIRED ptmrt_trained_parent_artifact
-            PASS_REGULAR_EXPRESSION "prediction.:0.*score.:-7")
+            PASS_REGULAR_EXPRESSION "prediction.:0.*score.:-5")
         add_test(NAME ptmrt_trained_parent_above
             COMMAND ptmrt run-record "${PTM_TRAINED_PARENT_FIXTURE}"
                 "temperature:int=76"
