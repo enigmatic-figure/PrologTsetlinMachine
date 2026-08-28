@@ -7,7 +7,7 @@ import argparse
 import copy
 from hashlib import sha256
 import json
-from math import isfinite
+from math import exp, isfinite
 import os
 from pathlib import Path
 import pickle
@@ -24,10 +24,17 @@ from prolog_tsetlin.reference import ScalarBinaryTsetlinMachine, TMSnapshot
 from prolog_tsetlin.services._atomic import publish_bytes
 
 
-SCHEMA = "ptm.mnist-jit-distillation.v2"
-PLAN_SCHEMA = "ptm.mnist-jit-distillation-plan.v2"
+SCHEMA = "ptm.mnist-jit-distillation.v3"
+PLAN_SCHEMA = "ptm.mnist-jit-distillation-plan.v3"
 CLASS_COUNT = 10
 PIXEL_THRESHOLD = 0.3
+TEACHER_GATED_ARM = "D_teacher_gated_hard_residual"
+ARM_NAMES = (
+    "A_hard_margin",
+    "B_hard_residual",
+    "C_teacher_residual",
+    TEACHER_GATED_ARM,
+)
 
 
 def _file_digest(path: Path) -> str:
@@ -70,6 +77,7 @@ def _build_plan(
             "teacher_temperature": args.teacher_temperature,
             "student_temperature": args.student_temperature,
             "residual_learning_rate": args.residual_learning_rate,
+            "teacher_gate_floor": args.teacher_gate_floor,
             "validation_rows": args.validation_rows,
             "pta_audit_rows": args.pta_audit_rows,
             "skip_pta": args.skip_pta,
@@ -140,6 +148,11 @@ def _validate_cli_parameters(args: argparse.Namespace) -> None:
     ):
         if not isfinite(value) or value <= 0.0:
             raise ValueError(f"{option} must be finite and positive")
+    if (
+        not isfinite(args.teacher_gate_floor)
+        or not 0.0 <= args.teacher_gate_floor <= 1.0
+    ):
+        raise ValueError("--teacher-gate-floor must be finite and in [0, 1]")
 
 
 def _load_torch():
@@ -437,6 +450,31 @@ def _sigmoid_scores(scores: np.ndarray, temperature: float) -> np.ndarray:
     )
 
 
+def _sigmoid_vote(raw_vote: int, temperature: float) -> float:
+    scaled = raw_vote / temperature
+    if scaled >= 0.0:
+        return 1.0 / (1.0 + exp(-scaled))
+    scaled_exp = exp(scaled)
+    return scaled_exp / (1.0 + scaled_exp)
+
+
+def _teacher_disagreement_gate(
+    teacher_probability: float,
+    student_probability: float,
+    *,
+    floor: float,
+) -> tuple[float, float]:
+    for name, value in (
+        ("teacher_probability", teacher_probability),
+        ("student_probability", student_probability),
+        ("floor", floor),
+    ):
+        if not isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} must be finite and in [0, 1]")
+    disagreement = abs(teacher_probability - student_probability)
+    return disagreement, floor + (1.0 - floor) * disagreement
+
+
 def _write_json(path: Path, value: Mapping[str, object]) -> None:
     publish_bytes(
         path,
@@ -618,6 +656,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--teacher-temperature", type=float, default=2.0)
     parser.add_argument("--student-temperature", type=float, default=3.0)
     parser.add_argument("--residual-learning-rate", type=float, default=2.0)
+    parser.add_argument("--teacher-gate-floor", type=float, default=0.1)
     parser.add_argument("--validation-rows", type=int, default=2_000)
     parser.add_argument("--pta-audit-rows", type=int, default=2_000)
     parser.add_argument("--skip-pta", action="store_true")
@@ -708,7 +747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     common_training_seconds = perf_counter() - initial_training_started
     arms = {
         name: [_machine_from_snapshot(snapshot) for snapshot in common_snapshots]
-        for name in ("A_hard_margin", "B_hard_residual", "C_teacher_residual")
+        for name in ARM_NAMES
     }
     fork_is_bit_exact = all(
         machine.snapshot() == common_snapshot
@@ -742,6 +781,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     for epoch in range(2, args.epochs + 1):
         for name, machines in arms.items():
             training_started = perf_counter()
+            gate_observations = 0
+            gate_disagreement_total = 0.0
+            gate_scale_total = 0.0
+            gate_base_probability_total = 0.0
+            gate_applied_probability_total = 0.0
             for digit, (machine, bank) in enumerate(zip(machines, banks)):
                 rows = bank["rows"]
                 targets = bank["targets"]
@@ -751,29 +795,66 @@ def main(argv: Sequence[str] | None = None) -> int:
                     continue
                 for row, hard_target, source_index in zip(rows, targets, indices):
                     target_probability = float(hard_target)
+                    teacher_probability = float(
+                        teacher_probabilities[int(source_index), digit]
+                    )
                     if name == "C_teacher_residual":
                         target_probability = 0.5 * target_probability + 0.5 * float(
-                            teacher_probabilities[int(source_index), digit]
+                            teacher_probability
                         )
-                    machine.update_residual(
+                    feedback_scale = 1.0
+                    disagreement = None
+                    if name == TEACHER_GATED_ARM:
+                        student_probability = _sigmoid_vote(
+                            machine.raw_vote(row), args.student_temperature
+                        )
+                        disagreement, feedback_scale = _teacher_disagreement_gate(
+                            teacher_probability,
+                            student_probability,
+                            floor=args.teacher_gate_floor,
+                        )
+                    update = machine.update_residual(
                         row,
                         target_probability,
                         temperature=args.student_temperature,
                         learning_rate=args.residual_learning_rate,
+                        feedback_scale=feedback_scale,
                     )
+                    if name == TEACHER_GATED_ARM:
+                        assert disagreement is not None
+                        gate_observations += 1
+                        gate_disagreement_total += disagreement
+                        gate_scale_total += feedback_scale
+                        gate_base_probability_total += (
+                            update.base_feedback_probability
+                        )
+                        gate_applied_probability_total += update.feedback_probability
             training_seconds = perf_counter() - training_started
             scores, evaluation_seconds = _score_collective(
                 machines, banks, validation_view_x
             )
             metrics = _classification(validation_view_y, scores)
-            histories[name].append(
-                {
-                    "epoch": epoch,
-                    "validation_accuracy": metrics["accuracy"],
-                    "training_seconds": training_seconds,
-                    "evaluation_seconds": evaluation_seconds,
+            history_item = {
+                "epoch": epoch,
+                "validation_accuracy": metrics["accuracy"],
+                "training_seconds": training_seconds,
+                "evaluation_seconds": evaluation_seconds,
+            }
+            if name == TEACHER_GATED_ARM:
+                history_item["teacher_gate"] = {
+                    "observations": gate_observations,
+                    "mean_disagreement": (
+                        gate_disagreement_total / gate_observations
+                    ),
+                    "mean_feedback_scale": gate_scale_total / gate_observations,
+                    "mean_base_feedback_probability": (
+                        gate_base_probability_total / gate_observations
+                    ),
+                    "mean_applied_feedback_probability": (
+                        gate_applied_probability_total / gate_observations
+                    ),
                 }
-            )
+            histories[name].append(history_item)
             if metrics["accuracy"] > selected[name]["accuracy"]:
                 selected[name] = {
                     "epoch": epoch,
@@ -860,9 +941,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         vector_payload[f"{name}_predictions"] = predictions
         vector_payload[f"{name}_clipped_predictions"] = clipped_predictions
     baseline_predictions = vector_payload["A_hard_margin_predictions"]
-    for name in ("B_hard_residual", "C_teacher_residual"):
+    for name in ARM_NAMES[1:]:
         arm_metrics[name]["paired_against_A"] = _paired(
             test_y, baseline_predictions, vector_payload[f"{name}_predictions"]
+        )
+    hard_residual_predictions = vector_payload["B_hard_residual_predictions"]
+    for name in ("C_teacher_residual", TEACHER_GATED_ARM):
+        arm_metrics[name]["paired_against_B"] = _paired(
+            test_y,
+            hard_residual_predictions,
+            vector_payload[f"{name}_predictions"],
         )
     np.savez_compressed(output / "student_test_vectors.npz", **vector_payload)
 
@@ -903,7 +991,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Internal bounded discovery run. Student validation uses the leading "
             "validation subset; arm metrics are pre-lifecycle and use raw-vote "
             "multiclass ranking over all test rows. PTA outcomes are reported "
-            "separately under pta."
+            "separately under pta when enabled; config.pta_skipped records when "
+            "the Prolog/PTA lifecycle was not invoked."
         ),
         "config": {
             "seed": args.seed,
@@ -927,6 +1016,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             "student_sigmoid_temperature": args.student_temperature,
             "residual_learning_rate": args.residual_learning_rate,
             "teacher_target_mix": "0.5 one_hot + 0.5 teacher_softmax",
+            "teacher_feedback_gate": {
+                "arm": TEACHER_GATED_ARM,
+                "direction_and_target": "hard-label residual, identical to B",
+                "disagreement": "abs(teacher_probability - student_probability)",
+                "multiplier": (
+                    f"{args.teacher_gate_floor} + "
+                    f"{1.0 - args.teacher_gate_floor} * disagreement"
+                ),
+                "floor": args.teacher_gate_floor,
+                "ceiling": 1.0,
+                "student_probability_source": (
+                    "sigmoid(unclipped_raw_vote / temperature)"
+                ),
+            },
             "multiclass_score_semantics": "unclipped signed clause votes",
             "binary_score_semantics": "margin-clipped signed clause votes",
             "validation_rows": args.validation_rows,

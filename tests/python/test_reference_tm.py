@@ -174,6 +174,8 @@ class ScalarTMTests(unittest.TestCase):
         )
         self.assertEqual(positive_result.raw_score, 0)
         self.assertEqual(positive_result.student_probability, 0.5)
+        self.assertEqual(positive_result.base_feedback_probability, 1.0)
+        self.assertEqual(positive_result.feedback_scale, 1.0)
         self.assertEqual(positive_result.feedback_probability, 1.0)
 
         negative = FeedbackRecordingMachine()
@@ -202,15 +204,81 @@ class ScalarTMTests(unittest.TestCase):
         self.assertEqual(result.feedback_probability, 0.0)
         self.assertEqual(machine.snapshot(), before)
 
+    def test_residual_feedback_scale_changes_only_the_outer_probability(self) -> None:
+        machine = FeedbackRecordingMachine()
+        result = machine.update_residual(
+            (False, False),
+            1.0,
+            temperature=1.0,
+            learning_rate=1.0,
+            feedback_scale=0.2,
+        )
+
+        self.assertEqual(result.student_probability, 0.5)
+        self.assertEqual(result.target_probability, 1.0)
+        self.assertEqual(result.residual, 0.5)
+        self.assertEqual(result.base_feedback_probability, 0.5)
+        self.assertEqual(result.feedback_scale, 0.2)
+        self.assertAlmostEqual(result.feedback_probability, 0.1)
+
     def test_residual_feedback_validates_controller_parameters(self) -> None:
         machine = FeedbackRecordingMachine()
         invalid_cases = (
-            ({"target_probability": -0.1, "temperature": 1.0, "learning_rate": 1.0}, ValueError),
-            ({"target_probability": 1.1, "temperature": 1.0, "learning_rate": 1.0}, ValueError),
-            ({"target_probability": float("nan"), "temperature": 1.0, "learning_rate": 1.0}, ValueError),
-            ({"target_probability": 0.5, "temperature": 0.0, "learning_rate": 1.0}, ValueError),
-            ({"target_probability": 0.5, "temperature": 1.0, "learning_rate": 0.0}, ValueError),
-            ({"target_probability": True, "temperature": 1.0, "learning_rate": 1.0}, TypeError),
+            (
+                {"target_probability": -0.1, "temperature": 1.0, "learning_rate": 1.0},
+                ValueError,
+            ),
+            (
+                {"target_probability": 1.1, "temperature": 1.0, "learning_rate": 1.0},
+                ValueError,
+            ),
+            (
+                {
+                    "target_probability": float("nan"),
+                    "temperature": 1.0,
+                    "learning_rate": 1.0,
+                },
+                ValueError,
+            ),
+            (
+                {"target_probability": 0.5, "temperature": 0.0, "learning_rate": 1.0},
+                ValueError,
+            ),
+            (
+                {"target_probability": 0.5, "temperature": 1.0, "learning_rate": 0.0},
+                ValueError,
+            ),
+            (
+                {
+                    "target_probability": 0.5,
+                    "temperature": 1.0,
+                    "learning_rate": 1.0,
+                    "feedback_scale": -0.1,
+                },
+                ValueError,
+            ),
+            (
+                {
+                    "target_probability": 0.5,
+                    "temperature": 1.0,
+                    "learning_rate": 1.0,
+                    "feedback_scale": 1.1,
+                },
+                ValueError,
+            ),
+            (
+                {
+                    "target_probability": 0.5,
+                    "temperature": 1.0,
+                    "learning_rate": 1.0,
+                    "feedback_scale": True,
+                },
+                TypeError,
+            ),
+            (
+                {"target_probability": True, "temperature": 1.0, "learning_rate": 1.0},
+                TypeError,
+            ),
         )
         for arguments, error in invalid_cases:
             with self.subTest(arguments=arguments):

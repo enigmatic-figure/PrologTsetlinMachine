@@ -34,6 +34,8 @@ class ResidualUpdateResult:
     student_probability: float
     target_probability: float
     residual: float
+    base_feedback_probability: float
+    feedback_scale: float
     feedback_probability: float
 
 
@@ -312,13 +314,15 @@ class ScalarBinaryTsetlinMachine:
         *,
         temperature: float,
         learning_rate: float,
+        feedback_scale: float = 1.0,
     ) -> ResidualUpdateResult:
         """Update from a probability residual instead of the standard margin gate.
 
         This experimental controller retains the existing literal-level Type I
         and Type II rules. It replaces only the outer feedback gate and routes
         feedback by clause polarity so positive residuals raise the signed vote
-        while negative residuals lower it.
+        while negative residuals lower it. ``feedback_scale`` may attenuate the
+        resulting outer probability without changing the target or direction.
         """
 
         if isinstance(target_probability, bool) or not isinstance(
@@ -340,6 +344,16 @@ class ScalarBinaryTsetlinMachine:
         learning_rate_value = float(learning_rate)
         if not isfinite(learning_rate_value) or learning_rate_value <= 0.0:
             raise ValueError("learning_rate must be finite and positive")
+        if isinstance(feedback_scale, bool) or not isinstance(
+            feedback_scale, (int, float)
+        ):
+            raise TypeError("feedback_scale must be a real number")
+        feedback_scale_value = float(feedback_scale)
+        if (
+            not isfinite(feedback_scale_value)
+            or not 0.0 <= feedback_scale_value <= 1.0
+        ):
+            raise ValueError("feedback_scale must be finite and in [0, 1]")
 
         literals = self._literals(features)
         raw_score = self.raw_vote(features)
@@ -350,13 +364,18 @@ class ScalarBinaryTsetlinMachine:
             scaled_exp = exp(scaled_score)
             student_probability = scaled_exp / (1.0 + scaled_exp)
         residual = target_value - student_probability
-        feedback_probability = min(1.0, learning_rate_value * abs(residual))
+        base_feedback_probability = min(
+            1.0, learning_rate_value * abs(residual)
+        )
+        feedback_probability = feedback_scale_value * base_feedback_probability
 
         result = ResidualUpdateResult(
             raw_score=raw_score,
             student_probability=student_probability,
             target_probability=target_value,
             residual=residual,
+            base_feedback_probability=base_feedback_probability,
+            feedback_scale=feedback_scale_value,
             feedback_probability=feedback_probability,
         )
         if residual == 0.0:

@@ -57,6 +57,22 @@ def test_raw_vote_schema_reproduces_primary_and_clipped_metrics(
     assert result["stored_clipped_comparison_reproduced"] is True
 
 
+def test_teacher_gated_v3_uses_raw_vote_reproduction_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validate = _namespace(monkeypatch)["_validate_reported_metrics"]
+
+    result = validate(
+        "ptm.mnist-jit-distillation.v3",
+        "D",
+        {"accuracy": 0.7, "clipped_vote_comparison": {"accuracy": 0.6}},
+        _reconstructed(raw=0.7, clipped=0.6),
+    )
+
+    assert result["reported_accuracy_semantics"] == "unclipped signed clause votes"
+    assert result["stored_clipped_comparison_reproduced"] is True
+
+
 @pytest.mark.parametrize(
     ("source_schema", "stored", "message"),
     (

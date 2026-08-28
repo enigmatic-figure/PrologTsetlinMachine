@@ -76,6 +76,26 @@ def test_collective_clipping_is_explicit_and_bank_specific() -> None:
     assert raw.tolist() == [[8, 8], [-8, -8], [2, 4]]
 
 
+def test_teacher_disagreement_gate_scales_only_by_probability_distance() -> None:
+    namespace = _namespace()
+    gate = namespace["_teacher_disagreement_gate"]
+    sigmoid_vote = namespace["_sigmoid_vote"]
+
+    student_probability = sigmoid_vote(0, 3.0)
+    disagreement, scale = gate(0.5, student_probability, floor=0.1)
+    assert student_probability == 0.5
+    assert disagreement == 0.0
+    assert scale == 0.1
+
+    disagreement, scale = gate(1.0, 0.0, floor=0.1)
+    assert disagreement == 1.0
+    assert scale == 1.0
+
+    disagreement, scale = gate(0.8, 0.2, floor=0.1)
+    assert disagreement == pytest.approx(0.6)
+    assert scale == pytest.approx(0.64)
+
+
 def test_resume_plan_fails_closed_on_configuration_change(tmp_path: Path) -> None:
     initialize = _namespace()["_initialize_or_validate_plan"]
     first = {"schema": "test", "configuration": {"seed": 1}}
@@ -143,6 +163,7 @@ def test_cli_preflight_rejects_nonfinite_and_empty_budgets() -> None:
         "teacher_temperature": 2.0,
         "student_temperature": 3.0,
         "residual_learning_rate": 2.0,
+        "teacher_gate_floor": 0.1,
     }
     validate(SimpleNamespace(**valid))
 
@@ -154,6 +175,8 @@ def test_cli_preflight_rejects_nonfinite_and_empty_budgets() -> None:
         ("teacher_temperature", float("nan")),
         ("student_temperature", 0.0),
         ("residual_learning_rate", -1.0),
+        ("teacher_gate_floor", -0.1),
+        ("teacher_gate_floor", 1.1),
     ):
         with pytest.raises(ValueError):
             validate(SimpleNamespace(**{**valid, key: value}))

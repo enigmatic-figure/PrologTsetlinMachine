@@ -104,10 +104,13 @@ random stream but no public seed control; its records say so explicitly.
 
 ## MNIST JIT distillation scout
 
-`run_mnist_jit_distillation.py` runs the bounded three-arm experiment used to
-separate a residual feedback controller from temporary neural-teacher
-guidance. A common one-epoch scalar PTM checkpoint is restored bit-exactly into
-ordinary hard-margin, hard-target residual, and teacher-target residual arms.
+`run_mnist_jit_distillation.py` runs the bounded experiment used to separate a
+residual feedback controller from temporary neural-teacher guidance. A common
+one-epoch scalar PTM checkpoint is restored bit-exactly into ordinary
+hard-margin, hard-target residual, teacher-target residual, and teacher-gated
+hard-target residual arms. The gated arm keeps the hard label and B's feedback
+direction, while multiplying only its outer feedback probability by
+`floor + (1 - floor) * abs(teacher_probability - student_probability)`.
 The compact CPU ConvNet sees all 784 grayscale pixels; each exact PTM bank keeps
 the existing 12-literal, thresholded representation. The mismatch is recorded
 as part of the experiment rather than treated as a matched representation.
@@ -126,8 +129,13 @@ remain under ignored `out/` storage:
 ```text
 python -m pip install -e ".[data,test]"
 python -m pip install torch
-PYTHONPATH=python python benchmarks/initial_capacity/run_mnist_jit_distillation.py --output out/benchmark-campaign/mnist-jit-distillation-v2 --epochs 10 --teacher-epochs 3 --validation-rows 2000 --pta-audit-rows 2000
+PYTHONPATH=python python benchmarks/initial_capacity/run_mnist_jit_distillation.py --output out/benchmark-campaign/mnist-jit-teacher-gated --epochs 10 --teacher-epochs 3 --validation-rows 2000 --pta-audit-rows 2000 --skip-pta
 ```
+
+`--skip-pta` is the isolation mode for controller and teacher experiments. It
+leaves Input, Escalation, and De-escalation lifecycle execution uninvoked and
+records `pta_skipped: true`; omit it only when PTA effects are themselves part
+of the question.
 
 The runner treats `mnist.pkl` and optional parent-checkpoint pickle files as
 trusted local benchmark inputs; Python pickle is not an untrusted interchange
@@ -140,5 +148,5 @@ content identity.
 multiclass decisions from an existing run without retraining. It reconstructs
 the deterministic bank projections and validates them against the source
 schema before publishing: legacy v1 runs must reproduce their reported clipped
-accuracy, while v2 runs must reproduce both their primary raw-vote accuracy and
-their separately stored clipped comparison.
+accuracy, while v2 and v3 runs must reproduce both their primary raw-vote
+accuracy and their separately stored clipped comparison.

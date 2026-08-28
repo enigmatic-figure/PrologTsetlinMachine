@@ -26,10 +26,13 @@ from run_mnist_jit_distillation import (
 
 SCHEMA = "ptm.mnist-checkpoint-score-analysis.v2"
 LEGACY_EXPERIMENT_SCHEMA = "ptm.mnist-jit-distillation.v1"
-RAW_VOTE_EXPERIMENT_SCHEMA = "ptm.mnist-jit-distillation.v2"
+RAW_VOTE_EXPERIMENT_SCHEMAS = {
+    "ptm.mnist-jit-distillation.v2",
+    "ptm.mnist-jit-distillation.v3",
+}
 SUPPORTED_EXPERIMENT_SCHEMAS = {
     LEGACY_EXPERIMENT_SCHEMA,
-    RAW_VOTE_EXPERIMENT_SCHEMA,
+    *RAW_VOTE_EXPERIMENT_SCHEMAS,
 }
 
 
@@ -94,7 +97,7 @@ def _validate_reported_metrics(
             "reported_accuracy_semantics": "margin-clipped signed clause votes",
             "reported_accuracy_reproduced": True,
         }
-    if source_schema == RAW_VOTE_EXPERIMENT_SCHEMA:
+    if source_schema in RAW_VOTE_EXPERIMENT_SCHEMAS:
         if reported_accuracy != raw_accuracy:
             raise RuntimeError(
                 f"arm {arm_name} retained checkpoint does not reproduce its "
