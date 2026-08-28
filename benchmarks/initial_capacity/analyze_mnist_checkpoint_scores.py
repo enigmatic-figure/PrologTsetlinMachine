@@ -24,7 +24,13 @@ from run_mnist_jit_distillation import (
 )
 
 
-SCHEMA = "ptm.mnist-checkpoint-score-analysis.v1"
+SCHEMA = "ptm.mnist-checkpoint-score-analysis.v2"
+LEGACY_EXPERIMENT_SCHEMA = "ptm.mnist-jit-distillation.v1"
+RAW_VOTE_EXPERIMENT_SCHEMA = "ptm.mnist-jit-distillation.v2"
+SUPPORTED_EXPERIMENT_SCHEMAS = {
+    LEGACY_EXPERIMENT_SCHEMA,
+    RAW_VOTE_EXPERIMENT_SCHEMA,
+}
 
 
 def _metrics(
@@ -65,6 +71,52 @@ def _metrics(
     }
 
 
+def _validate_reported_metrics(
+    source_schema: str,
+    arm_name: str,
+    stored_metrics: Mapping[str, object],
+    reconstructed_test: Mapping[str, object],
+) -> dict[str, object]:
+    raw = reconstructed_test.get("raw_vote")
+    clipped = reconstructed_test.get("clipped_vote")
+    if not isinstance(raw, Mapping) or not isinstance(clipped, Mapping):
+        raise RuntimeError("reconstructed test metrics are malformed")
+    reported_accuracy = float(stored_metrics["accuracy"])
+    raw_accuracy = float(raw["accuracy"])
+    clipped_accuracy = float(clipped["accuracy"])
+    if source_schema == LEGACY_EXPERIMENT_SCHEMA:
+        if reported_accuracy != clipped_accuracy:
+            raise RuntimeError(
+                f"arm {arm_name} retained checkpoint does not reproduce its "
+                "reported legacy clipped-vote accuracy"
+            )
+        return {
+            "reported_accuracy_semantics": "margin-clipped signed clause votes",
+            "reported_accuracy_reproduced": True,
+        }
+    if source_schema == RAW_VOTE_EXPERIMENT_SCHEMA:
+        if reported_accuracy != raw_accuracy:
+            raise RuntimeError(
+                f"arm {arm_name} retained checkpoint does not reproduce its "
+                "reported raw-vote accuracy"
+            )
+        stored_clipped = stored_metrics.get("clipped_vote_comparison")
+        if (
+            not isinstance(stored_clipped, Mapping)
+            or float(stored_clipped["accuracy"]) != clipped_accuracy
+        ):
+            raise RuntimeError(
+                f"arm {arm_name} retained checkpoint does not reproduce its "
+                "stored clipped-vote comparison"
+            )
+        return {
+            "reported_accuracy_semantics": "unclipped signed clause votes",
+            "reported_accuracy_reproduced": True,
+            "stored_clipped_comparison_reproduced": True,
+        }
+    raise RuntimeError(f"unsupported source experiment schema: {source_schema}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, default=Path("data/mnist.pkl"))
@@ -84,6 +136,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("output already exists")
 
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    source_schema = result.get("schema")
+    if (
+        not isinstance(source_schema, str)
+        or source_schema not in SUPPORTED_EXPERIMENT_SCHEMAS
+    ):
+        parser.error(f"unsupported source experiment schema: {source_schema!r}")
     config = result.get("config")
     arms = result.get("arms")
     if not isinstance(config, Mapping) or not isinstance(arms, Mapping):
@@ -133,24 +191,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             split_metrics[split_name] = _metrics(
                 truth, raw_scores, clipped_scores
             )
-        reported_accuracy = float(stored_metrics["accuracy"])
-        reconstructed_clipped_accuracy = float(
-            split_metrics["test"]["clipped_vote"]["accuracy"]
+        reproduction = _validate_reported_metrics(
+            source_schema,
+            arm_name,
+            stored_metrics,
+            split_metrics["test"],
         )
-        if reported_accuracy != reconstructed_clipped_accuracy:
-            raise RuntimeError(
-                f"arm {arm_name} retained checkpoint does not reproduce its "
-                "reported clipped-vote accuracy"
-            )
         report_arms[arm_name] = {
             "selected_epoch": int(stored_metrics["selected_epoch"]),
-            "reported_clipped_accuracy_reproduced": True,
+            **reproduction,
             **split_metrics,
         }
 
     report = {
         "schema": SCHEMA,
         "source_experiment": str(experiment),
+        "source_experiment_schema": source_schema,
         "analysis": (
             "No retraining. Reconstructed the deterministic bank projections and "
             "evaluated the retained selected checkpoints with raw and margin-clipped "

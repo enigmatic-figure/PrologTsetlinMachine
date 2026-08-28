@@ -475,7 +475,7 @@ def _validate_cached_cell(
     audit_rows: int,
     snapshot: TMSnapshot,
 ) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or value.get("schema") != "ptm.mnist-pta-scout.v1":
+    if not isinstance(value, Mapping) or value.get("schema") != "ptm.mnist-pta-scout.v2":
         raise RuntimeError("cached PTA cell has an unsupported schema")
     config = value.get("config")
     vectors = value.get("score_vectors")

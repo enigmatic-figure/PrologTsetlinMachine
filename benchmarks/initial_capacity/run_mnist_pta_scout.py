@@ -37,7 +37,7 @@ from prolog_tsetlin.services.model_generation import (
 from prolog_tsetlin.services.telemetry import TelemetryEvent, TelemetrySession
 
 
-SCHEMA = "ptm.mnist-pta-scout.v1"
+SCHEMA = "ptm.mnist-pta-scout.v2"
 PIXEL_THRESHOLD = 0.3
 
 

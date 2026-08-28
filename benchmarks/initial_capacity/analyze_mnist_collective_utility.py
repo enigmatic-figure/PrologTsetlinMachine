@@ -12,7 +12,9 @@ from typing import Mapping, Sequence
 import numpy as np
 
 
-SCHEMA = "ptm.mnist-collective-utility-analysis.v1"
+SCHEMA = "ptm.mnist-collective-utility-analysis.v2"
+CELL_SCHEMA = "ptm.mnist-pta-scout.v2"
+RAW_VOTE_SEMANTICS = "unclipped signed clause votes"
 CLASS_COUNT = 10
 
 
@@ -87,8 +89,14 @@ def _load_epoch_cells(campaign: Path, epoch: int) -> tuple[Mapping[str, object],
     for digit in range(CLASS_COUNT):
         path = campaign / "cells" / f"epoch-{epoch}" / f"digit-{digit}" / "result.json"
         value = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(value, dict) or value.get("schema") != "ptm.mnist-pta-scout.v1":
+        if not isinstance(value, dict) or value.get("schema") != CELL_SCHEMA:
             raise ValueError(f"unsupported PTA cell: {path}")
+        vectors = value.get("score_vectors")
+        if (
+            not isinstance(vectors, Mapping)
+            or vectors.get("semantics") != RAW_VOTE_SEMANTICS
+        ):
+            raise ValueError(f"PTA cell does not contain raw signed votes: {path}")
         cells.append(value)
     return tuple(cells)
 
@@ -99,6 +107,8 @@ def _score_matrices(
     first = cells[0]["score_vectors"]
     if not isinstance(first, Mapping):
         raise ValueError("PTA cell omits score vectors")
+    if first.get("semantics") != RAW_VOTE_SEMANTICS:
+        raise ValueError("PTA cell score vectors are not raw signed votes")
     truth = np.asarray(first["multiclass_truth"], dtype=np.int64)
     example_ids = first["example_ids"]
     names = (
@@ -113,6 +123,8 @@ def _score_matrices(
             vectors = cell["score_vectors"]
             if not isinstance(vectors, Mapping):
                 raise ValueError("PTA cell score vectors are malformed")
+            if vectors.get("semantics") != RAW_VOTE_SEMANTICS:
+                raise ValueError("PTA cell score vectors are not raw signed votes")
             if (
                 vectors["example_ids"] != example_ids
                 or vectors["multiclass_truth"] != truth.tolist()

@@ -95,7 +95,7 @@ def test_cached_pta_cell_is_bound_to_parent_snapshot() -> None:
     envelope_class = namespace["AdaptiveSnapshotEnvelope"]
     snapshot = machine_class(4, 2, seed=7).snapshot()
     value = {
-        "schema": "ptm.mnist-pta-scout.v1",
+        "schema": "ptm.mnist-pta-scout.v2",
         "config": {
             "target_digit": 3,
             "seed": 11,

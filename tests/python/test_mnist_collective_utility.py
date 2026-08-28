@@ -35,6 +35,7 @@ def test_collective_search_selects_mask_then_confirms_it() -> None:
         cells.append(
             {
                 "score_vectors": {
+                    "semantics": "unclipped signed clause votes",
                     "example_ids": list(range(20)),
                     "multiclass_truth": truth.tolist(),
                     "binary_truth": (truth == digit).astype(np.int64).tolist(),

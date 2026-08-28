@@ -126,7 +126,7 @@ remain under ignored `out/` storage:
 ```text
 python -m pip install -e ".[data,test]"
 python -m pip install torch
-PYTHONPATH=python python benchmarks/initial_capacity/run_mnist_jit_distillation.py --output out/benchmark-campaign/mnist-jit-distillation-v1 --epochs 10 --teacher-epochs 3 --validation-rows 2000 --pta-audit-rows 2000
+PYTHONPATH=python python benchmarks/initial_capacity/run_mnist_jit_distillation.py --output out/benchmark-campaign/mnist-jit-distillation-v2 --epochs 10 --teacher-epochs 3 --validation-rows 2000 --pta-audit-rows 2000
 ```
 
 The runner treats `mnist.pkl` and optional parent-checkpoint pickle files as
@@ -138,5 +138,7 @@ content identity.
 
 `analyze_mnist_checkpoint_scores.py` compares raw-vote and clipped-vote
 multiclass decisions from an existing run without retraining. It reconstructs
-the deterministic bank projections and requires the clipped path to reproduce
-the retained run's reported test accuracy before publishing its analysis.
+the deterministic bank projections and validates them against the source
+schema before publishing: legacy v1 runs must reproduce their reported clipped
+accuracy, while v2 runs must reproduce both their primary raw-vote accuracy and
+their separately stored clipped comparison.

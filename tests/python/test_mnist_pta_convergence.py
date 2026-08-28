@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import runpy
 
@@ -41,6 +42,7 @@ def test_aggregate_builds_multiclass_scores_and_timestep_accounting() -> None:
                     "adaptation_epochs": 5,
                 },
                 "score_vectors": {
+                    "semantics": "unclipped signed clause votes",
                     "example_ids": example_ids,
                     "multiclass_truth": truth,
                     "binary_truth": [int(value == digit) for value in truth],
@@ -77,3 +79,32 @@ def test_aggregate_builds_multiclass_scores_and_timestep_accounting() -> None:
     assert accounting["candidate_adaptation_observations"] == 16_000
     assert result["pta_usage"]["escalation_activated_digits"] == [0]
     assert result["pta_usage"]["deescalation_activated_digits"] == list(range(10))
+
+
+def test_load_cell_rejects_legacy_or_unmarked_score_semantics(
+    tmp_path: Path,
+) -> None:
+    namespace = _namespace()
+    load_cell = namespace["_load_cell"]
+    value = {
+        "schema": "ptm.mnist-pta-scout.v2",
+        "config": {"target_digit": 3, "parent_epochs": 5, "seed": 11},
+        "score_vectors": {
+            "semantics": "unclipped signed clause votes",
+            "multiclass_truth": [3, 8],
+        },
+    }
+    path = tmp_path / "result.json"
+
+    path.write_text(json.dumps(value), encoding="utf-8")
+    assert load_cell(path, digit=3, epoch=5, seed=11, audit_rows=2) == value
+
+    value["score_vectors"].pop("semantics")
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="campaign slot"):
+        load_cell(path, digit=3, epoch=5, seed=11, audit_rows=2)
+
+    value["schema"] = "ptm.mnist-pta-scout.v1"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unsupported schema"):
+        load_cell(path, digit=3, epoch=5, seed=11, audit_rows=2)

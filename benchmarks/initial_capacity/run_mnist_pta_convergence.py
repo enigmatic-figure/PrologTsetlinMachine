@@ -15,8 +15,9 @@ from typing import Mapping, Sequence
 import numpy as np
 
 
-SCHEMA = "ptm.mnist-pta-convergence.v1"
-CELL_SCHEMA = "ptm.mnist-pta-scout.v1"
+SCHEMA = "ptm.mnist-pta-convergence.v2"
+CELL_SCHEMA = "ptm.mnist-pta-scout.v2"
+RAW_VOTE_SEMANTICS = "unclipped signed clause votes"
 CLASS_COUNT = 10
 
 
@@ -39,6 +40,7 @@ def _load_cell(
         or config.get("parent_epochs") != epoch
         or config.get("seed") != seed
         or not isinstance(vectors, dict)
+        or vectors.get("semantics") != RAW_VOTE_SEMANTICS
         or len(vectors.get("multiclass_truth", [])) != audit_rows
     ):
         raise RuntimeError(f"PTA cell does not match its campaign slot: {path}")
@@ -82,6 +84,8 @@ def _paired(
 def _aggregate(epoch: int, cells: Sequence[Mapping[str, object]]) -> dict[str, object]:
     first_vectors = cells[0]["score_vectors"]
     assert isinstance(first_vectors, Mapping)
+    if first_vectors.get("semantics") != RAW_VOTE_SEMANTICS:
+        raise RuntimeError("PTA cell score vectors are not raw signed votes")
     truth = np.asarray(first_vectors["multiclass_truth"], dtype=np.int64)
     example_ids = first_vectors["example_ids"]
     score_names = (
@@ -97,6 +101,8 @@ def _aggregate(epoch: int, cells: Sequence[Mapping[str, object]]) -> dict[str, o
             vectors = cell["score_vectors"]
             if not isinstance(vectors, Mapping):
                 raise RuntimeError("PTA cell score vectors are malformed")
+            if vectors.get("semantics") != RAW_VOTE_SEMANTICS:
+                raise RuntimeError("PTA cell score vectors are not raw signed votes")
             if (
                 vectors["example_ids"] != example_ids
                 or vectors["multiclass_truth"] != truth.tolist()
