@@ -147,11 +147,17 @@ trusted local benchmark inputs; Python pickle is not an untrusted interchange
 format. A new run publishes an immutable `plan.json` before training. Resume
 requires the same configuration, source/runtime identities, and code digests,
 then independently binds every reusable PTA cell to its parent snapshot's
-content identity.
+content identity. A finalized v5 result also binds the plan, teacher logits,
+test-vector archive, and every selected checkpoint by SHA-256, with the
+checkpoint's adaptive snapshot identity recorded separately. Resume validates
+and reuses a completed result instead of overwriting its provenance set.
 
 `analyze_mnist_checkpoint_scores.py` compares raw-vote and clipped-vote
 multiclass decisions from an existing run without retraining. It reconstructs
 the deterministic bank projections and validates them against the source
 schema before publishing: legacy v1 runs must reproduce their reported clipped
-accuracy, while v2 through v4 runs must reproduce both their primary raw-vote
-accuracy and their separately stored clipped comparison.
+accuracy, while v2 through v5 runs must reproduce both their primary raw-vote
+accuracy and their separately stored clipped comparison. For v5 it additionally
+validates the artifact manifest and source digest, reproduces selected
+validation accuracy, and requires exact equality with every retained test score
+and prediction vector.

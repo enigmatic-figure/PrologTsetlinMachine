@@ -17,10 +17,12 @@ from run_mnist_jit_distillation import (
     _canonical_json,
     _classification,
     _clip_collective_scores,
+    _file_digest,
     _machine_from_snapshot,
     _paired,
     _prepare_bank,
     _score_collective,
+    _validate_artifact_manifest,
 )
 
 
@@ -30,6 +32,7 @@ RAW_VOTE_EXPERIMENT_SCHEMAS = {
     "ptm.mnist-jit-distillation.v2",
     "ptm.mnist-jit-distillation.v3",
     "ptm.mnist-jit-distillation.v4",
+    "ptm.mnist-jit-distillation.v5",
 }
 SUPPORTED_EXPERIMENT_SCHEMAS = {
     LEGACY_EXPERIMENT_SCHEMA,
@@ -121,6 +124,14 @@ def _validate_reported_metrics(
     raise RuntimeError(f"unsupported source experiment schema: {source_schema}")
 
 
+def _validate_retained_array(
+    retained: Mapping[str, np.ndarray], key: str, reconstructed: np.ndarray
+) -> None:
+    value = retained.get(key)
+    if value is None or not np.array_equal(value, reconstructed):
+        raise RuntimeError(f"retained vector mismatch: {key}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, default=Path("data/mnist.pkl"))
@@ -150,6 +161,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     arms = result.get("arms")
     if not isinstance(config, Mapping) or not isinstance(arms, Mapping):
         parser.error("experiment result has an unsupported shape")
+    retained_vectors: dict[str, np.ndarray] | None = None
+    if source_schema == "ptm.mnist-jit-distillation.v5":
+        try:
+            _validate_artifact_manifest(experiment, result)
+            plan = json.loads((experiment / "plan.json").read_text(encoding="utf-8"))
+            planned_source_digest = plan["inputs"]["source_digest"]
+            if planned_source_digest != _file_digest(source):
+                raise RuntimeError("analysis source does not match the planned dataset")
+            with np.load(experiment / "student_test_vectors.npz") as archive:
+                retained_vectors = {key: archive[key] for key in archive.files}
+            expected_vector_keys = {"truth"} | {
+                f"{arm}_{suffix}"
+                for arm in arms
+                for suffix in (
+                    "raw_votes",
+                    "clipped_scores",
+                    "predictions",
+                    "clipped_predictions",
+                )
+            }
+            if set(retained_vectors) != expected_vector_keys:
+                raise RuntimeError("retained vector keys do not match declared arms")
+        except (KeyError, OSError, RuntimeError, ValueError) as error:
+            parser.error(f"experiment artifact validation failed: {error}")
     seed = int(config["seed"])
     features = int(config["features_per_bank"])
     validation_rows = int(config["validation_rows"])
@@ -159,6 +194,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     validation_x = np.asarray(validation[0])
     validation_y = np.asarray(validation[1], dtype=np.int64)
     test_x, test_y = np.asarray(test[0]), np.asarray(test[1], dtype=np.int64)
+    if retained_vectors is not None:
+        _validate_retained_array(retained_vectors, "truth", test_y)
     banks = [
         _prepare_bank(
             train_x,
@@ -182,6 +219,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             snapshots.append(pickle.loads(checkpoint.read_bytes()))
         machines = [_machine_from_snapshot(snapshot) for snapshot in snapshots]
         split_metrics: dict[str, object] = {}
+        reconstructed_test_vectors: dict[str, np.ndarray] = {}
         for split_name, values, truth in (
             (
                 "validation",
@@ -195,6 +233,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             split_metrics[split_name] = _metrics(
                 truth, raw_scores, clipped_scores
             )
+            if split_name == "test":
+                reconstructed_test_vectors = {
+                    "raw_votes": raw_scores,
+                    "clipped_scores": clipped_scores,
+                    "predictions": np.argmax(raw_scores, axis=1),
+                    "clipped_predictions": np.argmax(clipped_scores, axis=1),
+                }
+        validation_semantics = (
+            "clipped_vote"
+            if source_schema == LEGACY_EXPERIMENT_SCHEMA
+            else "raw_vote"
+        )
+        reconstructed_validation_accuracy = float(
+            split_metrics["validation"][validation_semantics]["accuracy"]
+        )
+        if float(stored_metrics["selected_validation_accuracy"]) != (
+            reconstructed_validation_accuracy
+        ):
+            raise RuntimeError(
+                f"arm {arm_name} retained checkpoint does not reproduce its "
+                "selected validation accuracy"
+            )
+        if retained_vectors is not None:
+            for suffix, value in reconstructed_test_vectors.items():
+                _validate_retained_array(
+                    retained_vectors, f"{arm_name}_{suffix}", value
+                )
         reproduction = _validate_reported_metrics(
             source_schema,
             arm_name,
@@ -203,6 +268,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         report_arms[arm_name] = {
             "selected_epoch": int(stored_metrics["selected_epoch"]),
+            "selected_validation_accuracy_reproduced": True,
+            "exact_retained_test_vectors_reproduced": retained_vectors is not None,
             **reproduction,
             **split_metrics,
         }

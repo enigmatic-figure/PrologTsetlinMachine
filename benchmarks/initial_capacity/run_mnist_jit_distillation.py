@@ -24,8 +24,9 @@ from prolog_tsetlin.reference import ScalarBinaryTsetlinMachine, TMSnapshot
 from prolog_tsetlin.services._atomic import publish_bytes
 
 
-SCHEMA = "ptm.mnist-jit-distillation.v4"
-PLAN_SCHEMA = "ptm.mnist-jit-distillation-plan.v4"
+SCHEMA = "ptm.mnist-jit-distillation.v5"
+PLAN_SCHEMA = "ptm.mnist-jit-distillation-plan.v5"
+ARTIFACT_MANIFEST_SCHEMA = "ptm.mnist-jit-distillation-artifacts.v1"
 CLASS_COUNT = 10
 PIXEL_THRESHOLD = 0.3
 TEACHER_GATED_ARM = "D_teacher_gated_hard_residual"
@@ -742,6 +743,83 @@ def _checkpoint_snapshot_id(snapshot: TMSnapshot) -> str:
     return AdaptiveSnapshotEnvelope(snapshot).snapshot_id
 
 
+def _artifact_entry(output: Path, relative_path: str) -> dict[str, str]:
+    path = output / relative_path
+    if not path.is_file():
+        raise RuntimeError(f"finalized artifact is missing: {relative_path}")
+    return {"path": relative_path, "digest": _file_digest(path)}
+
+
+def _build_artifact_manifest(
+    output: Path,
+    selected_snapshots: Mapping[str, Sequence[TMSnapshot]],
+) -> dict[str, object]:
+    if set(selected_snapshots) != set(ARM_NAMES):
+        raise RuntimeError("selected snapshot set does not cover every declared arm")
+    checkpoints: dict[str, list[dict[str, object]]] = {}
+    for arm in ARM_NAMES:
+        snapshots = selected_snapshots[arm]
+        if len(snapshots) != CLASS_COUNT:
+            raise RuntimeError(f"arm {arm} does not have ten selected checkpoints")
+        checkpoints[arm] = []
+        for digit, snapshot in enumerate(snapshots):
+            relative_path = f"checkpoints/{arm}/digit-{digit}.pkl"
+            checkpoints[arm].append(
+                {
+                    "digit": digit,
+                    **_artifact_entry(output, relative_path),
+                    "snapshot_id": _checkpoint_snapshot_id(snapshot),
+                }
+            )
+    return {
+        "schema": ARTIFACT_MANIFEST_SCHEMA,
+        "plan": _artifact_entry(output, "plan.json"),
+        "teacher_logits": _artifact_entry(output, "teacher_logits.npz"),
+        "student_test_vectors": _artifact_entry(output, "student_test_vectors.npz"),
+        "selected_checkpoints": checkpoints,
+    }
+
+
+def _validate_artifact_manifest(
+    output: Path, report: Mapping[str, object]
+) -> Mapping[str, object]:
+    manifest = report.get("artifact_manifest")
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("schema") != ARTIFACT_MANIFEST_SCHEMA
+    ):
+        raise RuntimeError("result has no supported artifact manifest")
+
+    def validate_entry(value: object, expected_path: str) -> None:
+        if not isinstance(value, Mapping) or value.get("path") != expected_path:
+            raise RuntimeError(f"artifact manifest path mismatch: {expected_path}")
+        actual_digest = _file_digest(output / expected_path)
+        if value.get("digest") != actual_digest:
+            raise RuntimeError(f"artifact digest mismatch: {expected_path}")
+
+    validate_entry(manifest.get("plan"), "plan.json")
+    validate_entry(manifest.get("teacher_logits"), "teacher_logits.npz")
+    validate_entry(manifest.get("student_test_vectors"), "student_test_vectors.npz")
+    checkpoints = manifest.get("selected_checkpoints")
+    if not isinstance(checkpoints, Mapping) or set(checkpoints) != set(ARM_NAMES):
+        raise RuntimeError("artifact manifest checkpoint arms do not match the run")
+    for arm in ARM_NAMES:
+        entries = checkpoints[arm]
+        if not isinstance(entries, list) or len(entries) != CLASS_COUNT:
+            raise RuntimeError(f"artifact manifest checkpoint count mismatch: {arm}")
+        for digit, entry in enumerate(entries):
+            expected_path = f"checkpoints/{arm}/digit-{digit}.pkl"
+            if not isinstance(entry, Mapping) or entry.get("digit") != digit:
+                raise RuntimeError(f"artifact manifest digit mismatch: {expected_path}")
+            validate_entry(entry, expected_path)
+            snapshot = pickle.loads((output / expected_path).read_bytes())
+            if not isinstance(snapshot, TMSnapshot):
+                raise RuntimeError(f"checkpoint is not a TMSnapshot: {expected_path}")
+            if entry.get("snapshot_id") != _checkpoint_snapshot_id(snapshot):
+                raise RuntimeError(f"checkpoint snapshot identity mismatch: {expected_path}")
+    return manifest
+
+
 def _publish_or_validate_checkpoint(path: Path, snapshot: TMSnapshot) -> None:
     expected_id = _checkpoint_snapshot_id(snapshot)
     if path.is_file():
@@ -945,6 +1023,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         _initialize_or_validate_plan(output, plan, resume=args.resume)
     except (ValueError, OSError, json.JSONDecodeError) as error:
         parser.error(str(error))
+    finalized_result = output / "result.json"
+    if args.resume and finalized_result.is_file():
+        try:
+            retained_report = json.loads(finalized_result.read_text(encoding="utf-8"))
+            if (
+                not isinstance(retained_report, Mapping)
+                or retained_report.get("schema") != SCHEMA
+            ):
+                raise RuntimeError("completed result schema does not match this runner")
+            _validate_artifact_manifest(output, retained_report)
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:
+            parser.error(f"completed result failed validation: {error}")
+        print(json.dumps({"result": str(finalized_result), "reused": True}, sort_keys=True))
+        return 0
 
     teacher, teacher_report = _train_teacher(
         train_x,
@@ -1322,8 +1414,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         checkpoint_directory = output / "checkpoints" / name
         checkpoint_directory.mkdir(parents=True, exist_ok=True)
         for digit, snapshot in enumerate(snapshots):
-            (checkpoint_directory / f"digit-{digit}.pkl").write_bytes(
-                pickle.dumps(snapshot, protocol=5)
+            _publish_or_validate_checkpoint(
+                checkpoint_directory / f"digit-{digit}.pkl", snapshot
             )
         machines = [_machine_from_snapshot(snapshot) for snapshot in snapshots]
         scores, inference_seconds = _score_collective(machines, banks, test_x)
@@ -1511,6 +1603,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if pta_summary is not None
         else 0.0
     )
+    artifact_manifest = _build_artifact_manifest(output, selected_snapshots)
     report = {
         "schema": SCHEMA,
         "claim_boundary": (
@@ -1625,6 +1718,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "arm_metric_phase": "pre_lifecycle",
         "arms": arm_metrics,
         "pta": pta_summary,
+        "artifact_manifest": artifact_manifest,
         "timing": {
             "invocation_seconds": invocation_seconds,
             "teacher_preparation_seconds": teacher_preparation_seconds,

@@ -59,7 +59,11 @@ def test_raw_vote_schema_reproduces_primary_and_clipped_metrics(
 
 @pytest.mark.parametrize(
     "schema",
-    ("ptm.mnist-jit-distillation.v3", "ptm.mnist-jit-distillation.v4"),
+    (
+        "ptm.mnist-jit-distillation.v3",
+        "ptm.mnist-jit-distillation.v4",
+        "ptm.mnist-jit-distillation.v5",
+    ),
 )
 def test_teacher_policy_schemas_use_raw_vote_reproduction_contract(
     monkeypatch: pytest.MonkeyPatch,
@@ -126,4 +130,19 @@ def test_unknown_source_schema_is_rejected(
             "A",
             {"accuracy": 0.7},
             _reconstructed(raw=0.7, clipped=0.6),
+        )
+
+
+def test_exact_retained_vector_validation_rejects_same_accuracy_substitution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validate = _namespace(monkeypatch)["_validate_retained_array"]
+    retained = {"arm_predictions": pytest.importorskip("numpy").asarray([0, 1, 0, 1])}
+
+    validate(retained, "arm_predictions", pytest.importorskip("numpy").asarray([0, 1, 0, 1]))
+    with pytest.raises(RuntimeError, match="retained vector mismatch"):
+        validate(
+            retained,
+            "arm_predictions",
+            pytest.importorskip("numpy").asarray([1, 0, 1, 0]),
         )

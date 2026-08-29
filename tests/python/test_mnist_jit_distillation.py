@@ -281,3 +281,36 @@ def test_json_artifacts_reject_nonfinite_values(tmp_path: Path) -> None:
         write_json(path, {"accuracy": float("nan")})
 
     assert not path.exists()
+
+
+def test_final_artifact_manifest_binds_files_and_snapshot_identity(
+    tmp_path: Path,
+) -> None:
+    namespace = _namespace()
+    arms = namespace["ARM_NAMES"]
+    class_count = namespace["CLASS_COUNT"]
+    publish_checkpoint = namespace["_publish_or_validate_checkpoint"]
+    build_manifest = namespace["_build_artifact_manifest"]
+    validate_manifest = namespace["_validate_artifact_manifest"]
+    snapshot = namespace["ScalarBinaryTsetlinMachine"](4, 2, seed=9).snapshot()
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "plan.json").write_text("{}\n", encoding="utf-8")
+    (output / "teacher_logits.npz").write_bytes(b"teacher")
+    vectors = output / "student_test_vectors.npz"
+    vectors.write_bytes(b"vectors")
+    selected = {}
+    for arm in arms:
+        selected[arm] = [snapshot] * class_count
+        directory = output / "checkpoints" / arm
+        directory.mkdir(parents=True)
+        for digit in range(class_count):
+            publish_checkpoint(directory / f"digit-{digit}.pkl", snapshot)
+
+    manifest = build_manifest(output, selected)
+    report = {"artifact_manifest": manifest}
+    assert validate_manifest(output, report) is manifest
+
+    vectors.write_bytes(b"substituted vectors with an unrelated payload")
+    with pytest.raises(RuntimeError, match="artifact digest mismatch"):
+        validate_manifest(output, report)
