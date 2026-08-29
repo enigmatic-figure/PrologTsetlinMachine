@@ -92,18 +92,33 @@ bool ScalarBinaryTM::clause_output(
     return prediction ? included : true;
 }
 
-int ScalarBinaryTM::score(std::span<const std::uint8_t> features) const {
+int ScalarBinaryTM::raw_vote(std::span<const std::uint8_t> features) const {
     int total = 0;
     for (std::size_t clause = 0; clause < number_of_clauses_; ++clause) {
         if (clause_output(clause, features, true)) {
             total += clause % 2 == 0 ? 1 : -1;
         }
     }
-    return std::clamp(total, -threshold_, threshold_);
+    return total;
+}
+
+int ScalarBinaryTM::score(std::span<const std::uint8_t> features) const {
+    return std::clamp(raw_vote(features), -threshold_, threshold_);
 }
 
 int ScalarBinaryTM::predict(std::span<const std::uint8_t> features) const {
     return score(features) > 0 ? 1 : 0;
+}
+
+double ScalarBinaryTM::standard_feedback_probability(
+    std::span<const std::uint8_t> features,
+    int target) const {
+    if (target != 0 && target != 1) {
+        throw std::invalid_argument("binary target must be zero or one");
+    }
+    const int class_sum = score(features);
+    return static_cast<double>(threshold_ + (1 - 2 * target) * class_sum) /
+           static_cast<double>(2 * threshold_);
 }
 
 void ScalarBinaryTM::increment(std::size_t clause, std::size_t literal) {
@@ -126,6 +141,12 @@ double ScalarBinaryTM::random_unit() {
 }
 
 void ScalarBinaryTM::update(std::span<const std::uint8_t> features, int target) {
+    update(features, target, false);
+}
+
+void ScalarBinaryTM::update(std::span<const std::uint8_t> features,
+                            int target,
+                            bool boost_true_positive_feedback) {
     if (features.size() != number_of_features_) {
         throw std::invalid_argument("feature vector has the wrong width");
     }
@@ -133,16 +154,15 @@ void ScalarBinaryTM::update(std::span<const std::uint8_t> features, int target) 
         throw std::invalid_argument("binary target must be zero or one");
     }
 
-    const int class_sum = score(features);
-    const double reward_probability = (specificity_ - 1.0) / specificity_;
+    const double reward_probability = boost_true_positive_feedback
+                                          ? 1.0
+                                          : (specificity_ - 1.0) / specificity_;
     const double penalty_probability = 1.0 / specificity_;
+    const double feedback_probability =
+        standard_feedback_probability(features, target);
 
     for (std::size_t clause = 0; clause < number_of_clauses_; ++clause) {
         const int polarity = clause % 2 == 0 ? 1 : -1;
-        const double feedback_probability =
-            static_cast<double>(threshold_ +
-                                (1 - 2 * target) * polarity * class_sum) /
-            static_cast<double>(2 * threshold_);
         if (random_unit() > feedback_probability) {
             continue;
         }
@@ -201,4 +221,3 @@ void ScalarBinaryTM::restore(const ScalarTMSnapshot& source) {
 }
 
 }  // namespace ptm
-

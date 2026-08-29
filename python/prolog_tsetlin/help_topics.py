@@ -82,15 +82,20 @@ _TOPICS = (
         summary="Explore PTM through the keyboard-first Textual workbench.",
         explanation=(
             "The canonical workbench keeps system state and research telemetry visible "
-            "while task views cover deterministic XOR training, clauses, TA populations, "
-            "literals, temporal samples, portable artifacts, and bounded symbolic search. "
-            "The native runtime and GNU Prolog remain optional until a workflow needs them.",
+            "while task views cover deterministic XOR training, sustained native MNIST "
+            "multiclass training, clauses, TA populations, literals, temporal samples, "
+            "portable artifacts, and bounded symbolic search. GNU Prolog remains optional "
+            "until a workflow needs it.",
             "Use the footer for active shortcuts and open help for controls drawn from this "
             "shared registry. The former five-view interface remains available with "
             "`ptm tui --style classic`.",
         ),
         examples=(
             HelpExample(("tui", "--demo", "xor"), "Launch the built-in XOR session."),
+            HelpExample(
+                ("tui", "--demo", "mnist"),
+                "Launch the native ten-class MNIST workload.",
+            ),
             HelpExample(("help", "training"), "Read the training topic in a terminal."),
         ),
         requirements=("Install the optional TUI extra to launch the workbench.",),
@@ -102,11 +107,15 @@ _TOPICS = (
     HelpTopic(
         topic_id="training",
         title="Deterministic training and clauses",
-        summary="Train the scalar XOR oracle and inspect its learned clause state.",
+        summary="Train XOR or native MNIST and inspect supported result state.",
         explanation=(
             "Training runs outside the Textual event loop and reports structured progress. "
             "Configuration changes mark completed results stale so they cannot be exported "
             "as though they represented the new settings.",
+            "XOR exposes scalar snapshots, clause/TA diagnostics, temporal samples, and "
+            "packed artifact export. MNIST reports epoch validation and an exact class "
+            "confusion matrix; multiclass snapshots and portable artifacts remain "
+            "unsupported and fail closed.",
             "Clauses are signed pattern voters. Specificity controls specialization, states "
             "per action controls automaton memory depth, and the threshold scales the vote.",
         ),
@@ -278,8 +287,8 @@ TUI_BINDINGS = (
     TUIBindingSpec(
         "t",
         "train",
-        "Train XOR",
-        "Start XOR training.",
+        "Train",
+        "Start the configured workload.",
         ("overview", "train", "clauses"),
     ),
     TUIBindingSpec(

@@ -13,6 +13,7 @@ from ..services.inference import ArtifactInputField
 from ..services.search import BoundedSearchRequest, BoundedSearchResult
 from ..services.telemetry import TelemetryEvent
 from ..services.training import (
+    MulticlassTrainingRun,
     TrainingDiagnosticSampling,
     TrainingRequest,
     TrainingRun,
@@ -52,7 +53,7 @@ class SessionState:
     )
     active_request: TrainingRequest | None = None
     job_state: JobState = JobState.IDLE
-    last_completed_run: TrainingRun | None = None
+    last_completed_run: TrainingRun | MulticlassTrainingRun | None = None
     error: str | None = None
     configuration_dirty: bool = False
     progress_epoch: int = 0

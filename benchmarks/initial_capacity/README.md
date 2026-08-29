@@ -101,3 +101,63 @@ alternates positive and negative polarity. Campaign configurations must record
 that distinction rather than comparing the raw clause-count fields as if they
 were identical. The pinned pyTsetlinMachine code also has a fixed internal C
 random stream but no public seed control; its records say so explicitly.
+
+## MNIST JIT distillation scout
+
+`run_mnist_jit_distillation.py` runs the bounded policy screen used to separate
+feedback volume, feedback allocation, nonlinear priority weighting,
+teacher-specific information, and soft-target timing. A common one-epoch
+scalar PTM checkpoint is restored bit-exactly into fourteen fixed arms: the
+four original references, uniform slowdown, three normalized disagreement
+priorities, a protected baseline blend, student-only and shuffled-teacher
+controls, delayed soft targets, and two additional agreement/teacher-advantage
+diagnostics. Normalized arms calibrate once per bank from fixed pre-epoch
+scores, solve the clipped probability budget exactly, then hold that scalar
+while online states and probabilities evolve. Results retain both calibration
+equality and the achieved online budget ratio.
+The compact CPU ConvNet sees all 784 grayscale pixels; each exact PTM bank keeps
+the existing 12-literal, thresholded representation. The mismatch is recorded
+as part of the experiment rather than treated as a matched representation.
+Multiclass selection and residual probabilities use unclipped signed clause
+votes. The existing margin-clipped `score()` remains the binary inference and
+training-gate contract, and the result records both forms for comparison. The
+bounded bank schedule deliberately reuses a fixed 200-positive then
+200-negative row order each epoch; results must be interpreted within that
+training regime.
+
+The policy screen uses `--skip-pta` so it measures controller and teacher
+effects without launching 140 lifecycle cells. A later acceptance run may send
+validation-selected finalists through executable Input/Escalation and
+De-escalation PTA cells. Bulk checkpoints, logits, vectors, stores, and results
+remain under ignored `out/` storage:
+
+```text
+python -m pip install -e ".[data,test]"
+python -m pip install torch
+PYTHONPATH=python python benchmarks/initial_capacity/run_mnist_jit_distillation.py --output out/benchmark-campaign/mnist-teacher-policy-screen --epochs 10 --teacher-epochs 3 --validation-rows 2000 --pta-audit-rows 2000 --skip-pta
+```
+
+`--skip-pta` is the isolation mode for controller and teacher experiments. It
+leaves Input, Escalation, and De-escalation lifecycle execution uninvoked and
+records `pta_skipped: true`; omit it only when PTA effects are themselves part
+of the question.
+
+The runner treats `mnist.pkl` and optional parent-checkpoint pickle files as
+trusted local benchmark inputs; Python pickle is not an untrusted interchange
+format. A new run publishes an immutable `plan.json` before training. Resume
+requires the same configuration, source/runtime identities, and code digests,
+then independently binds every reusable PTA cell to its parent snapshot's
+content identity. A finalized v5 result also binds the plan, teacher logits,
+test-vector archive, and every selected checkpoint by SHA-256, with the
+checkpoint's adaptive snapshot identity recorded separately. Resume validates
+and reuses a completed result instead of overwriting its provenance set.
+
+`analyze_mnist_checkpoint_scores.py` compares raw-vote and clipped-vote
+multiclass decisions from an existing run without retraining. It reconstructs
+the deterministic bank projections and validates them against the source
+schema before publishing: legacy v1 runs must reproduce their reported clipped
+accuracy, while v2 through v5 runs must reproduce both their primary raw-vote
+accuracy and their separately stored clipped comparison. For v5 it additionally
+validates the artifact manifest and source digest, reproduces selected
+validation accuracy, and requires exact equality with every retained test score
+and prediction vector.

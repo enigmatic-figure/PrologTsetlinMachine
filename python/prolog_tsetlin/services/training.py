@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from math import ceil, isfinite
+from pathlib import Path
 from threading import Event
 from typing import Callable
 
@@ -15,6 +17,13 @@ class TrainingCancelled(RuntimeError):
     """Raised at an epoch boundary when a caller requests cancellation."""
 
 
+class TrainingWorkload(str, Enum):
+    """Built-in workloads exposed through the interactive training service."""
+
+    XOR = "xor"
+    MNIST = "mnist"
+
+
 @dataclass(frozen=True, slots=True)
 class TrainingRequest:
     number_of_clauses: int = 20
@@ -23,8 +32,14 @@ class TrainingRequest:
     threshold: int = 10
     seed: int = 7
     epochs: int = 150
+    workload: TrainingWorkload = TrainingWorkload.XOR
+    boost_true_positive_feedback: bool = False
 
     def validate(self) -> None:
+        if not isinstance(self.workload, TrainingWorkload):
+            raise ValueError("workload is unsupported")
+        if type(self.boost_true_positive_feedback) is not bool:
+            raise ValueError("boost_true_positive_feedback must be boolean")
         if self.number_of_clauses <= 0:
             raise ValueError("number_of_clauses must be positive")
         if self.states_per_action <= 0:
@@ -42,6 +57,8 @@ class TrainingProgress:
     epoch: int
     epochs: int
     accuracy: float
+    training_seconds: float | None = None
+    cumulative_training_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +129,58 @@ class TrainingRun:
 
 
 @dataclass(frozen=True, slots=True)
+class MulticlassTrainingRun:
+    """Completed native multiclass run without a portable snapshot contract."""
+
+    request: TrainingRequest
+    class_labels: tuple[int, ...]
+    validation_rows: int
+    confusion_matrix: tuple[tuple[int, ...], ...]
+    accuracy: float
+    training_seconds: float
+    backend: str
+    material_manifest: str
+
+    def validate(self) -> None:
+        self.request.validate()
+        if self.request.workload is not TrainingWorkload.MNIST:
+            raise ValueError("multiclass run must identify the MNIST workload")
+        class_count = len(self.class_labels)
+        if class_count < 2 or self.class_labels != tuple(range(class_count)):
+            raise ValueError(
+                "multiclass labels must be canonical zero-based classes"
+            )
+        if self.validation_rows <= 0:
+            raise ValueError("multiclass validation rows must be positive")
+        if len(self.confusion_matrix) != class_count or any(
+            len(row) != class_count for row in self.confusion_matrix
+        ):
+            raise ValueError("multiclass confusion matrix has the wrong shape")
+        if any(
+            type(value) is not int or value < 0
+            for row in self.confusion_matrix
+            for value in row
+        ):
+            raise ValueError(
+                "multiclass confusion counts must be nonnegative integers"
+            )
+        if sum(sum(row) for row in self.confusion_matrix) != self.validation_rows:
+            raise ValueError("multiclass confusion counts do not cover validation")
+        correct = sum(
+            self.confusion_matrix[index][index]
+            for index in range(class_count)
+        )
+        if abs(correct / self.validation_rows - self.accuracy) > 1e-12:
+            raise ValueError("multiclass accuracy disagrees with confusion counts")
+        if not 0.0 <= self.accuracy <= 1.0:
+            raise ValueError("multiclass accuracy is outside zero to one")
+        if not isfinite(self.training_seconds) or self.training_seconds < 0.0:
+            raise ValueError("multiclass training time is invalid")
+        if not self.backend or not self.material_manifest:
+            raise ValueError("multiclass provenance is incomplete")
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingDiagnosticSample:
     """One evaluated, immutable model snapshot captured during training."""
 
@@ -128,6 +197,37 @@ ProgressCallback = Callable[[TrainingProgress], None]
 DiagnosticCallback = Callable[[TrainingDiagnosticSample], None]
 
 
+def train_workload(
+    request: TrainingRequest,
+    *,
+    workspace: str | Path,
+    progress: ProgressCallback | None = None,
+    diagnostic: DiagnosticCallback | None = None,
+    diagnostic_sampling: TrainingDiagnosticSampling | None = None,
+    cancel: Event | None = None,
+) -> TrainingRun | MulticlassTrainingRun:
+    """Dispatch one validated built-in workload without weakening its contract."""
+
+    request.validate()
+    if request.workload is TrainingWorkload.XOR:
+        return train_xor(
+            request,
+            progress=progress,
+            diagnostic=diagnostic,
+            diagnostic_sampling=diagnostic_sampling,
+            cancel=cancel,
+        )
+    if diagnostic is not None or diagnostic_sampling is not None:
+        raise ValueError(
+            "MNIST does not yet expose snapshot-derived diagnostic samples"
+        )
+    from .mnist_training import train_mnist_native
+
+    return train_mnist_native(
+        request, workspace=workspace, progress=progress, cancel=cancel
+    )
+
+
 def train_xor(
     request: TrainingRequest,
     *,
@@ -138,6 +238,10 @@ def train_xor(
 ) -> TrainingRun:
     """Train the scalar semantic oracle on the built-in XOR dataset."""
     request.validate()
+    if request.workload is not TrainingWorkload.XOR:
+        raise ValueError("XOR trainer requires the XOR workload")
+    if request.boost_true_positive_feedback:
+        raise ValueError("Python XOR oracle does not implement boosted feedback")
     if (diagnostic is None) != (diagnostic_sampling is None):
         raise ValueError(
             "diagnostic callback and sampling policy must be supplied together"

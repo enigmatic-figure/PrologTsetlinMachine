@@ -261,7 +261,7 @@ if(PTM_BUILD_TESTS)
         set_tests_properties(ptmrt_trained_parent_verify PROPERTIES
             FIXTURES_REQUIRED ptmrt_trained_parent_artifact
             PASS_REGULAR_EXPRESSION
-                "verified sha256:5752df035d3d92cf7f1679bbf96df44f3517cde8df9db9ec62b13e0beb663145")
+                "verified sha256:4330436bdabed010bfd84b581fc4b0d447a6db749d1114d5094eb2ade662e3ae")
         add_test(NAME ptmrt_trained_parent_below
             COMMAND ptmrt run-record "${PTM_TRAINED_PARENT_FIXTURE}"
                 "temperature:int=74"
@@ -269,7 +269,7 @@ if(PTM_BUILD_TESTS)
                 "previous_state:bool=false")
         set_tests_properties(ptmrt_trained_parent_below PROPERTIES
             FIXTURES_REQUIRED ptmrt_trained_parent_artifact
-            PASS_REGULAR_EXPRESSION "prediction.:0.*score.:-7")
+            PASS_REGULAR_EXPRESSION "prediction.:0.*score.:-5")
         add_test(NAME ptmrt_trained_parent_above
             COMMAND ptmrt run-record "${PTM_TRAINED_PARENT_FIXTURE}"
                 "temperature:int=76"
@@ -336,6 +336,10 @@ if(PTM_BUILD_BENCHMARKS)
         target_link_libraries(ptm_packed_tm_benchmark PRIVATE PTM::cuda)
     endif()
     target_compile_features(ptm_packed_tm_benchmark PRIVATE cxx_std_20)
+
+    add_executable(ptm_mnist_ovr_benchmark benchmarks/mnist_ovr_benchmark.cpp)
+    target_link_libraries(ptm_mnist_ovr_benchmark PRIVATE PTM::core)
+    target_compile_features(ptm_mnist_ovr_benchmark PRIVATE cxx_std_20)
 endif()
 
 set(PTM_INSTALL_TARGETS ptm_core ptm_runtime ptm_c_api)

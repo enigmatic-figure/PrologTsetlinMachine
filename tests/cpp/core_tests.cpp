@@ -5,6 +5,7 @@
 #include "ptm/scalar_tm.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -115,6 +116,33 @@ void test_scalar_tm() {
     require(machine.predict(x10) == 1, "XOR 10 prediction failed");
     require(machine.predict(x11) == 0, "XOR 11 prediction failed");
 
+    ptm::ScalarBinaryTM saturated(40, 1, 4, 3.0, 10, 9);
+    for (std::size_t clause = 0; clause < 40; ++clause) {
+        saturated.set_state(clause, 0, 4);
+        saturated.set_state(clause, 1, 4);
+        saturated.set_state(clause, clause % 2 == 0 ? 0 : 1, 5);
+    }
+    const std::array<std::uint8_t, 1> one{1};
+    require(saturated.raw_vote(one) == 20,
+            "raw vote must preserve values beyond the training margin");
+    require(saturated.score(one) == 10,
+            "score must retain its clipped-margin contract");
+
+    ptm::ScalarBinaryTM gated(12, 1, 4, 3.0, 10, 9);
+    for (std::size_t clause = 0; clause < 12; ++clause) {
+        gated.set_state(clause, 0, 4);
+        gated.set_state(clause, 1, 4);
+        gated.set_state(clause, clause % 2 == 0 ? 0 : 1, 5);
+    }
+    require(gated.raw_vote(one) == 6,
+            "feedback fixture must produce the intended class sum");
+    require(std::abs(gated.standard_feedback_probability(one, 1) - 0.2) <
+                1e-12,
+            "positive-target feedback gate must follow Algorithm 1");
+    require(std::abs(gated.standard_feedback_probability(one, 0) - 0.8) <
+                1e-12,
+            "negative-target feedback gate must follow Algorithm 1");
+
     const auto before = machine.snapshot();
     machine.update(x10, 1);
     const auto first = machine.snapshot();
@@ -125,6 +153,30 @@ void test_scalar_tm() {
             "restored TM state did not replay identically");
     require(first.rng == replay.rng,
             "restored random stream did not replay identically");
+
+    const std::array<std::uint8_t, 1> present{1};
+    ptm::ScalarBinaryTM standard(1, 1, 128, 1.01, 100, 41);
+    ptm::ScalarBinaryTM boosted(1, 1, 128, 1.01, 100, 41);
+    for (std::size_t literal = 0; literal < 2; ++literal) {
+        standard.set_state(0, literal, 128);
+        boosted.set_state(0, literal, 128);
+    }
+    for (std::size_t iteration = 0; iteration < 200; ++iteration) {
+        standard.update(present, 1);
+        boosted.update(present, 1, true);
+    }
+    require(boosted.state(0, 0) > standard.state(0, 0),
+            "boosted true-positive feedback did not increase true literals");
+
+    const auto boost_before = boosted.snapshot();
+    boosted.update(present, 1, true);
+    const auto boost_first = boosted.snapshot();
+    boosted.restore(boost_before);
+    boosted.update(present, 1, true);
+    const auto boost_replay = boosted.snapshot();
+    require(boost_first.states == boost_replay.states &&
+                boost_first.rng == boost_replay.rng,
+            "boosted update did not replay identically after restore");
 }
 
 }  // namespace

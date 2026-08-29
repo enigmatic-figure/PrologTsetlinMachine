@@ -10,11 +10,20 @@ changes mark a completed result stale so it cannot be exported under settings
 that did not produce it.
 
 The canonical layout keeps system and dashboard state visible while task views
-cover configuration, deterministic XOR training, clause behavior, TA
-population diagnostics, literals, predictions, sampled temporal inspection,
-portable artifact export/loading/raw-record inference, and bounded
-threshold/template/clause/tree/repair search. Native runtime and GNU Prolog
-capabilities remain optional until a workflow needs them.
+cover configuration, deterministic XOR training, sustained native MNIST
+multiclass training, clause behavior, TA population diagnostics, literals,
+predictions, sampled temporal inspection, portable artifact
+export/loading/raw-record inference, and bounded
+threshold/template/clause/tree/repair search. GNU Prolog remains optional until
+a workflow needs it.
+
+The workload boundary is explicit. XOR owns the current scalar snapshot,
+clause/TA diagnostics, temporal samples, and packed artifact contract. MNIST
+owns epoch validation and an exact final confusion matrix over ten native
+one-vs-rest banks. Until PTM defines a portable multiclass adaptive snapshot
+and artifact schema, the workbench reports those snapshot-derived surfaces as
+unavailable and blocks export rather than projecting binary facts onto the
+multiclass run.
 
 The earlier five-view shell uses the same controllers and remains available as
 `ptm tui --style classic`. It is a compatibility presentation rather than a

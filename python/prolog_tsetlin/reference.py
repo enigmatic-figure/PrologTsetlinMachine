@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from math import isfinite
+from math import exp, isfinite
 import random
 from dataclasses import dataclass
 from typing import Iterable, Sequence
@@ -24,6 +24,20 @@ class TMSnapshot:
     threshold: int
     states: tuple[tuple[int, ...], ...]
     rng_state: object
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualUpdateResult:
+    """Observable result of one experimental residual-guided TM update."""
+
+    raw_score: int
+    student_probability: float
+    target_probability: float
+    residual: float
+    base_feedback_probability: float
+    feedback_scale: float
+    feedback_probability: float
+    clauses_feedback_applied: int
 
 
 def extend_snapshot_features(
@@ -218,18 +232,38 @@ class ScalarBinaryTsetlinMachine:
                     return False
         return included if prediction else True
 
-    def score(self, features: Sequence[bool | int]) -> int:
+    def raw_vote(self, features: Sequence[bool | int]) -> int:
+        """Return the unclipped signed sum of positive and negative clauses."""
+
         total = 0
         for clause in range(self.number_of_clauses):
             if self.clause_output(clause, features):
                 total += 1 if clause % 2 == 0 else -1
-        return max(-self.threshold, min(self.threshold, total))
+        return total
+
+    def score(self, features: Sequence[bool | int]) -> int:
+        """Return the signed clause vote clipped to the training margin."""
+
+        return max(-self.threshold, min(self.threshold, self.raw_vote(features)))
 
     def predict_one(self, features: Sequence[bool | int]) -> int:
         return int(self.score(features) > 0)
 
     def predict(self, rows: Iterable[Sequence[bool | int]]) -> list[int]:
         return [self.predict_one(row) for row in rows]
+
+    def standard_feedback_probability(
+        self,
+        features: Sequence[bool | int],
+        target: int | bool,
+    ) -> float:
+        """Return the canonical shared outer feedback gate for one example."""
+
+        target_value = int(self._require_binary(target))
+        class_sum = self.score(features)
+        return (
+            self.threshold + (1 - 2 * target_value) * class_sum
+        ) / (2 * self.threshold)
 
     def _increment(self, clause: int, literal: int) -> None:
         current = self._states[clause][literal]
@@ -259,13 +293,9 @@ class ScalarBinaryTsetlinMachine:
     def update(self, features: Sequence[bool | int], target: int | bool) -> None:
         target_value = int(self._require_binary(target))
         literals = self._literals(features)
-        class_sum = self.score(features)
+        probability = self.standard_feedback_probability(features, target_value)
         for clause in range(self.number_of_clauses):
             polarity = 1 if clause % 2 == 0 else -1
-            probability = (
-                self.threshold
-                + (1 - 2 * target_value) * polarity * class_sum
-            ) / (2 * self.threshold)
             if self._rng.random() > probability:
                 continue
             output = self.clause_output(clause, features, prediction=False)
@@ -277,6 +307,128 @@ class ScalarBinaryTsetlinMachine:
                 self._type_i_feedback(clause, literals, output)
             else:
                 self._type_ii_feedback(clause, literals, output)
+
+    def update_residual(
+        self,
+        features: Sequence[bool | int],
+        target_probability: float,
+        *,
+        temperature: float,
+        learning_rate: float,
+        feedback_scale: float = 1.0,
+        feedback_probability: float | None = None,
+    ) -> ResidualUpdateResult:
+        """Update from a probability residual instead of the standard margin gate.
+
+        This experimental controller retains the existing literal-level Type I
+        and Type II rules. It replaces only the outer feedback gate and routes
+        feedback by clause polarity so positive residuals raise the signed vote
+        while negative residuals lower it. ``feedback_scale`` may attenuate the
+        resulting outer probability without changing the target or direction.
+        """
+
+        if isinstance(target_probability, bool) or not isinstance(
+            target_probability, (int, float)
+        ):
+            raise TypeError("target_probability must be a real number")
+        target_value = float(target_probability)
+        if not isfinite(target_value) or not 0.0 <= target_value <= 1.0:
+            raise ValueError("target_probability must be finite and in [0, 1]")
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+            raise TypeError("temperature must be a real number")
+        temperature_value = float(temperature)
+        if not isfinite(temperature_value) or temperature_value <= 0.0:
+            raise ValueError("temperature must be finite and positive")
+        if isinstance(learning_rate, bool) or not isinstance(
+            learning_rate, (int, float)
+        ):
+            raise TypeError("learning_rate must be a real number")
+        learning_rate_value = float(learning_rate)
+        if not isfinite(learning_rate_value) or learning_rate_value <= 0.0:
+            raise ValueError("learning_rate must be finite and positive")
+        if isinstance(feedback_scale, bool) or not isinstance(
+            feedback_scale, (int, float)
+        ):
+            raise TypeError("feedback_scale must be a real number")
+        feedback_scale_value = float(feedback_scale)
+        if (
+            not isfinite(feedback_scale_value)
+            or not 0.0 <= feedback_scale_value <= 1.0
+        ):
+            raise ValueError("feedback_scale must be finite and in [0, 1]")
+        if feedback_probability is not None:
+            if isinstance(feedback_probability, bool) or not isinstance(
+                feedback_probability, (int, float)
+            ):
+                raise TypeError("feedback_probability must be a real number or None")
+            feedback_probability_value = float(feedback_probability)
+            if (
+                not isfinite(feedback_probability_value)
+                or not 0.0 <= feedback_probability_value <= 1.0
+            ):
+                raise ValueError("feedback_probability must be finite and in [0, 1]")
+        else:
+            feedback_probability_value = None
+
+        literals = self._literals(features)
+        raw_score = self.raw_vote(features)
+        scaled_score = raw_score / temperature_value
+        if scaled_score >= 0.0:
+            student_probability = 1.0 / (1.0 + exp(-scaled_score))
+        else:
+            scaled_exp = exp(scaled_score)
+            student_probability = scaled_exp / (1.0 + scaled_exp)
+        residual = target_value - student_probability
+        base_feedback_probability = min(
+            1.0, learning_rate_value * abs(residual)
+        )
+        applied_probability = (
+            feedback_scale_value * base_feedback_probability
+            if feedback_probability_value is None
+            else feedback_probability_value
+        )
+        effective_scale = (
+            applied_probability / base_feedback_probability
+            if base_feedback_probability > 0.0
+            else 0.0
+        )
+
+        if residual == 0.0:
+            return ResidualUpdateResult(
+                raw_score=raw_score,
+                student_probability=student_probability,
+                target_probability=target_value,
+                residual=residual,
+                base_feedback_probability=base_feedback_probability,
+                feedback_scale=effective_scale,
+                feedback_probability=applied_probability,
+                clauses_feedback_applied=0,
+            )
+
+        clauses_feedback_applied = 0
+        for clause in range(self.number_of_clauses):
+            if self._rng.random() > applied_probability:
+                continue
+            clauses_feedback_applied += 1
+            positive_clause = clause % 2 == 0
+            output = self.clause_output(clause, features, prediction=False)
+            use_type_i = (residual > 0.0 and positive_clause) or (
+                residual < 0.0 and not positive_clause
+            )
+            if use_type_i:
+                self._type_i_feedback(clause, literals, output)
+            else:
+                self._type_ii_feedback(clause, literals, output)
+        return ResidualUpdateResult(
+            raw_score=raw_score,
+            student_probability=student_probability,
+            target_probability=target_value,
+            residual=residual,
+            base_feedback_probability=base_feedback_probability,
+            feedback_scale=effective_scale,
+            feedback_probability=applied_probability,
+            clauses_feedback_applied=clauses_feedback_applied,
+        )
 
     def fit(
         self,

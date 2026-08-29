@@ -38,6 +38,7 @@ jobs:
           --ignore=tests/python/test_single_pane.py
           --ignore=tests/python/test_single_pane_snapshot.py
           --ignore=tests/python/test_tui_launcher.py
+          --ignore=tests/python/test_mnist_workbench.py
 
   tui:
     name: TUI / Python ${{ matrix.python }} / ${{ matrix.os }}
@@ -69,6 +70,7 @@ jobs:
           tests/python/test_single_pane.py
           tests/python/test_single_pane_snapshot.py
           tests/python/test_tui_launcher.py
+          tests/python/test_mnist_workbench.py
 
   native:
     name: Native / ${{ matrix.os }}
@@ -117,6 +119,8 @@ jobs:
           python -m pytest
           tests/python/test_data_connectors.py
           tests/python/test_record_transforms.py
+          tests/python/test_mnist_jit_distillation.py
+          tests/python/test_mnist_checkpoint_score_analysis.py
 
   documentation:
     name: Documentation / Python ${{ matrix.python }}

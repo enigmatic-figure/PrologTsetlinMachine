@@ -794,6 +794,49 @@ async def test_single_pane_configuration_refresh_tolerates_screen_teardown(
     app._refresh_configuration_state()
 
 
+async def test_single_pane_configuration_controls_fit_the_visible_grid() -> None:
+    app = SinglePaneApp(demo="mnist")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("c")
+        await pilot.pause()
+
+        visible = app.query_one("#config-panel").region
+        for widget_id in (
+            "cfg-workload",
+            "cfg-clauses",
+            "cfg-states",
+            "cfg-spec",
+            "cfg-thr",
+            "cfg-epochs",
+            "cfg-seed",
+            "cfg-train",
+            "cfg-cancel",
+        ):
+            region = app.query_one(f"#{widget_id}").region
+            assert region.width > 1
+            assert visible.contains_region(region)
+
+
+async def test_single_pane_requests_click_only_terminal_mouse_tracking() -> None:
+    writes: list[str] = []
+
+    class DriverStub:
+        is_headless = False
+
+        def write(self, value: str) -> None:
+            writes.append(value)
+
+        def flush(self) -> None:
+            writes.append("flush")
+
+    app = SinglePaneApp()
+    app._driver = DriverStub()
+
+    app._use_click_only_mouse_tracking()
+
+    assert writes == ["\x1b[?1003l\x1b[?1000h", "flush"]
+
+
 async def test_single_pane_labels_retained_snapshot_during_retraining(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -938,7 +981,7 @@ async def test_single_pane_help_matches_shell_bindings(tmp_path: Path) -> None:
         assert "Open System." in copy
         assert "Open Dashboard." in copy
         assert "Open Literals." in copy
-        assert "Start XOR training." in copy
+        assert "Start the configured workload." in copy
         assert "1      Open Overview" not in copy
         assert "STUBS.md" not in copy
         assert "Dead clauses" not in copy
