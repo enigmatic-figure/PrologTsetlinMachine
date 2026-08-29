@@ -37,6 +37,7 @@ class ResidualUpdateResult:
     base_feedback_probability: float
     feedback_scale: float
     feedback_probability: float
+    clauses_feedback_applied: int
 
 
 def extend_snapshot_features(
@@ -315,6 +316,7 @@ class ScalarBinaryTsetlinMachine:
         temperature: float,
         learning_rate: float,
         feedback_scale: float = 1.0,
+        feedback_probability: float | None = None,
     ) -> ResidualUpdateResult:
         """Update from a probability residual instead of the standard margin gate.
 
@@ -354,6 +356,19 @@ class ScalarBinaryTsetlinMachine:
             or not 0.0 <= feedback_scale_value <= 1.0
         ):
             raise ValueError("feedback_scale must be finite and in [0, 1]")
+        if feedback_probability is not None:
+            if isinstance(feedback_probability, bool) or not isinstance(
+                feedback_probability, (int, float)
+            ):
+                raise TypeError("feedback_probability must be a real number or None")
+            feedback_probability_value = float(feedback_probability)
+            if (
+                not isfinite(feedback_probability_value)
+                or not 0.0 <= feedback_probability_value <= 1.0
+            ):
+                raise ValueError("feedback_probability must be finite and in [0, 1]")
+        else:
+            feedback_probability_value = None
 
         literals = self._literals(features)
         raw_score = self.raw_vote(features)
@@ -367,23 +382,34 @@ class ScalarBinaryTsetlinMachine:
         base_feedback_probability = min(
             1.0, learning_rate_value * abs(residual)
         )
-        feedback_probability = feedback_scale_value * base_feedback_probability
-
-        result = ResidualUpdateResult(
-            raw_score=raw_score,
-            student_probability=student_probability,
-            target_probability=target_value,
-            residual=residual,
-            base_feedback_probability=base_feedback_probability,
-            feedback_scale=feedback_scale_value,
-            feedback_probability=feedback_probability,
+        applied_probability = (
+            feedback_scale_value * base_feedback_probability
+            if feedback_probability_value is None
+            else feedback_probability_value
         )
-        if residual == 0.0:
-            return result
+        effective_scale = (
+            applied_probability / base_feedback_probability
+            if base_feedback_probability > 0.0
+            else 0.0
+        )
 
+        if residual == 0.0:
+            return ResidualUpdateResult(
+                raw_score=raw_score,
+                student_probability=student_probability,
+                target_probability=target_value,
+                residual=residual,
+                base_feedback_probability=base_feedback_probability,
+                feedback_scale=effective_scale,
+                feedback_probability=applied_probability,
+                clauses_feedback_applied=0,
+            )
+
+        clauses_feedback_applied = 0
         for clause in range(self.number_of_clauses):
-            if self._rng.random() > feedback_probability:
+            if self._rng.random() > applied_probability:
                 continue
+            clauses_feedback_applied += 1
             positive_clause = clause % 2 == 0
             output = self.clause_output(clause, features, prediction=False)
             use_type_i = (residual > 0.0 and positive_clause) or (
@@ -393,7 +419,16 @@ class ScalarBinaryTsetlinMachine:
                 self._type_i_feedback(clause, literals, output)
             else:
                 self._type_ii_feedback(clause, literals, output)
-        return result
+        return ResidualUpdateResult(
+            raw_score=raw_score,
+            student_probability=student_probability,
+            target_probability=target_value,
+            residual=residual,
+            base_feedback_probability=base_feedback_probability,
+            feedback_scale=effective_scale,
+            feedback_probability=applied_probability,
+            clauses_feedback_applied=clauses_feedback_applied,
+        )
 
     def fit(
         self,

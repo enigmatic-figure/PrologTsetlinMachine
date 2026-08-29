@@ -104,13 +104,17 @@ random stream but no public seed control; its records say so explicitly.
 
 ## MNIST JIT distillation scout
 
-`run_mnist_jit_distillation.py` runs the bounded experiment used to separate a
-residual feedback controller from temporary neural-teacher guidance. A common
-one-epoch scalar PTM checkpoint is restored bit-exactly into ordinary
-hard-margin, hard-target residual, teacher-target residual, and teacher-gated
-hard-target residual arms. The gated arm keeps the hard label and B's feedback
-direction, while multiplying only its outer feedback probability by
-`floor + (1 - floor) * abs(teacher_probability - student_probability)`.
+`run_mnist_jit_distillation.py` runs the bounded policy screen used to separate
+feedback volume, feedback allocation, nonlinear priority weighting,
+teacher-specific information, and soft-target timing. A common one-epoch
+scalar PTM checkpoint is restored bit-exactly into fourteen fixed arms: the
+four original references, uniform slowdown, three normalized disagreement
+priorities, a protected baseline blend, student-only and shuffled-teacher
+controls, delayed soft targets, and two additional agreement/teacher-advantage
+diagnostics. Normalized arms calibrate once per bank from fixed pre-epoch
+scores, solve the clipped probability budget exactly, then hold that scalar
+while online states and probabilities evolve. Results retain both calibration
+equality and the achieved online budget ratio.
 The compact CPU ConvNet sees all 784 grayscale pixels; each exact PTM bank keeps
 the existing 12-literal, thresholded representation. The mismatch is recorded
 as part of the experiment rather than treated as a matched representation.
@@ -121,15 +125,16 @@ bounded bank schedule deliberately reuses a fixed 200-positive then
 200-negative row order each epoch; results must be interpreted within that
 training regime.
 
-Unless `--skip-pta` is passed for plumbing tests, each validation-selected arm
-checkpoint is sent through all ten executable Input/Escalation and
+The policy screen uses `--skip-pta` so it measures controller and teacher
+effects without launching 140 lifecycle cells. A later acceptance run may send
+validation-selected finalists through executable Input/Escalation and
 De-escalation PTA cells. Bulk checkpoints, logits, vectors, stores, and results
 remain under ignored `out/` storage:
 
 ```text
 python -m pip install -e ".[data,test]"
 python -m pip install torch
-PYTHONPATH=python python benchmarks/initial_capacity/run_mnist_jit_distillation.py --output out/benchmark-campaign/mnist-jit-teacher-gated --epochs 10 --teacher-epochs 3 --validation-rows 2000 --pta-audit-rows 2000 --skip-pta
+PYTHONPATH=python python benchmarks/initial_capacity/run_mnist_jit_distillation.py --output out/benchmark-campaign/mnist-teacher-policy-screen --epochs 10 --teacher-epochs 3 --validation-rows 2000 --pta-audit-rows 2000 --skip-pta
 ```
 
 `--skip-pta` is the isolation mode for controller and teacher experiments. It
@@ -148,5 +153,5 @@ content identity.
 multiclass decisions from an existing run without retraining. It reconstructs
 the deterministic bank projections and validates them against the source
 schema before publishing: legacy v1 runs must reproduce their reported clipped
-accuracy, while v2 and v3 runs must reproduce both their primary raw-vote
+accuracy, while v2 through v4 runs must reproduce both their primary raw-vote
 accuracy and their separately stored clipped comparison.

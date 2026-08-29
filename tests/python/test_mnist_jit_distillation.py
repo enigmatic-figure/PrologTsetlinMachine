@@ -96,6 +96,97 @@ def test_teacher_disagreement_gate_scales_only_by_probability_distance() -> None
     assert scale == pytest.approx(0.64)
 
 
+def test_clipping_aware_scale_matches_budget_with_saturation() -> None:
+    solve = _namespace()["_solve_clipped_scale"]
+    values = np.asarray([0.05, 0.2, 0.8, 1.5], dtype=np.float64)
+
+    scale = solve(values, 2.6)
+    applied = np.minimum(1.0, scale * values)
+
+    assert applied.sum() == pytest.approx(2.6, abs=1e-12)
+    assert np.count_nonzero(applied == 1.0) >= 1
+    assert solve(values, 0.0) == 0.0
+
+
+def test_teacher_permutation_is_seeded_and_stays_within_label_class() -> None:
+    permute = _namespace()["_within_class_permutation"]
+    labels = np.asarray([0, 0, 0, 1, 1, 1, 2, 2], dtype=np.int64)
+
+    first = permute(labels, seed=17)
+    second = permute(labels, seed=17)
+
+    assert first.tolist() == second.tolist()
+    assert sorted(first.tolist()) == list(range(len(labels)))
+    assert labels[first].tolist() == labels.tolist()
+
+
+def test_delayed_teacher_schedule_matches_predeclared_epochs() -> None:
+    alpha = _namespace()["_delayed_teacher_alpha"]
+
+    assert [alpha(epoch) for epoch in range(2, 11)] == pytest.approx(
+        [0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.5]
+    )
+
+
+def test_policy_probabilities_are_bounded_and_protected_blend_has_floor() -> None:
+    namespace = _namespace()
+    policy = namespace["_policy_feedback_probability"]
+    normalized_arms = namespace["NORMALIZED_ARMS"]
+    common = {
+        "hard_base_probability": 0.4,
+        "hard_residual": 0.2,
+        "disagreement": 0.7,
+        "hard_target": 1.0,
+        "teacher_probability": 0.9,
+        "normalization_scale": 2.0,
+    }
+
+    for arm in normalized_arms:
+        probability = policy(arm, **common)
+        assert probability is not None
+        assert 0.0 <= probability <= 1.0
+    protected = policy("I_protected_baseline_blend", **common)
+    assert protected >= 0.75 * common["hard_base_probability"]
+
+
+def test_normalized_calibration_matches_current_hard_budget() -> None:
+    namespace = _namespace()
+    machine = namespace["ScalarBinaryTsetlinMachine"](
+        4, 2, threshold=10, seed=5
+    )
+    bank = {
+        "rows": ((0, 0), (0, 1), (1, 0), (1, 1)),
+        "targets": (0, 0, 1, 1),
+        "indices": np.asarray([0, 1, 2, 3], dtype=np.int64),
+    }
+    teacher = np.asarray(
+        [[0.8, 0.2], [0.7, 0.3], [0.2, 0.8], [0.1, 0.9]],
+        dtype=np.float64,
+    )
+    permutation = np.arange(4, dtype=np.int64)
+
+    for arm in (
+        "F_normalized_linear",
+        "G_normalized_logarithmic",
+        "H_normalized_squared",
+        "I_protected_baseline_blend",
+        "J_student_only_priorities",
+        "M_normalized_agreement",
+        "N_normalized_teacher_advantage",
+    ):
+        result = namespace["_calibrate_policy"](
+            arm,
+            machine,
+            bank,
+            digit=0,
+            teacher_probabilities=teacher,
+            teacher_permutation=permutation,
+            temperature=3.0,
+            learning_rate=2.0,
+        )
+        assert result["calibrated_budget_ratio"] == pytest.approx(1.0, abs=1e-12)
+
+
 def test_resume_plan_fails_closed_on_configuration_change(tmp_path: Path) -> None:
     initialize = _namespace()["_initialize_or_validate_plan"]
     first = {"schema": "test", "configuration": {"seed": 1}}

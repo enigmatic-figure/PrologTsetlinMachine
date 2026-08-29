@@ -29,6 +29,7 @@ LEGACY_EXPERIMENT_SCHEMA = "ptm.mnist-jit-distillation.v1"
 RAW_VOTE_EXPERIMENT_SCHEMAS = {
     "ptm.mnist-jit-distillation.v2",
     "ptm.mnist-jit-distillation.v3",
+    "ptm.mnist-jit-distillation.v4",
 }
 SUPPORTED_EXPERIMENT_SCHEMAS = {
     LEGACY_EXPERIMENT_SCHEMA,

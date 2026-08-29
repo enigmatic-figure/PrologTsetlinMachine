@@ -221,6 +221,27 @@ class ScalarTMTests(unittest.TestCase):
         self.assertEqual(result.feedback_scale, 0.2)
         self.assertAlmostEqual(result.feedback_probability, 0.1)
 
+    def test_residual_feedback_probability_override_preserves_residual_routing(self) -> None:
+        machine = FeedbackRecordingMachine()
+        result = machine.update_residual(
+            (False, False),
+            1.0,
+            temperature=1.0,
+            learning_rate=1.0,
+            feedback_probability=1.0,
+        )
+
+        self.assertEqual(result.target_probability, 1.0)
+        self.assertEqual(result.residual, 0.5)
+        self.assertEqual(result.base_feedback_probability, 0.5)
+        self.assertEqual(result.feedback_probability, 1.0)
+        self.assertEqual(result.feedback_scale, 2.0)
+        self.assertEqual(result.clauses_feedback_applied, 4)
+        self.assertEqual(
+            machine.feedback,
+            [("I", 0), ("II", 1), ("I", 2), ("II", 3)],
+        )
+
     def test_residual_feedback_validates_controller_parameters(self) -> None:
         machine = FeedbackRecordingMachine()
         invalid_cases = (
@@ -272,6 +293,33 @@ class ScalarTMTests(unittest.TestCase):
                     "temperature": 1.0,
                     "learning_rate": 1.0,
                     "feedback_scale": True,
+                },
+                TypeError,
+            ),
+            (
+                {
+                    "target_probability": 0.5,
+                    "temperature": 1.0,
+                    "learning_rate": 1.0,
+                    "feedback_probability": -0.1,
+                },
+                ValueError,
+            ),
+            (
+                {
+                    "target_probability": 0.5,
+                    "temperature": 1.0,
+                    "learning_rate": 1.0,
+                    "feedback_probability": 1.1,
+                },
+                ValueError,
+            ),
+            (
+                {
+                    "target_probability": 0.5,
+                    "temperature": 1.0,
+                    "learning_rate": 1.0,
+                    "feedback_probability": True,
                 },
                 TypeError,
             ),

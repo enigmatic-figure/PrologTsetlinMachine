@@ -7,7 +7,7 @@ import argparse
 import copy
 from hashlib import sha256
 import json
-from math import exp, isfinite
+from math import exp, isfinite, log, log1p
 import os
 from pathlib import Path
 import pickle
@@ -24,8 +24,8 @@ from prolog_tsetlin.reference import ScalarBinaryTsetlinMachine, TMSnapshot
 from prolog_tsetlin.services._atomic import publish_bytes
 
 
-SCHEMA = "ptm.mnist-jit-distillation.v3"
-PLAN_SCHEMA = "ptm.mnist-jit-distillation-plan.v3"
+SCHEMA = "ptm.mnist-jit-distillation.v4"
+PLAN_SCHEMA = "ptm.mnist-jit-distillation-plan.v4"
 CLASS_COUNT = 10
 PIXEL_THRESHOLD = 0.3
 TEACHER_GATED_ARM = "D_teacher_gated_hard_residual"
@@ -34,7 +34,40 @@ ARM_NAMES = (
     "B_hard_residual",
     "C_teacher_residual",
     TEACHER_GATED_ARM,
+    "E_uniform_slowdown",
+    "F_normalized_linear",
+    "G_normalized_logarithmic",
+    "H_normalized_squared",
+    "I_protected_baseline_blend",
+    "J_student_only_priorities",
+    "K_shuffled_teacher_control",
+    "L_delayed_gradual_soft_targets",
+    "M_normalized_agreement",
+    "N_normalized_teacher_advantage",
 )
+NORMALIZED_MULTIPLICATIVE_ARMS = {
+    "F_normalized_linear",
+    "G_normalized_logarithmic",
+    "H_normalized_squared",
+    "J_student_only_priorities",
+    "K_shuffled_teacher_control",
+    "M_normalized_agreement",
+    "N_normalized_teacher_advantage",
+}
+NORMALIZED_ALLOCATION_ARMS = {"I_protected_baseline_blend"}
+NORMALIZED_ARMS = NORMALIZED_MULTIPLICATIVE_ARMS | NORMALIZED_ALLOCATION_ARMS
+TEACHER_DEPENDENT_ARMS = {
+    "C_teacher_residual",
+    TEACHER_GATED_ARM,
+    "F_normalized_linear",
+    "G_normalized_logarithmic",
+    "H_normalized_squared",
+    "I_protected_baseline_blend",
+    "K_shuffled_teacher_control",
+    "L_delayed_gradual_soft_targets",
+    "M_normalized_agreement",
+    "N_normalized_teacher_advantage",
+}
 
 
 def _file_digest(path: Path) -> str:
@@ -56,6 +89,24 @@ def _canonical_json(value: Mapping[str, object]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _git_identity(project: Path) -> dict[str, object]:
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return {"commit": revision, "tracked_worktree_dirty": bool(status.strip())}
 
 
 def _build_plan(
@@ -82,6 +133,9 @@ def _build_plan(
             "pta_audit_rows": args.pta_audit_rows,
             "skip_pta": args.skip_pta,
             "pixel_threshold": PIXEL_THRESHOLD,
+            "arms": list(ARM_NAMES),
+            "teacher_permutation_seed": args.seed ^ 0x5EED5EED,
+            "normalization_protocol": "pre_epoch_fixed_scores_per_bank",
         },
         "inputs": {
             "source": str(source),
@@ -95,6 +149,7 @@ def _build_plan(
             "torch": torch_version,
         },
         "code": {
+            "git": _git_identity(project),
             "runner_digest": _file_digest(Path(__file__).resolve()),
             "scout_digest": _file_digest(
                 Path(__file__).with_name("run_mnist_pta_scout.py")
@@ -475,6 +530,204 @@ def _teacher_disagreement_gate(
     return disagreement, floor + (1.0 - floor) * disagreement
 
 
+def _priority_weight(
+    arm: str,
+    *,
+    hard_residual: float,
+    disagreement: float,
+    hard_target: float,
+    teacher_probability: float,
+) -> float:
+    if arm == "F_normalized_linear":
+        priority = disagreement
+        return 0.1 + 0.9 * priority
+    if arm in {
+        "G_normalized_logarithmic",
+        "I_protected_baseline_blend",
+        "K_shuffled_teacher_control",
+    }:
+        priority = disagreement
+    elif arm == "H_normalized_squared":
+        priority = disagreement * disagreement
+        return 0.1 + 0.9 * priority
+    elif arm == "J_student_only_priorities":
+        priority = hard_residual
+    elif arm == "M_normalized_agreement":
+        priority = 1.0 - disagreement
+    elif arm == "N_normalized_teacher_advantage":
+        teacher_error = abs(hard_target - teacher_probability)
+        priority = max(0.0, hard_residual - teacher_error)
+    else:
+        raise ValueError(f"arm has no normalized priority: {arm}")
+    return 0.1 + 0.9 * log1p(9.0 * priority) / log(10.0)
+
+
+def _solve_clipped_scale(values: np.ndarray, target_sum: float) -> float:
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1 or not np.all(np.isfinite(values)) or np.any(values < 0.0):
+        raise ValueError("normalization values must be one finite nonnegative vector")
+    if not isfinite(target_sum) or target_sum < 0.0:
+        raise ValueError("normalization target must be finite and nonnegative")
+    if target_sum == 0.0:
+        return 0.0
+    capacity = int(np.count_nonzero(values > 0.0))
+    if target_sum > capacity + 1e-12:
+        raise ValueError("normalization target exceeds clipped probability capacity")
+
+    lower = 0.0
+    upper = 1.0
+    while float(np.minimum(1.0, upper * values).sum()) < target_sum:
+        upper *= 2.0
+    for _ in range(80):
+        middle = (lower + upper) / 2.0
+        if float(np.minimum(1.0, middle * values).sum()) < target_sum:
+            lower = middle
+        else:
+            upper = middle
+    return upper
+
+
+def _within_class_permutation(labels: np.ndarray, *, seed: int) -> np.ndarray:
+    labels = np.asarray(labels, dtype=np.int64)
+    rng = np.random.default_rng(seed)
+    permutation = np.arange(len(labels), dtype=np.int64)
+    for label in np.unique(labels):
+        positions = np.flatnonzero(labels == label)
+        permutation[positions] = rng.permutation(positions)
+    if not np.array_equal(labels, labels[permutation]):
+        raise RuntimeError("teacher permutation crossed ground-truth classes")
+    return permutation
+
+
+def _teacher_probability_for_arm(
+    arm: str,
+    teacher_probabilities: np.ndarray,
+    teacher_permutation: np.ndarray,
+    *,
+    source_index: int,
+    digit: int,
+) -> float:
+    teacher_index = (
+        int(teacher_permutation[source_index])
+        if arm == "K_shuffled_teacher_control"
+        else source_index
+    )
+    return float(teacher_probabilities[teacher_index, digit])
+
+
+def _delayed_teacher_alpha(epoch: int) -> float:
+    return min(0.5, 0.1 * max(0, epoch - 4))
+
+
+def _calibrate_policy(
+    arm: str,
+    machine: ScalarBinaryTsetlinMachine,
+    bank: Mapping[str, object],
+    *,
+    digit: int,
+    teacher_probabilities: np.ndarray,
+    teacher_permutation: np.ndarray,
+    temperature: float,
+    learning_rate: float,
+) -> dict[str, float]:
+    started = perf_counter()
+    rows = bank["rows"]
+    targets = bank["targets"]
+    indices = bank["indices"]
+    assert isinstance(rows, tuple) and isinstance(targets, tuple)
+    assert isinstance(indices, np.ndarray)
+    bases: list[float] = []
+    weights: list[float] = []
+    for row, hard_target, source_index in zip(rows, targets, indices):
+        hard_target_value = float(hard_target)
+        student_probability = _sigmoid_vote(
+            machine.raw_vote(row), temperature
+        )
+        hard_residual = abs(hard_target_value - student_probability)
+        base_probability = min(1.0, learning_rate * hard_residual)
+        teacher_probability = (
+            _teacher_probability_for_arm(
+                arm,
+                teacher_probabilities,
+                teacher_permutation,
+                source_index=int(source_index),
+                digit=digit,
+            )
+            if arm in TEACHER_DEPENDENT_ARMS
+            else 0.0
+        )
+        disagreement = abs(teacher_probability - student_probability)
+        bases.append(base_probability)
+        weights.append(
+            _priority_weight(
+                arm,
+                hard_residual=hard_residual,
+                disagreement=disagreement,
+                hard_target=hard_target_value,
+                teacher_probability=teacher_probability,
+            )
+        )
+    base_values = np.asarray(bases, dtype=np.float64)
+    weight_values = np.asarray(weights, dtype=np.float64)
+    target_sum = float(base_values.sum())
+    if arm in NORMALIZED_MULTIPLICATIVE_ARMS:
+        scale = _solve_clipped_scale(base_values * weight_values, target_sum)
+        calibrated = np.minimum(1.0, scale * base_values * weight_values)
+    elif arm in NORMALIZED_ALLOCATION_ARMS:
+        scale = _solve_clipped_scale(weight_values, target_sum)
+        allocation = np.minimum(1.0, scale * weight_values)
+        calibrated = 0.75 * base_values + 0.25 * allocation
+    else:
+        raise ValueError(f"arm is not normalized: {arm}")
+    probability_sum = float(calibrated.sum())
+    return {
+        "scale": scale,
+        "target_base_probability_sum": target_sum,
+        "calibrated_probability_sum": probability_sum,
+        "calibrated_budget_ratio": (
+            probability_sum / target_sum if target_sum > 0.0 else 1.0
+        ),
+        "seconds": perf_counter() - started,
+    }
+
+
+def _policy_feedback_probability(
+    arm: str,
+    *,
+    hard_base_probability: float,
+    hard_residual: float,
+    disagreement: float,
+    hard_target: float,
+    teacher_probability: float,
+    normalization_scale: float | None,
+    teacher_gate_floor: float = 0.1,
+) -> float | None:
+    if arm == TEACHER_GATED_ARM:
+        return hard_base_probability * (
+            teacher_gate_floor + (1.0 - teacher_gate_floor) * disagreement
+        )
+    if arm == "E_uniform_slowdown":
+        return 0.36 * hard_base_probability
+    if arm in NORMALIZED_ARMS:
+        if normalization_scale is None:
+            raise ValueError("normalized policy requires a calibration scale")
+        weight = _priority_weight(
+            arm,
+            hard_residual=hard_residual,
+            disagreement=disagreement,
+            hard_target=hard_target,
+            teacher_probability=teacher_probability,
+        )
+        if arm in NORMALIZED_MULTIPLICATIVE_ARMS:
+            return min(
+                1.0,
+                normalization_scale * hard_base_probability * weight,
+            )
+        allocation = min(1.0, normalization_scale * weight)
+        return 0.75 * hard_base_probability + 0.25 * allocation
+    return None
+
+
 def _write_json(path: Path, value: Mapping[str, object]) -> None:
     publish_bytes(
         path,
@@ -720,6 +973,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     teacher_test_predictions = np.argmax(test_logits, axis=1)
     teacher_report["annotation_seconds"] = annotation_seconds
     teacher_report["test_accuracy"] = float(np.mean(teacher_test_predictions == test_y))
+    teacher_permutation_seed = args.seed ^ 0x5EED5EED
+    teacher_permutation = _within_class_permutation(
+        train_y, seed=teacher_permutation_seed
+    )
+    teacher_permutation_digest = "sha256:" + sha256(
+        np.asarray(teacher_permutation, dtype="<i8").tobytes()
+    ).hexdigest()
 
     banks = [
         _prepare_bank(
@@ -779,56 +1039,145 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
 
     for epoch in range(2, args.epochs + 1):
+        b_probability_reference: dict[tuple[int, int], float] = {}
         for name, machines in arms.items():
             training_started = perf_counter()
-            gate_observations = 0
-            gate_disagreement_total = 0.0
-            gate_scale_total = 0.0
-            gate_base_probability_total = 0.0
-            gate_applied_probability_total = 0.0
+            telemetry = {
+                "observations": 0,
+                "controller_base_probability_sum": 0.0,
+                "hard_base_probability_sum": 0.0,
+                "applied_probability_sum": 0.0,
+                "independent_b_probability_sum": 0.0,
+                "disagreement_sum": 0.0,
+                "priority_weight_sum": 0.0,
+                "realized_clause_feedback_count": 0,
+                "policy_seconds": 0.0,
+                "update_seconds": 0.0,
+                "calibration_seconds": 0.0,
+                "calibration_target_sum": 0.0,
+                "calibration_probability_sum": 0.0,
+                "calibration_scales": [],
+            }
             for digit, (machine, bank) in enumerate(zip(machines, banks)):
                 rows = bank["rows"]
                 targets = bank["targets"]
                 indices = bank["indices"]
+                assert isinstance(rows, tuple) and isinstance(targets, tuple)
+                assert isinstance(indices, np.ndarray)
                 if name == "A_hard_margin":
                     machine.fit(rows, targets, epochs=1)
                     continue
-                for row, hard_target, source_index in zip(rows, targets, indices):
-                    target_probability = float(hard_target)
-                    teacher_probability = float(
-                        teacher_probabilities[int(source_index), digit]
+
+                normalization_scale = None
+                if name in NORMALIZED_ARMS:
+                    calibration = _calibrate_policy(
+                        name,
+                        machine,
+                        bank,
+                        digit=digit,
+                        teacher_probabilities=teacher_probabilities,
+                        teacher_permutation=teacher_permutation,
+                        temperature=args.student_temperature,
+                        learning_rate=args.residual_learning_rate,
                     )
+                    normalization_scale = calibration["scale"]
+                    telemetry["calibration_seconds"] += calibration["seconds"]
+                    telemetry["calibration_target_sum"] += calibration[
+                        "target_base_probability_sum"
+                    ]
+                    telemetry["calibration_probability_sum"] += calibration[
+                        "calibrated_probability_sum"
+                    ]
+                    telemetry["calibration_scales"].append(normalization_scale)
+
+                for row_position, (row, hard_target, source_index) in enumerate(
+                    zip(rows, targets, indices)
+                ):
+                    policy_started = perf_counter()
+                    hard_target_value = float(hard_target)
+                    student_probability = _sigmoid_vote(
+                        machine.raw_vote(row), args.student_temperature
+                    )
+                    hard_residual = abs(hard_target_value - student_probability)
+                    hard_base_probability = min(
+                        1.0, args.residual_learning_rate * hard_residual
+                    )
+                    teacher_probability = (
+                        _teacher_probability_for_arm(
+                            name,
+                            teacher_probabilities,
+                            teacher_permutation,
+                            source_index=int(source_index),
+                            digit=digit,
+                        )
+                        if name in TEACHER_DEPENDENT_ARMS
+                        else 0.0
+                    )
+                    disagreement = abs(teacher_probability - student_probability)
+                    target_probability = hard_target_value
                     if name == "C_teacher_residual":
-                        target_probability = 0.5 * target_probability + 0.5 * float(
-                            teacher_probability
+                        target_probability = (
+                            0.5 * hard_target_value + 0.5 * teacher_probability
                         )
-                    feedback_scale = 1.0
-                    disagreement = None
-                    if name == TEACHER_GATED_ARM:
-                        student_probability = _sigmoid_vote(
-                            machine.raw_vote(row), args.student_temperature
+                    elif name == "L_delayed_gradual_soft_targets":
+                        alpha = _delayed_teacher_alpha(epoch)
+                        target_probability = (
+                            (1.0 - alpha) * hard_target_value
+                            + alpha * teacher_probability
                         )
-                        disagreement, feedback_scale = _teacher_disagreement_gate(
-                            teacher_probability,
-                            student_probability,
-                            floor=args.teacher_gate_floor,
+                    feedback_probability = _policy_feedback_probability(
+                        name,
+                        hard_base_probability=hard_base_probability,
+                        hard_residual=hard_residual,
+                        disagreement=disagreement,
+                        hard_target=hard_target_value,
+                        teacher_probability=teacher_probability,
+                        normalization_scale=normalization_scale,
+                        teacher_gate_floor=args.teacher_gate_floor,
+                    )
+                    priority_weight = (
+                        _priority_weight(
+                            name,
+                            hard_residual=hard_residual,
+                            disagreement=disagreement,
+                            hard_target=hard_target_value,
+                            teacher_probability=teacher_probability,
                         )
+                        if name in NORMALIZED_ARMS
+                        else 0.0
+                    )
+                    telemetry["policy_seconds"] += perf_counter() - policy_started
+
+                    update_started = perf_counter()
                     update = machine.update_residual(
                         row,
                         target_probability,
                         temperature=args.student_temperature,
                         learning_rate=args.residual_learning_rate,
-                        feedback_scale=feedback_scale,
+                        feedback_probability=feedback_probability,
                     )
-                    if name == TEACHER_GATED_ARM:
-                        assert disagreement is not None
-                        gate_observations += 1
-                        gate_disagreement_total += disagreement
-                        gate_scale_total += feedback_scale
-                        gate_base_probability_total += (
-                            update.base_feedback_probability
-                        )
-                        gate_applied_probability_total += update.feedback_probability
+                    telemetry["update_seconds"] += perf_counter() - update_started
+                    reference_key = (digit, row_position)
+                    if name == "B_hard_residual":
+                        b_probability_reference[reference_key] = hard_base_probability
+                    elif reference_key not in b_probability_reference:
+                        raise RuntimeError("independent B budget was not recorded first")
+                    independent_b_probability = b_probability_reference[reference_key]
+
+                    telemetry["observations"] += 1
+                    telemetry["controller_base_probability_sum"] += (
+                        update.base_feedback_probability
+                    )
+                    telemetry["hard_base_probability_sum"] += hard_base_probability
+                    telemetry["applied_probability_sum"] += update.feedback_probability
+                    telemetry["independent_b_probability_sum"] += (
+                        independent_b_probability
+                    )
+                    telemetry["disagreement_sum"] += disagreement
+                    telemetry["priority_weight_sum"] += priority_weight
+                    telemetry["realized_clause_feedback_count"] += (
+                        update.clauses_feedback_applied
+                    )
             training_seconds = perf_counter() - training_started
             scores, evaluation_seconds = _score_collective(
                 machines, banks, validation_view_x
@@ -840,20 +1189,98 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "training_seconds": training_seconds,
                 "evaluation_seconds": evaluation_seconds,
             }
-            if name == TEACHER_GATED_ARM:
-                history_item["teacher_gate"] = {
-                    "observations": gate_observations,
-                    "mean_disagreement": (
-                        gate_disagreement_total / gate_observations
+            if name != "A_hard_margin":
+                observations = int(telemetry["observations"])
+                controller_base_sum = float(
+                    telemetry["controller_base_probability_sum"]
+                )
+                hard_base_sum = float(telemetry["hard_base_probability_sum"])
+                applied_sum = float(telemetry["applied_probability_sum"])
+                independent_b_sum = float(
+                    telemetry["independent_b_probability_sum"]
+                )
+                expected_clause_feedback = applied_sum * args.clauses
+                calibration_target = float(telemetry["calibration_target_sum"])
+                calibration_applied = float(
+                    telemetry["calibration_probability_sum"]
+                )
+                feedback = {
+                    "observations": observations,
+                    "controller_base_probability_sum": controller_base_sum,
+                    "hard_base_probability_sum": hard_base_sum,
+                    "applied_probability_sum": applied_sum,
+                    "independent_b_probability_sum": independent_b_sum,
+                    "mean_controller_base_probability": controller_base_sum
+                    / observations,
+                    "mean_hard_base_probability": hard_base_sum / observations,
+                    "mean_applied_probability": applied_sum / observations,
+                    "mean_independent_b_probability": independent_b_sum
+                    / observations,
+                    "mean_teacher_student_disagreement": (
+                        float(telemetry["disagreement_sum"]) / observations
+                        if name in TEACHER_DEPENDENT_ARMS
+                        else None
                     ),
-                    "mean_feedback_scale": gate_scale_total / gate_observations,
-                    "mean_base_feedback_probability": (
-                        gate_base_probability_total / gate_observations
+                    "mean_priority_weight": float(
+                        telemetry["priority_weight_sum"]
+                    )
+                    / observations,
+                    "applied_to_controller_base_ratio": (
+                        applied_sum / controller_base_sum
+                        if controller_base_sum > 0.0
+                        else 1.0
                     ),
-                    "mean_applied_feedback_probability": (
-                        gate_applied_probability_total / gate_observations
+                    "applied_to_current_hard_base_ratio": (
+                        applied_sum / hard_base_sum if hard_base_sum > 0.0 else 1.0
+                    ),
+                    "applied_to_independent_b_ratio": (
+                        applied_sum / independent_b_sum
+                        if independent_b_sum > 0.0
+                        else 1.0
+                    ),
+                    "realized_clause_feedback_count": int(
+                        telemetry["realized_clause_feedback_count"]
+                    ),
+                    "expected_clause_feedback_count": expected_clause_feedback,
+                    "realized_to_expected_clause_feedback_ratio": (
+                        int(telemetry["realized_clause_feedback_count"])
+                        / expected_clause_feedback
+                        if expected_clause_feedback > 0.0
+                        else 1.0
+                    ),
+                    "policy_seconds": float(telemetry["policy_seconds"]),
+                    "update_seconds": float(telemetry["update_seconds"]),
+                    "calibration_seconds": float(
+                        telemetry["calibration_seconds"]
                     ),
                 }
+                if name in NORMALIZED_ARMS:
+                    online_ratio = (
+                        applied_sum / hard_base_sum
+                        if hard_base_sum > 0.0
+                        else 1.0
+                    )
+                    scales = list(telemetry["calibration_scales"])
+                    feedback["normalization"] = {
+                        "protocol": "pre_epoch_fixed_scores_per_bank",
+                        "calibration_target_probability_sum": calibration_target,
+                        "calibration_applied_probability_sum": calibration_applied,
+                        "calibration_budget_ratio": (
+                            calibration_applied / calibration_target
+                            if calibration_target > 0.0
+                            else 1.0
+                        ),
+                        "minimum_scale": min(scales),
+                        "maximum_scale": max(scales),
+                        "mean_scale": sum(scales) / len(scales),
+                        "online_budget_ratio": online_ratio,
+                        "online_budget_within_5_percent": 0.95
+                        <= online_ratio
+                        <= 1.05,
+                    }
+                if name == "L_delayed_gradual_soft_targets":
+                    feedback["teacher_target_alpha"] = _delayed_teacher_alpha(epoch)
+                history_item["feedback"] = feedback
             histories[name].append(history_item)
             if metrics["accuracy"] > selected[name]["accuracy"]:
                 selected[name] = {
@@ -865,6 +1292,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"arm={name} epoch={epoch} validation_accuracy={metrics['accuracy']:.6f}",
                 flush=True,
             )
+
+    learning_progress: dict[str, dict[str, object]] = {}
+    for name, history in histories.items():
+        cumulative_seconds = 0.0
+        first_sixty = None
+        for item in history:
+            cumulative_seconds += float(item["training_seconds"]) + float(
+                item["evaluation_seconds"]
+            )
+            item["cumulative_student_plus_validation_seconds"] = cumulative_seconds
+            if first_sixty is None and float(item["validation_accuracy"]) >= 0.60:
+                first_sixty = {
+                    "epoch": int(item["epoch"]),
+                    "cumulative_student_plus_validation_seconds": cumulative_seconds,
+                }
+        learning_progress[name] = {
+            "first_validation_accuracy_at_least_0_60": first_sixty,
+            "final_epoch_validation_accuracy": history[-1]["validation_accuracy"],
+        }
 
     arm_metrics: dict[str, dict[str, object]] = {}
     vector_payload: dict[str, np.ndarray] = {"truth": test_y}
@@ -890,6 +1336,62 @@ def main(argv: Sequence[str] | None = None) -> int:
         clipped_probabilities = _sigmoid_scores(
             clipped_scores, args.student_temperature
         )
+        feedback_items = [
+            item["feedback"] for item in histories[name] if "feedback" in item
+        ]
+        feedback_summary = None
+        if feedback_items:
+            hard_base_sum = sum(
+                float(item["hard_base_probability_sum"])
+                for item in feedback_items
+            )
+            applied_sum = sum(
+                float(item["applied_probability_sum"]) for item in feedback_items
+            )
+            independent_b_sum = sum(
+                float(item["independent_b_probability_sum"])
+                for item in feedback_items
+            )
+            feedback_summary = {
+                "observations": sum(int(item["observations"]) for item in feedback_items),
+                "mean_hard_base_probability": hard_base_sum
+                / sum(int(item["observations"]) for item in feedback_items),
+                "mean_applied_probability": applied_sum
+                / sum(int(item["observations"]) for item in feedback_items),
+                "applied_to_current_hard_base_ratio": (
+                    applied_sum / hard_base_sum if hard_base_sum > 0.0 else 1.0
+                ),
+                "applied_to_independent_b_ratio": (
+                    applied_sum / independent_b_sum
+                    if independent_b_sum > 0.0
+                    else 1.0
+                ),
+                "realized_clause_feedback_count": sum(
+                    int(item["realized_clause_feedback_count"])
+                    for item in feedback_items
+                ),
+                "policy_seconds": sum(
+                    float(item["policy_seconds"]) for item in feedback_items
+                ),
+                "update_seconds": sum(
+                    float(item["update_seconds"]) for item in feedback_items
+                ),
+                "calibration_seconds": sum(
+                    float(item["calibration_seconds"]) for item in feedback_items
+                ),
+            }
+            if name in NORMALIZED_ARMS:
+                online_ratio = feedback_summary[
+                    "applied_to_current_hard_base_ratio"
+                ]
+                feedback_summary["online_budget_within_5_percent"] = (
+                    0.95 <= online_ratio <= 1.05
+                )
+                feedback_summary["budget_classification"] = (
+                    "budget-matched"
+                    if feedback_summary["online_budget_within_5_percent"]
+                    else "approximate/budget-mismatched"
+                )
         arm_metrics[name] = {
             **metrics,
             "selected_epoch": choice["epoch"],
@@ -903,6 +1405,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             "test_inference_seconds": inference_seconds,
             "test_examples_per_second": len(test_y) / inference_seconds,
+            "learning_progress": learning_progress[name],
+            "feedback_summary": feedback_summary,
             "teacher_top_one_agreement": float(
                 np.mean(predictions == teacher_test_predictions)
             ),
@@ -946,12 +1450,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             test_y, baseline_predictions, vector_payload[f"{name}_predictions"]
         )
     hard_residual_predictions = vector_payload["B_hard_residual_predictions"]
-    for name in ("C_teacher_residual", TEACHER_GATED_ARM):
+    for name in ARM_NAMES:
+        if name == "B_hard_residual":
+            continue
         arm_metrics[name]["paired_against_B"] = _paired(
             test_y,
             hard_residual_predictions,
             vector_payload[f"{name}_predictions"],
         )
+        arm_metrics[name]["test_accuracy_delta_vs_B"] = float(
+            arm_metrics[name]["accuracy"]
+        ) - float(arm_metrics["B_hard_residual"]["accuracy"])
     np.savez_compressed(output / "student_test_vectors.npz", **vector_payload)
 
     pta_summary = None
@@ -974,6 +1483,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     teacher_preparation_seconds = (
         teacher_report["training_seconds"] + annotation_seconds
     )
+    for name, metrics in arm_metrics.items():
+        standalone_student_seconds = (
+            common_training_seconds
+            + float(metrics["continuation_training_seconds"])
+            + float(metrics["validation_evaluation_seconds"])
+            + float(metrics["test_inference_seconds"])
+        )
+        teacher_cost = (
+            teacher_preparation_seconds if name in TEACHER_DEPENDENT_ARMS else 0.0
+        )
+        metrics["standalone_cost"] = {
+            "teacher_dependent": name in TEACHER_DEPENDENT_ARMS,
+            "teacher_preparation_seconds": teacher_cost,
+            "student_training_validation_and_test_seconds": standalone_student_seconds,
+            "end_to_end_seconds": standalone_student_seconds + teacher_cost,
+            "shared_campaign_teacher_cost_is_charged_once": True,
+        }
     student_component_seconds = common_training_seconds + sum(
         float(item["continuation_training_seconds"])
         + float(item["validation_evaluation_seconds"])
@@ -1016,6 +1542,47 @@ def main(argv: Sequence[str] | None = None) -> int:
             "student_sigmoid_temperature": args.student_temperature,
             "residual_learning_rate": args.residual_learning_rate,
             "teacher_target_mix": "0.5 one_hot + 0.5 teacher_softmax",
+            "arms": list(ARM_NAMES),
+            "policy_matrix": {
+                "A_hard_margin": "canonical hard-margin feedback",
+                "B_hard_residual": "hard targets; b=min(1,2*abs(y-p))",
+                "C_teacher_residual": "q=0.5*y+0.5*t; residual feedback",
+                TEACHER_GATED_ARM: "hard targets; b*w_linear(d)",
+                "E_uniform_slowdown": "hard targets; 0.36*b",
+                "F_normalized_linear": "hard targets; N(w_linear(d))",
+                "G_normalized_logarithmic": "hard targets; N(w_log(d))",
+                "H_normalized_squared": "hard targets; N(w_square(d))",
+                "I_protected_baseline_blend": (
+                    "hard targets; 0.75*b+0.25*R(w_log(d))"
+                ),
+                "J_student_only_priorities": "hard targets; N(w_log(e))",
+                "K_shuffled_teacher_control": (
+                    "G with fixed within-ground-truth-class teacher permutation"
+                ),
+                "L_delayed_gradual_soft_targets": (
+                    "B through epoch 4; residual q=(1-alpha)*y+alpha*t thereafter"
+                ),
+                "M_normalized_agreement": "hard targets; N(w_log(1-d))",
+                "N_normalized_teacher_advantage": (
+                    "hard targets; N(w_log(max(0,abs(y-p)-abs(y-t))))"
+                ),
+            },
+            "normalization": {
+                "calibration": (
+                    "once per bank at each epoch start from fixed pre-update scores"
+                ),
+                "online": (
+                    "hold scale fixed while recomputing current b and priorities"
+                ),
+                "clipping": "scalar solve accounts for min(1, scaled probability)",
+                "budget_flag": "online applied/current-hard ratio outside 0.95..1.05",
+            },
+            "shuffled_teacher_control": {
+                "seed": teacher_permutation_seed,
+                "permutation_digest": teacher_permutation_digest,
+                "scope": "fixed permutation within ground-truth training class",
+                "student_feedback_rng_is_separate": True,
+            },
             "teacher_feedback_gate": {
                 "arm": TEACHER_GATED_ARM,
                 "direction_and_target": "hard-label residual, identical to B",
@@ -1036,6 +1603,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "test_rows": len(test_y),
             "pta_audit_rows": args.pta_audit_rows,
             "pta_skipped": args.skip_pta,
+            "execution": {
+                "arm_concurrency": 1,
+                "student_execution": "sequential in ARM_NAMES order",
+                "torch_threads": int(torch.get_num_threads()),
+            },
         },
         "teacher": teacher_report,
         "common_checkpoint": {
