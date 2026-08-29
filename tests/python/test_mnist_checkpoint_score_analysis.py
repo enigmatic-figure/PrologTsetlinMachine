@@ -7,6 +7,9 @@ import sys
 import pytest
 
 
+np = pytest.importorskip("numpy")
+
+
 def _namespace(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     project = Path(__file__).resolve().parents[2]
     benchmark = project / "benchmarks" / "initial_capacity"
@@ -137,12 +140,12 @@ def test_exact_retained_vector_validation_rejects_same_accuracy_substitution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     validate = _namespace(monkeypatch)["_validate_retained_array"]
-    retained = {"arm_predictions": pytest.importorskip("numpy").asarray([0, 1, 0, 1])}
+    retained = {"arm_predictions": np.asarray([0, 1, 0, 1])}
 
-    validate(retained, "arm_predictions", pytest.importorskip("numpy").asarray([0, 1, 0, 1]))
+    validate(retained, "arm_predictions", np.asarray([0, 1, 0, 1]))
     with pytest.raises(RuntimeError, match="retained vector mismatch"):
         validate(
             retained,
             "arm_predictions",
-            pytest.importorskip("numpy").asarray([1, 0, 1, 0]),
+            np.asarray([1, 0, 1, 0]),
         )

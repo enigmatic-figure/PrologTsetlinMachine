@@ -118,6 +118,7 @@ jobs:
           tests/python/test_data_connectors.py
           tests/python/test_record_transforms.py
           tests/python/test_mnist_jit_distillation.py
+          tests/python/test_mnist_checkpoint_score_analysis.py
 
   documentation:
     name: Documentation / Python ${{ matrix.python }}
